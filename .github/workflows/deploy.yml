@@ -1,0 +1,78 @@
+name: Deploy to Digital Ocean
+
+on:
+  push:
+    branches: [ main ]
+    paths: 
+      - 'server/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup SSH key
+      uses: webfactory/ssh-agent@v0.8.0
+      with:
+        ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+    - name: Add server to known hosts
+      run: |
+        ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+
+    - name: Deploy to server
+      run: |
+        ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
+          set -e
+          
+          # Navigate to deployment directory
+          cd /opt/ecm-distributed || { echo "Deployment directory not found"; exit 1; }
+          
+          # Pull latest changes
+          git fetch origin
+          git reset --hard origin/main
+          
+          # Set executable permissions
+          chmod +x server/deploy.sh
+          
+          # Deploy
+          cd server
+          ./deploy.sh ${{ github.event.inputs.environment || 'production' }} ${{ secrets.DOMAIN_NAME }}
+        EOF
+
+    - name: Verify deployment
+      run: |
+        # Wait for deployment to complete
+        sleep 60
+        
+        # Check if API is responding
+        if curl -f https://${{ secrets.DOMAIN_NAME }}/health; then
+          echo "✅ Deployment successful - API is responding"
+        else
+          echo "❌ Deployment verification failed"
+          exit 1
+        fi
+
+    - name: Notify deployment status
+      if: always()
+      run: |
+        if [ "${{ job.status }}" == "success" ]; then
+          echo "🎉 Deployment to ${{ github.event.inputs.environment || 'production' }} successful!"
+          echo "🌐 Dashboard: https://${{ secrets.DOMAIN_NAME }}/api/v1/dashboard/"
+          echo "📚 API Docs: https://${{ secrets.DOMAIN_NAME }}/docs"
+        else
+          echo "❌ Deployment failed"
+        fi

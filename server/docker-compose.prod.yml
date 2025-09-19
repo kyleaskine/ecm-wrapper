@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: ecm_distributed
+      POSTGRES_USER: ecm_user
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - ecm_network
+    secrets:
+      - postgres_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ecm_user -d ecm_distributed"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://ecm_user:$(cat /run/secrets/postgres_password)@postgres:5432/ecm_distributed
+      SECRET_KEY_FILE: /run/secrets/api_secret_key
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - ecm_network
+    secrets:
+      - postgres_password
+      - api_secret_key
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=Host(`your-domain.com`)"
+      - "traefik.http.routers.api.tls.certresolver=letsencrypt"
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - api
+    networks:
+      - ecm_network
+    restart: unless-stopped
+
+networks:
+  ecm_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  api_secret_key:
+    file: ./secrets/api_secret_key.txt

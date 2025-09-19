@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      # Use external PostgreSQL - update these values for your droplet
+      DATABASE_URL: postgresql://ecm_user:your_password@host.docker.internal:5432/ecm_distributed
+      SECRET_KEY: dev-secret-key-change-in-production
+    network_mode: host  # Allows container to access localhost PostgreSQL
+    restart: unless-stopped
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"

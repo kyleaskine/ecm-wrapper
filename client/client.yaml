@@ -1,0 +1,33 @@
+api:
+  endpoint: http://localhost:8000/api/v1
+  retry_attempts: 3
+  timeout: 30
+client:
+  description: Ryzen 9 9800X3D - 8 cores
+  id: kyleaskine-pcv2
+execution:
+  mode: single
+  output_dir: data/outputs
+  save_raw_output: true
+logging:
+  file: data/logs/ecm_client.log
+  level: INFO
+programs:
+  gmp_ecm:
+    default_b1: 110000000
+    default_b2: 0
+    default_curves: 1
+    early_termination: true
+    gpu_curves: null
+    gpu_device: 0
+    gpu_enabled: true
+    path: /home/kylea/ecm-master/ecm
+    pm1_b1: 110000000
+    pm1_b2: 110000000000
+    pp1_b1: 110000000
+    pp1_b2: 110000000000
+    stage2_workers: 8
+  yafu:
+    default_b1: 50000
+    path: /home/kylea/yafu/yafu
+    threads: 8

@@ -1,0 +1,7 @@
+#!/bin/bash
+while IFS= read -r number <&3; do
+    echo "Starting ECM on: $number"
+    python3 ecm-wrapper.py -n "$number" --gpu -v --no-submit
+    echo "Completed: $number"
+    echo "---"
+done 3< data/numbers.txt
