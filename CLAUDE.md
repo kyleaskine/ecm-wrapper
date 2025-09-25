@@ -36,28 +36,41 @@ cd client/scripts/
 ```
 
 ### Server Development
+
+**Quick Start (Recommended)**
 ```bash
-# Install server dependencies
+cd server/
+
+# Start PostgreSQL (uses existing data volume)
+docker-compose -f docker-compose.dev.yml up -d postgres
+
+# Start API server
+source venv/bin/activate
+export DATABASE_URL="postgresql://ecm_user:ecm_password@localhost:5434/ecm_distributed"
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+**Setup Commands**
+```bash
+# Install server dependencies (first time only)
 cd server/
 pip install -r requirements.txt
-
-# Set up local database
-createdb ecm_distributed
-createuser ecm_user -P  # password: ecm_password
-
-# Run database migrations
-alembic upgrade head
-
-# Start development server
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-
-# Full system with Docker
-docker-compose up
 
 # Database operations
 alembic revision --autogenerate -m "Description"  # Create new migration
 alembic upgrade head                               # Apply migrations
 alembic downgrade -1                              # Rollback one migration
+```
+
+**Alternative Setup (Local PostgreSQL)**
+```bash
+# Set up local database on default port 5432
+createdb ecm_distributed
+createuser ecm_user -P  # password: ecm_password
+
+# Start with local PostgreSQL
+export DATABASE_URL="postgresql://ecm_user:ecm_password@localhost:5432/ecm_distributed"
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### Testing and Validation

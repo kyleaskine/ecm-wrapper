@@ -49,6 +49,10 @@ def create_ecm_parser() -> argparse.ArgumentParser:
     parser.add_argument('--resume-residues', type=str, help='Resume from existing residue file (skip stage 1)')
     parser.add_argument('--stage2-only', type=str, help='Run stage 2 only on residue file path')
 
+    # Factor handling
+    parser.add_argument('--continue-after-factor', action='store_true',
+                       help='Continue processing all curves even after finding a factor')
+
 
     return parser
 
@@ -95,13 +99,20 @@ def validate_ecm_args(args: argparse.Namespace, config: Optional[Dict[str, Any]]
         errors['mode'] = "Cannot use both --multiprocess and --two-stage. Choose one mode."
 
     
+    # Resume residues mode validation (check first, overrides other modes)
+    if args.resume_residues:
+        if args.composite:
+            errors['composite'] = "Resume residues mode - composite number not required (extracted from residue file)"
+        if not args.b2:
+            errors['b2'] = "Resume residues mode requires B2 bound. Use --b2 argument."
+
     # Stage 2 only mode validation
-    if args.stage2_only:
+    elif args.stage2_only:
         if args.composite:
             errors['composite'] = "Stage 2 only mode - composite number not required"
         if not args.b2:
             errors['b2'] = "Stage 2 only mode requires B2 bound. Use --b2 argument."
-    
+
     # Two-stage mode validation
     elif args.two_stage and args.method == 'ecm':
         if not args.composite:
@@ -129,8 +140,8 @@ def validate_ecm_args(args: argparse.Namespace, config: Optional[Dict[str, Any]]
             errors['composite'] = "Standard mode requires composite number. Use --composite argument."
         if args.two_stage and args.method != 'ecm':
             errors['method'] = "Two-stage mode only available for ECM method."
-        if args.save_residues or args.resume_residues:
-            errors['residues'] = "Residue options only available in two-stage mode."
+        if args.save_residues:
+            errors['residues'] = "Save residues option only available in two-stage mode."
     
     # GPU validation
     if args.gpu and args.no_gpu:

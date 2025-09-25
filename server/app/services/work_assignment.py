@@ -51,7 +51,7 @@ class ECMParameterDecision:
         # Calculate or update target t-level if not set
         if composite.target_t_level is None:
             target_t = self.t_level_calc.calculate_target_t_level(
-                composite.digit_length, composite.special_form
+                composite.digit_length, special_form=None  # No auto-detection for simplified system
             )
             composite.target_t_level = target_t
 
@@ -280,12 +280,7 @@ class WorkAssignmentService:
                                  preferred_methods: List[str]) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         """Determine the best method and parameters for this composite using t-level targeting."""
 
-        # Initialize/update special form detection if not set
-        if composite.special_form is None:
-            detected_form = self.param_engine.t_level_calc.detect_special_form(composite.number)
-            composite.special_form = detected_form
-            if detected_form:
-                logger.info(f"Detected special form '{detected_form}' for composite {composite.id}")
+        # No special form detection in simplified system - use standard ECM approach
 
         # Check if P-1 should be tried first
         if 'pm1' in preferred_methods and self.param_engine.should_try_pm1(composite.digit_length, previous_attempts):

@@ -94,9 +94,20 @@ async def submit_result(
                 if FactorService.verify_factorization(db, composite.id):
                     CompositeService.mark_fully_factored(db, composite.id)
         
+        # Update t-level if this was an ECM attempt
+        if request.method == 'ecm':
+            try:
+                CompositeService.update_t_level(db, composite.id)
+            except Exception as e:
+                # Log the error but don't fail the whole submission
+                # The ECM result is still valid even if t-level update fails
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Failed to update t-level for composite {composite.id}: {str(e)}")
+
         # Commit the entire transaction at the end
         db.commit()
-        
+
         return SubmitResultResponse(
             status="success",
             attempt_id=attempt.id,

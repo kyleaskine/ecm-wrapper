@@ -81,8 +81,10 @@ async def get_composite_stats(
     
     return CompositeStats(
         composite=comp.number,
-        bit_length=comp.bit_length,
         digit_length=comp.digit_length,
+        target_t_level=comp.target_t_level,
+        current_t_level=comp.current_t_level,
+        priority=comp.priority,
         status=status,
         factors_found=factors_list,
         ecm_work=ecm_work,

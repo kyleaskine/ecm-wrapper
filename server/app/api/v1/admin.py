@@ -165,6 +165,121 @@ async def get_composite_details(
     return details
 
 
+@router.get("/admin/composites/{composite_id}/details", response_class=HTMLResponse)
+async def get_composite_details_page(
+    composite_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Web page showing detailed information about a specific composite.
+    """
+    details = composite_manager.get_composite_details(db, composite_id)
+
+    if not details:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Composite not found"
+        )
+
+    composite = details['composite']
+    progress = details['progress']
+    recent_attempts = details['recent_attempts']
+    active_work = details['active_work']
+
+    # Format numbers for display
+    number_display = composite['number'][:50] + '...' if len(composite['number']) > 50 else composite['number']
+
+    # Format t-level progress
+    current_t = composite['current_t_level'] or 0.0
+    target_t = composite['target_t_level'] or 0.0
+    progress_percent = (current_t / target_t * 100) if target_t > 0 else 0.0
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Composite Details - {composite['id']}</title>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; margin: 40px; line-height: 1.6; }}
+            .container {{ max-width: 1200px; margin: 0 auto; }}
+            .header {{ background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 30px; }}
+            .card {{ background: white; border: 1px solid #dee2e6; border-radius: 8px; padding: 20px; margin-bottom: 20px; }}
+            .progress-bar {{ background: #e9ecef; height: 20px; border-radius: 10px; overflow: hidden; }}
+            .progress-fill {{ background: #28a745; height: 100%; transition: width 0.3s ease; }}
+            table {{ width: 100%; border-collapse: collapse; }}
+            th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #dee2e6; }}
+            th {{ background: #f8f9fa; font-weight: 600; }}
+            .btn {{ padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; }}
+            .btn-primary {{ background: #007bff; color: white; }}
+            .btn-secondary {{ background: #6c757d; color: white; }}
+            .number-display {{ font-family: monospace; word-break: break-all; font-size: 0.9em; }}
+            .status-badge {{ padding: 4px 8px; border-radius: 4px; font-size: 0.8em; font-weight: bold; }}
+            .status-complete {{ background: #d4edda; color: #155724; }}
+            .status-active {{ background: #fff3cd; color: #856404; }}
+            .status-pending {{ background: #f8d7da; color: #721c24; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>Composite Details</h1>
+                <p><a href="/api/v1/admin/dashboard" class="btn btn-secondary">← Back to Dashboard</a></p>
+            </div>
+
+            <div class="card">
+                <h2>Composite Information</h2>
+                <table>
+                    <tr><th>ID</th><td>{composite['id']}</td></tr>
+                    <tr><th>Number</th><td class="number-display">{composite['number']}</td></tr>
+                    <tr><th>Digit Length</th><td>{composite['digit_length']}</td></tr>
+                    <tr><th>Priority</th><td>{composite['priority']}</td></tr>
+                    <tr><th>Created</th><td>{composite['created_at']}</td></tr>
+                    <tr><th>Last Updated</th><td>{composite['updated_at']}</td></tr>
+                    <tr><th>Status</th><td>
+                        {'<span class="status-badge status-complete">Fully Factored</span>' if composite['is_fully_factored'] else '<span class="status-badge status-active">Active</span>'}
+                        {' <span class="status-badge status-complete">Prime</span>' if composite['is_prime'] else ''}
+                    </td></tr>
+                </table>
+            </div>
+
+            <div class="card">
+                <h2>T-Level Progress</h2>
+                <table>
+                    <tr><th>Current T-Level</th><td>t{current_t:.2f}</td></tr>
+                    <tr><th>Target T-Level</th><td>t{target_t:.2f}</td></tr>
+                    <tr><th>Progress</th><td>
+                        <div class="progress-bar">
+                            <div class="progress-fill" style="width: {min(progress_percent, 100):.1f}%"></div>
+                        </div>
+                        {progress_percent:.1f}% complete
+                    </td></tr>
+                </table>
+            </div>
+
+            <div class="card">
+                <h2>Work Summary</h2>
+                <table>
+                    <tr><th>Total Attempts</th><td>{progress['total_attempts']}</td></tr>
+                    <tr><th>Total ECM Curves</th><td>{progress['total_ecm_curves']:,}</td></tr>
+                    <tr><th>P-1 Attempts</th><td>{progress['pm1_attempts']}</td></tr>
+                    <tr><th>Factors Found</th><td>{len(progress['factors_found'])}</td></tr>
+                </table>
+            </div>
+
+            {'<div class="card"><h2>Active Work Assignments</h2><table><tr><th>Client ID</th><th>Method</th><th>B1</th><th>B2</th><th>Curves Requested</th><th>Status</th><th>Expires</th></tr>' + ''.join(f'<tr><td>{work["client_id"]}</td><td>{work["method"]}</td><td>{work["b1"]:,}</td><td>{work["b2"]:,}</td><td>{work["curves_requested"]}</td><td>{work["status"]}</td><td>{work["expires_at"]}</td></tr>' for work in active_work) + '</table></div>' if active_work else ''}
+
+            <div class="card">
+                <h2>Recent ECM Attempts</h2>
+                {'<table><tr><th>Method</th><th>B1</th><th>B2</th><th>Curves Completed</th><th>Factor Found</th><th>Client</th><th>Submitted</th></tr>' + ''.join(f'<tr><td>{attempt["method"]}</td><td>{attempt["b1"]:,}</td><td>{attempt["b2"]:,}</td><td>{attempt["curves_completed"]:,}</td><td>{attempt["factor_found"] or "None"}</td><td>{attempt["client_id"]}</td><td>{attempt["created_at"]}</td></tr>' for attempt in recent_attempts) + '</table>' if recent_attempts else '<p>No attempts yet.</p>'}
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+
 @router.put("/admin/composites/{composite_id}/priority")
 async def set_composite_priority(
     composite_id: int,
@@ -976,7 +1091,7 @@ async def admin_dashboard(db: Session = Depends(get_db)):
 
         <script>
             function viewDetails(compositeId) {
-                location.href = '/docs#/admin/get_composite_details_admin_composites__composite_id__get';
+                location.href = `/api/v1/admin/composites/${compositeId}/details`;
             }
 
             function removeComposite(compositeId) {

@@ -10,7 +10,7 @@ from pathlib import Path
 from ..models.composites import Composite
 from ..models.attempts import ECMAttempt
 from ..models.work_assignments import WorkAssignment
-from ..utils.number_utils import calculate_bit_length, calculate_digit_length, validate_integer
+from ..utils.number_utils import calculate_digit_length, validate_integer
 
 logger = logging.getLogger(__name__)
 
@@ -280,10 +280,13 @@ class CompositeManager:
                 'id': composite.id,
                 'number': composite.number,
                 'digit_length': composite.digit_length,
-                'bit_length': composite.bit_length,
+                'target_t_level': composite.target_t_level,
+                'current_t_level': composite.current_t_level,
+                'priority': composite.priority,
                 'is_prime': composite.is_prime,
                 'is_fully_factored': composite.is_fully_factored,
-                'created_at': composite.created_at
+                'created_at': composite.created_at,
+                'updated_at': composite.updated_at
             },
             'progress': {
                 'total_attempts': len(attempts),
@@ -297,6 +300,7 @@ class CompositeManager:
                     'client_id': work.client_id,
                     'method': work.method,
                     'b1': work.b1,
+                    'b2': work.b2,
                     'curves_requested': work.curves_requested,
                     'curves_completed': work.curves_completed,
                     'status': work.status,
@@ -309,6 +313,7 @@ class CompositeManager:
                     'id': attempt.id,
                     'method': attempt.method,
                     'b1': attempt.b1,
+                    'b2': attempt.b2,
                     'curves_completed': attempt.curves_completed,
                     'factor_found': attempt.factor_found,
                     'created_at': attempt.created_at,
@@ -378,12 +383,10 @@ class CompositeManager:
             return existing, False
 
         # Create new composite
-        bit_length = calculate_bit_length(number)
         digit_length = calculate_digit_length(number)
 
         composite = Composite(
             number=number,
-            bit_length=bit_length,
             digit_length=digit_length
         )
 

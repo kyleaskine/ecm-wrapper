@@ -35,18 +35,52 @@ FastAPI-based middleware for coordinating distributed ECM factorization work. Th
    - User Dashboard: http://localhost:8000/api/v1/dashboard/
    - Health Check: http://localhost:8000/health
 
-### Production Setup
+### Docker Development Setup
 
-1. **Environment variables:**
-   ```bash
-   export DATABASE_URL="postgresql://user:pass@host:5432/ecm_distributed"
-   export SECRET_KEY="your-secure-secret-key"
-   ```
+**Using Docker Compose (Recommended):**
 
-2. **Run with gunicorn:**
-   ```bash
-   gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker
-   ```
+```bash
+# Start with included PostgreSQL
+docker-compose up --build
+
+# Access interfaces
+# - API Documentation: http://localhost:8000/docs
+# - Admin Dashboard: http://localhost:8000/api/v1/admin/dashboard
+# - Health Check: http://localhost:8000/health
+```
+
+### Production Deployment
+
+#### Option 1: Docker with External PostgreSQL
+
+```bash
+# 1. Set up PostgreSQL database
+createdb ecm_distributed
+createuser ecm_user -P  # Set secure password
+
+# 2. Update docker-compose.yml with your database credentials
+DATABASE_URL: postgresql://ecm_user:your_password@localhost:5432/ecm_distributed
+
+# 3. Deploy
+docker-compose up -d --build
+```
+
+#### Option 2: Direct Installation
+
+```bash
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Set environment variables
+export DATABASE_URL="postgresql://user:pass@host:5432/ecm_distributed"
+export SECRET_KEY="your-secure-secret-key"
+
+# 3. Run migrations
+alembic upgrade head
+
+# 4. Start with gunicorn
+gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
+```
 
 ## API Endpoints
 

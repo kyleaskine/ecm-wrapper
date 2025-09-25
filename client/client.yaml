@@ -15,17 +15,17 @@ logging:
 programs:
   gmp_ecm:
     default_b1: 110000000
-    default_b2: 0
+    default_b2: 500000000000
     default_curves: 1
     early_termination: true
     gpu_curves: null
     gpu_device: 0
     gpu_enabled: true
     path: /home/kylea/ecm-master/ecm
-    pm1_b1: 110000000
-    pm1_b2: 110000000000
+    pm1_b1: 2900000000
+    pm1_b2: 1000000000000000
     pp1_b1: 110000000
-    pp1_b2: 110000000000
+    pp1_b2: 500000000000
     stage2_workers: 8
   yafu:
     default_b1: 50000

@@ -14,8 +14,10 @@ class ECMWorkSummary(BaseModel):
 
 class CompositeStats(BaseModel):
     composite: str = Field(..., description="The composite number")
-    bit_length: int = Field(..., description="Bit length")
     digit_length: int = Field(..., description="Decimal digit length")
+    target_t_level: Optional[float] = Field(..., description="Target t-level")
+    current_t_level: Optional[float] = Field(..., description="Current t-level achieved")
+    priority: int = Field(..., description="Priority level")
     status: Literal["composite", "prime", "fully_factored"] = Field(..., description="Current status")
     factors_found: List[str] = Field(default_factory=list, description="Known factors")
     ecm_work: ECMWorkSummary = Field(..., description="Summary of ECM work done")
@@ -24,8 +26,11 @@ class CompositeStats(BaseModel):
 class CompositeResponse(BaseModel):
     id: int
     number: str
-    bit_length: int
     digit_length: int
+    target_t_level: Optional[float]
+    current_t_level: Optional[float]
+    priority: int
     is_prime: Optional[bool]
     is_fully_factored: bool
     created_at: datetime
+    updated_at: datetime

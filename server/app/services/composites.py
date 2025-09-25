@@ -1,7 +1,9 @@
 from sqlalchemy.orm import Session
 from typing import Optional, Tuple
 from ..models.composites import Composite
+from ..models.attempts import ECMAttempt
 from ..utils.number_utils import calculate_digit_length, validate_integer
+from .t_level_calculator import TLevelCalculator
 
 class CompositeService:
     @staticmethod
@@ -69,3 +71,35 @@ class CompositeService:
         except Exception as e:
             db.rollback()
             raise ValueError(f"Failed to mark composite {composite_id} as prime: {str(e)}")
+
+    @staticmethod
+    def update_t_level(db: Session, composite_id: int) -> bool:
+        """
+        Recalculate and update the current t-level for a composite based on all ECM attempts.
+        Returns True if composite was found and updated, False otherwise.
+        """
+        try:
+            # Get the composite
+            composite = db.query(Composite).filter(Composite.id == composite_id).first()
+            if not composite:
+                return False
+
+            # Get all ECM attempts for this composite
+            ecm_attempts = db.query(ECMAttempt).filter(
+                ECMAttempt.composite_id == composite_id,
+                ECMAttempt.method == 'ecm'
+            ).all()
+
+            # Calculate current t-level using the t-level calculator
+            calculator = TLevelCalculator()
+            current_t_level = calculator.get_current_t_level_from_attempts(ecm_attempts)
+
+            # Update the composite
+            composite.current_t_level = current_t_level
+            db.commit()
+
+            return True
+
+        except Exception as e:
+            db.rollback()
+            raise ValueError(f"Failed to update t-level for composite {composite_id}: {str(e)}")
