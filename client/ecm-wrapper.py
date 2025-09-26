@@ -226,16 +226,36 @@ class ECMWrapper(BaseWrapper):
                 stdout = '\n'.join(output_lines)
                 results['raw_outputs'].append(stdout)
 
-                # Parse output for factors using shared utilities
-                factor, factor_sigma = parse_ecm_output(stdout)
-                if factor:
+                # Parse output for factors using multiple factor parsing
+                all_factors = parse_ecm_output_multiple(stdout)
+                if all_factors:
                     # Use precise curve count from output parsing
                     actual_curves = count_ecm_steps_completed(stdout)
-                    results['factor_found'] = factor
                     results['curves_completed'] = curves_completed + actual_curves
-                    self.logger.info(f"Factor found after {results['curves_completed']} curves: {factor}")
+
+                    # Handle all factors found
                     program_name = f"GMP-ECM ({method.upper()})" + (" with GPU" if use_gpu else "")
-                    self.log_factor_found(composite, factor, b1, b2, curves, method=method, sigma=factor_sigma, program=program_name)
+
+                    # Deduplicate factors - same factor can be found by multiple curves
+                    unique_factors = {}
+                    for factor, sigma in all_factors:
+                        if factor not in unique_factors:
+                            unique_factors[factor] = sigma  # Keep first sigma found
+
+                    # Log each unique factor once
+                    for factor, sigma in unique_factors.items():
+                        self.log_factor_found(composite, factor, b1, b2, curves, method=method, sigma=sigma, program=program_name)
+
+                    # Store all unique factors for API submission
+                    if 'factors_found' not in results:
+                        results['factors_found'] = []
+                    results['factors_found'].extend(unique_factors.keys())
+
+                    # Set the main factor for compatibility (use first factor found)
+                    main_factor = list(unique_factors.keys())[0]
+                    results['factor_found'] = main_factor
+                    self.logger.info(f"Factors found after {results['curves_completed']} curves: {list(unique_factors.keys())}")
+
                     if not continue_after_factor:
                         break
                     else:
@@ -251,11 +271,15 @@ class ECMWrapper(BaseWrapper):
         
         results['execution_time'] = time.time() - start_time
         results['raw_output'] = '\n'.join(results['raw_outputs'])
-        
+
+        # Final deduplication of factors found across all batches
+        if 'factors_found' in results and results['factors_found']:
+            results['factors_found'] = list(dict.fromkeys(results['factors_found']))  # Preserve order while deduplicating
+
         # Save raw output if configured
         if self.config['execution']['save_raw_output']:
             self.save_raw_output(results, f'gmp-ecm-{method}')
-        
+
         return results
     
     def run_ecm_two_stage(self, composite: str, b1: int, b2: Optional[int] = None,
@@ -322,7 +346,7 @@ class ECMWrapper(BaseWrapper):
                 stage1_success, stage1_factor, actual_curves, stage1_output, all_stage1_factors = self._run_stage1(
                     composite, b1, curves, residue_file, use_gpu, verbose, gpu_device, gpu_curves
                 )
-                
+
                 if stage1_factor:
                     # Log ALL unique factors found in Stage 1
                     if all_stage1_factors:
@@ -339,6 +363,7 @@ class ECMWrapper(BaseWrapper):
                         # Store all unique factors for API submission
                         results['factors_found'] = list(unique_factors.keys())
                         results['factor_found'] = stage1_factor  # Keep for compatibility
+
                     else:
                         # Fallback to single factor logging
                         self.log_factor_found(composite, stage1_factor, b1, b2, curves, method="ecm", sigma=None, program="GMP-ECM (ECM)")
@@ -461,7 +486,7 @@ class ECMWrapper(BaseWrapper):
             output = '\n'.join(output_lines)
             all_factors = parse_ecm_output_multiple(output)
             factor = all_factors[-1][0] if all_factors else None  # Use last factor for consistency
-            
+
             # Extract actual curve count from GPU output
             actual_curves = curves  # fallback to requested
             curve_match = re.search(r'\((\d+) curves\)', output)
