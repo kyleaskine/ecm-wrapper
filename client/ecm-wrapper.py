@@ -2,7 +2,6 @@
 import subprocess
 import argparse
 import time
-import re
 import sys
 import threading
 import tempfile
@@ -12,7 +11,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from base_wrapper import BaseWrapper
-from parsing_utils import parse_ecm_output, parse_ecm_output_multiple, count_ecm_steps_completed, Timeouts
+from parsing_utils import parse_ecm_output, parse_ecm_output_multiple, count_ecm_steps_completed, Timeouts, ECMPatterns
 
 def _run_worker_ecm_process(worker_id: int, composite: str, b1: int, b2: Optional[int],
                            curves: int, verbose: bool, method: str, ecm_path: str,
@@ -81,8 +80,8 @@ def _run_worker_ecm_process(worker_id: int, composite: str, b1: int, b2: Optiona
                     curves_completed += 1
                 
                 # Collect sigma values from curve output
-                # Match both formats: "sigma=1:xxxx" and "-sigma 3:xxxx" 
-                sigma_match = re.search(r'sigma=([1-3]:\d+)', line) or re.search(r'-sigma (3:\d+|\d+)', line)
+                # Match both formats: "sigma=1:xxxx" and "-sigma 3:xxxx"
+                sigma_match = ECMPatterns.SIGMA_COLON_FORMAT.search(line) or ECMPatterns.SIGMA_DASH_FORMAT.search(line)
                 if sigma_match:
                     sigma_val = sigma_match.group(1)
                     if sigma_val not in sigma_values:
@@ -490,7 +489,7 @@ class ECMWrapper(BaseWrapper):
 
             # Extract actual curve count from GPU output
             actual_curves = curves  # fallback to requested
-            curve_match = re.search(r'\((\d+) curves\)', output)
+            curve_match = ECMPatterns.CURVE_COUNT.search(output)
             if curve_match:
                 actual_curves = int(curve_match.group(1))
                 self.logger.info(f"Stage 1 actually completed {actual_curves} curves")
@@ -980,7 +979,7 @@ class ECMWrapper(BaseWrapper):
                 first_line = f.readline().strip()
                 if first_line:
                     # Look for N=... in the structured residue format
-                    match = re.search(r'N=(\d+)', first_line)
+                    match = ECMPatterns.RESUME_N_PATTERN.search(first_line)
                     if match:
                         return match.group(1)
         except Exception as e:
@@ -1012,7 +1011,7 @@ class ECMWrapper(BaseWrapper):
                 first_line = f.readline().strip()
                 if first_line:
                     # Look for B1=... in the structured residue format
-                    match = re.search(r'B1=(\d+)', first_line)
+                    match = ECMPatterns.RESUME_B1_PATTERN.search(first_line)
                     if match:
                         return int(match.group(1))
         except Exception as e:
@@ -1033,12 +1032,12 @@ class ECMWrapper(BaseWrapper):
                     line = line.strip()
                     if line and line.startswith('METHOD=ECM'):
                         # Extract sigma from this residue line
-                        sigma_match = re.search(r'SIGMA=(\d+)', line)
+                        sigma_match = ECMPatterns.RESUME_SIGMA_PATTERN.search(line)
                         if sigma_match:
                             sigma = sigma_match.group(1)
-                            
+
                             # Extract N from this line to verify it matches
-                            n_match = re.search(r'N=(\d+)', line)
+                            n_match = ECMPatterns.RESUME_N_PATTERN.search(line)
                             if n_match:
                                 n = int(n_match.group(1))
                                 

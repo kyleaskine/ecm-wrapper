@@ -42,6 +42,27 @@ class ECMPatterns:
     # Alternative curve completion patterns
     CURVE_COMPLETED_ALT = re.compile(r'ECM: Step 2 took (\d+)ms')
 
+    # Sigma extraction patterns (used in ecm-wrapper.py line-by-line parsing)
+    SIGMA_COLON_FORMAT = re.compile(r'sigma=([1-3]:\d+)')
+    SIGMA_DASH_FORMAT = re.compile(r'-sigma (3:\d+|\d+)')
+
+    # Curve count extraction from GPU output
+    CURVE_COUNT = re.compile(r'\((\d+) curves\)')
+
+    # Resume file parsing patterns
+    RESUME_N_PATTERN = re.compile(r'N=(\d+)')
+    RESUME_B1_PATTERN = re.compile(r'B1=(\d+)')
+    RESUME_SIGMA_PATTERN = re.compile(r'SIGMA=(\d+)')
+
+    # Version detection
+    GMP_ECM_VERSION = re.compile(r'GMP-ECM (\d+\.\d+(?:\.\d+)?)')
+
+    # Dynamic GPU factor search pattern generator
+    @staticmethod
+    def gpu_factor_search_pattern(factor):
+        """Generate compiled pattern for specific factor GPU search."""
+        return re.compile(rf'GPU: factor {re.escape(factor)} found in Step \d+ with curve \d+(?: \(-sigma 3:(\d+)\))?')
+
 
 class YAFUPatterns:
     """Compiled regex patterns for YAFU output parsing."""
@@ -67,6 +88,12 @@ class YAFUPatterns:
     # Simple number lines (fallback)
     SIMPLE_NUMBER = re.compile(r'^\s*(\d+)\s*$')
 
+    # Version detection
+    YAFU_VERSION = re.compile(r'YAFU Version (\d+\.\d+(?:\.\d+)?)')
+
+    # Sigma extraction for YAFU
+    SIGMA_USING_FORMAT = re.compile(r'Using.*?sigma=(?:3:)?(\d+)')
+
 
 def parse_ecm_output_multiple(output: str) -> List[Tuple[str, Optional[str]]]:
     """
@@ -85,7 +112,7 @@ def parse_ecm_output_multiple(output: str) -> List[Tuple[str, Optional[str]]]:
         for factor in prime_matches:
             # For prime factors, we need to find the corresponding sigma
             # Look for the GPU line that mentions this factor
-            gpu_match = re.search(rf'GPU: factor {factor} found in Step \d+ with curve \d+(?: \(-sigma 3:(\d+)\))?', output)
+            gpu_match = ECMPatterns.gpu_factor_search_pattern(factor).search(output)
             sigma = f"3:{gpu_match.group(1)}" if gpu_match and gpu_match.group(1) else None
             factors.append((factor, sigma))
         return factors
@@ -142,7 +169,7 @@ def parse_ecm_output(output: str) -> Tuple[Optional[str], Optional[str]]:
         # Search backwards for the most recent "Using ... sigma=" line
         sigma = None
         for line in reversed(lines):
-            sigma_match = re.search(r'Using.*?sigma=(?:3:)?(\d+)', line)
+            sigma_match = YAFUPatterns.SIGMA_USING_FORMAT.search(line)
             if sigma_match:
                 sigma = f"3:{sigma_match.group(1)}"
                 break
@@ -389,10 +416,10 @@ def extract_program_version(output: str, program_type: str) -> str:
         Version string or 'unknown'
     """
     if program_type == 'ecm':
-        match = re.search(r'GMP-ECM (\d+\.\d+(?:\.\d+)?)', output)
+        match = ECMPatterns.GMP_ECM_VERSION.search(output)
         return match.group(1) if match else "unknown"
     elif program_type == 'yafu':
-        match = re.search(r'YAFU Version (\d+\.\d+(?:\.\d+)?)', output)
+        match = YAFUPatterns.YAFU_VERSION.search(output)
         return match.group(1) if match else "unknown"
     else:
         return "unknown"
