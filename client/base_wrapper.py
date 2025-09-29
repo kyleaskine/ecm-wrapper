@@ -125,10 +125,10 @@ class BaseWrapper:
         url = f"{self.api_endpoint}/submit_result"
         retry_count = self.config['api']['retry_attempts']
         
-        # Debug: Log the payload being sent
-        self.logger.debug(f"Submitting payload: {json.dumps(payload, indent=2)}")
-        print(f"\n🔍 DEBUG: About to submit to {url}")
-        print(f"🔍 DEBUG: Payload: {json.dumps(payload, indent=2)}\n")
+        # Log submission attempt (only in debug mode)
+        if self.logger.isEnabledFor(logging.DEBUG):
+            self.logger.debug(f"Submitting to {url}")
+            self.logger.debug(f"Payload: {json.dumps(payload, indent=2)}")
         
         for attempt in range(retry_count):
             try:

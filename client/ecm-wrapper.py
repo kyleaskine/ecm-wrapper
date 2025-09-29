@@ -138,29 +138,28 @@ class ECMWrapper(BaseWrapper):
         """Run GMP-ECM or P-1 and capture output"""
         ecm_path = self.config['programs']['gmp_ecm']['path']
         
-        # Build command
-        cmd = [ecm_path]
-        
+        # Build command base (without -c parameter, which will be added per batch)
+        cmd_base = [ecm_path]
+
         # Add method-specific parameters
         if method == "pm1":
-            cmd.append('-pm1')
+            cmd_base.append('-pm1')
         elif method == "pp1":
-            cmd.append('-pp1')
+            cmd_base.append('-pp1')
         # Default is ECM, no flag needed
-        
+
         if use_gpu and method == "ecm":  # GPU only works with ECM
-            cmd.append('-gpu')
+            cmd_base.append('-gpu')
             if gpu_device is not None:
-                cmd.extend(['-gpudevice', str(gpu_device)])
+                cmd_base.extend(['-gpudevice', str(gpu_device)])
             if gpu_curves is not None:
-                cmd.extend(['-gpucurves', str(gpu_curves)])
+                cmd_base.extend(['-gpucurves', str(gpu_curves)])
         if verbose:
-            cmd.append('-v')
+            cmd_base.append('-v')
         if sigma and method == "ecm":  # Sigma only applies to ECM
-            cmd.extend(['-sigma', str(sigma)])
-        cmd.append(str(b1))
-        if b2 is not None:
-            cmd.append(str(b2))
+            cmd_base.extend(['-sigma', str(sigma)])
+
+        # B1 and B2 will be added after -c parameter
         
         method_name = method.upper() if method != "ecm" else "ECM"
         self.logger.info(f"Running {method_name} on {len(composite)}-digit number with B1={b1}, curves={curves}")
@@ -185,8 +184,10 @@ class ECMWrapper(BaseWrapper):
         while curves_completed < curves and not results['factor_found']:
             curves_this_batch = min(batch_size, curves - curves_completed)
 
-            # Modify command for batch execution
-            batch_cmd = cmd + ['-c', str(curves_this_batch)]
+            # Build proper command: ecm [options] -c curves B1 [B2]
+            batch_cmd = cmd_base + ['-c', str(curves_this_batch), str(b1)]
+            if b2 is not None:
+                batch_cmd.append(str(b2))
 
             try:
                 process = subprocess.Popen(
@@ -959,7 +960,7 @@ class ECMWrapper(BaseWrapper):
             'stage2_workers': stage2_workers,
             'factor_found': factor_found,
             'execution_time': execution_time,
-            'method': 'ecm-stage2-only',
+            'method': 'ecm',
             'raw_output': ''  # Stage 2 only doesn't have single raw output
         }
         
