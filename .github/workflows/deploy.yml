@@ -45,17 +45,19 @@ jobs:
           if [ ! -d "$DEPLOY_DIR" ]; then
             echo "📁 Creating deployment directory at $DEPLOY_DIR..."
             mkdir -p $DEPLOY_DIR
-            cd $DEPLOY_DIR
-            git clone https://github.com/${{ github.repository }}.git .
-          else
-            echo "📂 Deployment directory exists at $DEPLOY_DIR"
-            cd $DEPLOY_DIR
           fi
 
-          # Pull latest changes
-          echo "📥 Pulling latest changes..."
-          git fetch origin
-          git reset --hard origin/main
+          cd $DEPLOY_DIR
+
+          # Check if it's a git repository, if not initialize it
+          if [ ! -d ".git" ]; then
+            echo "🔧 Initializing git repository..."
+            git clone git@github.com:${{ github.repository }}.git .
+          else
+            echo "📥 Pulling latest changes..."
+            git fetch origin
+            git reset --hard origin/main
+          fi
 
           # Create secrets directory
           mkdir -p server/secrets
