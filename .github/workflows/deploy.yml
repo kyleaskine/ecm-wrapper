@@ -27,27 +27,29 @@ jobs:
     - name: Setup SSH key
       uses: webfactory/ssh-agent@v0.8.0
       with:
-        ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+        ssh-private-key: ${{ secrets.DROPLET_SSH_KEY }}
 
     - name: Add server to known hosts
       run: |
-        ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+        ssh-keyscan -H ${{ secrets.DROPLET_HOST }} >> ~/.ssh/known_hosts
 
     - name: Deploy to server
       run: |
-        ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} bash << 'ENDSSH'
+        ssh ${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }} bash << 'ENDSSH'
           set -e
 
           # Create deployment directory if it doesn't exist
-          if [ ! -d "/opt/ecm-distributed" ]; then
-            echo "📁 Creating deployment directory..."
-            sudo mkdir -p /opt/ecm-distributed
-            sudo chown $USER:$USER /opt/ecm-distributed
-            cd /opt/ecm-distributed
+          # Use /home/deploy instead of /opt to avoid sudo
+          DEPLOY_DIR="$HOME/ecm-distributed"
+
+          if [ ! -d "$DEPLOY_DIR" ]; then
+            echo "📁 Creating deployment directory at $DEPLOY_DIR..."
+            mkdir -p $DEPLOY_DIR
+            cd $DEPLOY_DIR
             git clone https://github.com/${{ github.repository }}.git .
           else
-            echo "📂 Deployment directory exists"
-            cd /opt/ecm-distributed
+            echo "📂 Deployment directory exists at $DEPLOY_DIR"
+            cd $DEPLOY_DIR
           fi
 
           # Pull latest changes
@@ -77,9 +79,9 @@ jobs:
       run: |
         # Wait for deployment to complete
         sleep 60
-        
-        # Check if API is responding
-        if curl -f https://${{ secrets.DOMAIN_NAME }}/health; then
+
+        # Check if API is responding (try HTTPS first, fallback to HTTP)
+        if curl -f https://${{ secrets.DOMAIN_NAME }}/health 2>/dev/null || curl -f http://${{ secrets.DROPLET_HOST }}/health 2>/dev/null; then
           echo "✅ Deployment successful - API is responding"
         else
           echo "❌ Deployment verification failed"

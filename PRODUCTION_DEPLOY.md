@@ -8,13 +8,15 @@ Configure these secrets in your GitHub repository (Settings → Secrets and vari
 
 | Secret Name | Description | How to Generate |
 |-------------|-------------|-----------------|
-| `DEPLOY_SSH_KEY` | SSH private key for server access | `ssh-keygen -t ed25519 -C "github-actions"` |
-| `SERVER_HOST` | Server IP or hostname | Your Digital Ocean droplet IP |
-| `SERVER_USER` | SSH username | Usually `root` or your username |
+| `DROPLET_SSH_KEY` | SSH private key for server access | Already configured (reused from other projects) |
+| `DROPLET_HOST` | Server IP or hostname | Already configured (Your Digital Ocean droplet IP) |
+| `DROPLET_USER` | SSH username | Already configured (Usually `deploy` or `root`) |
 | `DOMAIN_NAME` | Your production domain | e.g., `ecm.example.com` |
 | `POSTGRES_PASSWORD` | Database password | `openssl rand -hex 32` |
 | `API_SECRET_KEY` | API cryptographic key | `openssl rand -hex 64` |
 | `ADMIN_API_KEY` | Admin dashboard access key | `openssl rand -hex 32` |
+
+**Note:** The first 3 secrets (`DROPLET_*`) are already configured if you have other projects deploying to the same Digital Ocean droplet.
 
 ### 2. Server Setup
 
@@ -26,17 +28,22 @@ Your GitHub Action will automatically:
 
 **Manual server prerequisites:**
 ```bash
-# Install Docker and Docker Compose
+# Install Docker and Docker Compose (if not already installed)
 curl -fsSL https://get.docker.com -o get-docker.sh
 sudo sh get-docker.sh
-sudo usermod -aG docker $USER
+
+# Give deploy user Docker permissions (IMPORTANT!)
+sudo usermod -aG docker deploy
 
 # Install Docker Compose
 sudo apt-get update
 sudo apt-get install docker-compose-plugin
 
-# Add your SSH public key to server
-ssh-copy-id user@your-server
+# Log out and back in for group changes to take effect
+# OR run: newgrp docker
+
+# Verify deploy user can run Docker
+docker ps
 ```
 
 ### 3. DNS Configuration
@@ -57,8 +64,8 @@ A Record: www → YOUR_SERVER_IP
 **Option B: Let's Encrypt (Recommended for Production)**
 After first deployment with self-signed certs:
 ```bash
-ssh user@server
-cd /opt/ecm-distributed/server
+ssh deploy@server
+cd ~/ecm-distributed/server
 
 # Install certbot
 sudo apt-get install certbot
@@ -132,8 +139,8 @@ open https://YOUR_DOMAIN/api/v1/admin/login
 ### 3. Check Logs
 
 ```bash
-ssh user@server
-cd /opt/ecm-distributed/server
+ssh deploy@server
+cd ~/ecm-distributed/server
 docker-compose -f docker-compose.prod.yml logs -f api
 ```
 
@@ -158,7 +165,7 @@ app/config.py reads from secret files
 ### Files in Production
 
 ```
-/opt/ecm-distributed/
+~/ecm-distributed/  (in deploy user's home directory)
 ├── server/
 │   ├── secrets/                        # Created by GitHub Actions
 │   │   ├── postgres_password.txt       # From POSTGRES_PASSWORD secret
@@ -205,8 +212,8 @@ echo "YOUR_PUBLIC_KEY" >> ~/.ssh/authorized_keys
 
 Verify secrets are written correctly:
 ```bash
-ssh user@server
-cd /opt/ecm-distributed/server/secrets
+ssh deploy@server
+cd ~/ecm-distributed/server/secrets
 ls -la
 cat postgres_password.txt  # Should show the password
 ```
