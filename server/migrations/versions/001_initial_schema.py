@@ -20,10 +20,10 @@ def upgrade():
     # Create projects table
     op.create_table('projects',
     sa.Column('id', sa.Integer(), nullable=False),
-    sa.Column('name', sa.String(), nullable=False),
+    sa.Column('name', sa.String(255), nullable=False),
     sa.Column('description', sa.Text(), nullable=True),
-    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('name')
     )
@@ -55,15 +55,16 @@ def upgrade():
 
     # Create clients table
     op.create_table('clients',
-    sa.Column('id', sa.Integer(), nullable=False),
-    sa.Column('client_id', sa.String(), nullable=False),
-    sa.Column('ip_address', sa.String(), nullable=True),
-    sa.Column('last_seen', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
-    sa.Column('total_curves_submitted', sa.Integer(), nullable=False),
-    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
-    sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('client_id')
+    sa.Column('id', sa.String(255), nullable=False),
+    sa.Column('machine_name', sa.String(255), nullable=True),
+    sa.Column('cpu_cores', sa.Integer(), nullable=True),
+    sa.Column('memory_gb', sa.Integer(), nullable=True),
+    sa.Column('avg_curves_per_hour', sa.Float(), nullable=True),
+    sa.Column('last_seen', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+    sa.Column('status', sa.String(20), nullable=False),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+    sa.PrimaryKeyConstraint('id')
     )
 
     # Create ecm_attempts table
@@ -106,39 +107,70 @@ def upgrade():
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('composite_id', sa.Integer(), nullable=False),
     sa.Column('factor', sa.Text(), nullable=False),
-    sa.Column('discovery_method', sa.String(), nullable=True),
-    sa.Column('discovered_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
-    sa.Column('discovered_by', sa.String(), nullable=True),
+    sa.Column('is_prime', sa.Boolean(), nullable=True),
+    sa.Column('found_by_attempt_id', sa.Integer(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
+    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
     sa.ForeignKeyConstraint(['composite_id'], ['composites.id'], ),
-    sa.PrimaryKeyConstraint('id')
+    sa.ForeignKeyConstraint(['found_by_attempt_id'], ['ecm_attempts.id'], ),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('composite_id', 'factor', name='unique_composite_factor')
     )
     op.create_index('ix_factors_composite_id', 'factors', ['composite_id'], unique=False)
 
+    # Create project_composites junction table
+    op.create_table('project_composites',
+    sa.Column('project_id', sa.Integer(), nullable=False),
+    sa.Column('composite_id', sa.Integer(), nullable=False),
+    sa.Column('priority', sa.Integer(), nullable=False),
+    sa.Column('added_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+    sa.ForeignKeyConstraint(['project_id'], ['projects.id'], ),
+    sa.ForeignKeyConstraint(['composite_id'], ['composites.id'], ),
+    sa.PrimaryKeyConstraint('project_id', 'composite_id')
+    )
+
     # Create work_assignments table
     op.create_table('work_assignments',
-    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('id', sa.String(64), nullable=False),
     sa.Column('composite_id', sa.Integer(), nullable=False),
-    sa.Column('client_id', sa.String(), nullable=False),
+    sa.Column('client_id', sa.String(255), nullable=False),
+    sa.Column('method', sa.String(50), nullable=False),
     sa.Column('b1', sa.BigInteger(), nullable=False),
     sa.Column('b2', sa.BigInteger(), nullable=True),
-    sa.Column('curves', sa.Integer(), nullable=False),
-    sa.Column('assigned_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
+    sa.Column('curves_requested', sa.Integer(), nullable=False),
+    sa.Column('status', sa.String(20), nullable=False),
+    sa.Column('priority', sa.Integer(), nullable=False),
+    sa.Column('assigned_at', sa.DateTime(), nullable=False),
+    sa.Column('claimed_at', sa.DateTime(), nullable=True),
     sa.Column('expires_at', sa.DateTime(), nullable=False),
-    sa.Column('status', sa.String(), nullable=False),
     sa.Column('completed_at', sa.DateTime(), nullable=True),
+    sa.Column('curves_completed', sa.Integer(), nullable=False),
+    sa.Column('progress_message', sa.Text(), nullable=True),
+    sa.Column('last_progress_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
     sa.ForeignKeyConstraint(['composite_id'], ['composites.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index('ix_work_assignments_client_id', 'work_assignments', ['client_id'], unique=False)
     op.create_index('ix_work_assignments_composite_id', 'work_assignments', ['composite_id'], unique=False)
-    op.create_index('ix_work_assignments_status', 'work_assignments', ['status'], unique=False)
+    op.create_index('ix_work_assignments_priority', 'work_assignments', ['priority'], unique=False)
+    op.create_index('ix_work_assignments_client_status', 'work_assignments', ['client_id', 'status'], unique=False)
+    op.create_index('ix_work_assignments_status_priority', 'work_assignments', ['status', 'priority'], unique=False)
+    op.create_index('ix_work_assignments_expires_at', 'work_assignments', ['expires_at'], unique=False)
+    op.create_index('ix_work_assignments_composite_method', 'work_assignments', ['composite_id', 'method'], unique=False)
 
 
 def downgrade():
-    op.drop_index('ix_work_assignments_status', table_name='work_assignments')
+    op.drop_index('ix_work_assignments_composite_method', table_name='work_assignments')
+    op.drop_index('ix_work_assignments_expires_at', table_name='work_assignments')
+    op.drop_index('ix_work_assignments_status_priority', table_name='work_assignments')
+    op.drop_index('ix_work_assignments_client_status', table_name='work_assignments')
+    op.drop_index('ix_work_assignments_priority', table_name='work_assignments')
     op.drop_index('ix_work_assignments_composite_id', table_name='work_assignments')
     op.drop_index('ix_work_assignments_client_id', table_name='work_assignments')
     op.drop_table('work_assignments')
+    op.drop_table('project_composites')
     op.drop_index('ix_factors_composite_id', table_name='factors')
     op.drop_table('factors')
     op.drop_index('ix_ecm_attempts_work_hash', table_name='ecm_attempts')
