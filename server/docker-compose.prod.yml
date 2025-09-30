@@ -7,6 +7,8 @@ services:
       POSTGRES_DB: ecm_distributed
       POSTGRES_USER: ecm_user
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    ports:
+      - "5434:5432"  # Expose on host port 5434 (5432=existing PG, 5433=your tunnel)
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
