@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+
+{% block title %}ECM Admin Login{% endblock %}
+
+{% block bg_color %}linear-gradient(135deg, #667eea 0%, #764ba2 100%){% endblock %}
+{% block body_margin %}0{% endblock %}
+
+{% block extra_styles %}
+.login-box {
+    background: white;
+    padding: 40px;
+    border-radius: 10px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    max-width: 400px;
+    width: 100%;
+}
+h1 {
+    margin-top: 0;
+    color: #667eea;
+}
+input {
+    width: 100%;
+    padding: 12px;
+    margin: 10px 0;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    box-sizing: border-box;
+    font-size: 14px;
+}
+button {
+    width: 100%;
+    padding: 12px;
+    background: #667eea;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 16px;
+    font-weight: bold;
+}
+button:hover {
+    background: #5a67d8;
+}
+.error {
+    color: #dc3545;
+    margin-top: 10px;
+    display: none;
+}
+body {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+}
+{% endblock %}
+
+{% block body %}
+<div class="login-box">
+    <h1>🔧 ECM Admin Login</h1>
+    <p>Enter your admin API key to access the dashboard.</p>
+    <form id="loginForm">
+        <input type="password" id="apiKey" placeholder="Admin API Key" required autofocus>
+        <button type="submit">Login</button>
+        <div class="error" id="error">Invalid API key. Please try again.</div>
+    </form>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const apiKey = document.getElementById('apiKey').value;
+        const errorDiv = document.getElementById('error');
+        errorDiv.style.display = 'none';
+
+        // Test the API key by making a request
+        try {
+            const response = await fetch('/api/v1/admin/stats/summary', {
+                headers: {
+                    'X-Admin-Key': apiKey
+                }
+            });
+
+            if (response.ok) {
+                // Valid key - store and redirect with key in custom header
+                sessionStorage.setItem('admin_api_key', apiKey);
+
+                // Create a form that will send the request with the header via fetch
+                // Then navigate once we know it will work
+                const dashResponse = await fetch('/api/v1/admin/dashboard', {
+                    headers: {
+                        'X-Admin-Key': apiKey
+                    }
+                });
+
+                if (dashResponse.ok) {
+                    // Store the HTML and navigate
+                    const html = await dashResponse.text();
+                    document.open();
+                    document.write(html);
+                    document.close();
+                    // Update URL without reload
+                    history.pushState(null, '', '/api/v1/admin/dashboard');
+                } else {
+                    errorDiv.style.display = 'block';
+                }
+            } else {
+                // Invalid key
+                errorDiv.style.display = 'block';
+            }
+        } catch (error) {
+            errorDiv.textContent = 'Error connecting to server.';
+            errorDiv.style.display = 'block';
+        }
+    });
+
+    // If already logged in, try to load dashboard
+    const storedKey = sessionStorage.getItem('admin_api_key');
+    if (storedKey) {
+        fetch('/api/v1/admin/dashboard', {
+            headers: {
+                'X-Admin-Key': storedKey
+            }
+        }).then(response => {
+            if (response.ok) {
+                return response.text();
+            } else {
+                // Key invalid, stay on login page
+                sessionStorage.removeItem('admin_api_key');
+                throw new Error('Invalid key');
+            }
+        }).then(html => {
+            document.open();
+            document.write(html);
+            document.close();
+            history.pushState(null, '', '/api/v1/admin/dashboard');
+        }).catch(() => {
+            // Stay on login page
+        });
+    }
+</script>
+{% endblock %}

@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+
+{% block title %}Composite Details - {{ composite.id }}{% endblock %}
+
+{% block body %}
+<div class="container">
+    <div style="margin-bottom: 20px;">
+        <a href="/api/v1/dashboard/" class="btn btn-secondary">← Back to Dashboard</a>
+    </div>
+
+    <div class="header">
+        <h1>Composite Details</h1>
+        <p style="margin: 10px 0 5px 0;"><strong>ID:</strong> {{ composite.id }} | <strong>{{ composite.digit_length }} digits</strong></p>
+        <p style="margin: 5px 0; font-family: monospace; font-size: 0.85em; word-break: break-all; background: rgba(255,255,255,0.2); padding: 10px; border-radius: 5px;">
+            {{ esc(composite.current_composite) }}
+        </p>
+    </div>
+
+    <div class="card">
+        <h2>Composite Information</h2>
+        <table>
+            <tr><th>ID</th><td>{{ composite.id }}</td></tr>
+            <tr><th>Original Form</th><td class="number-display">{{ esc(composite.number) }}</td></tr>
+            <tr><th>Current Composite</th><td class="number-display">
+                {% if composite.current_composite|length > 100 %}
+                {{ composite.current_composite[:100] }}...
+                {% else %}
+                {{ composite.current_composite }}
+                {% endif %}
+            </td></tr>
+            <tr><th>Digit Length</th><td>{{ composite.digit_length }}</td></tr>
+            <tr><th>SNFS Possible</th><td>
+                {% if composite.has_snfs_form %}
+                <span class="status-badge status-complete">Yes</span>
+                {% else %}
+                <span class="status-badge">No</span>
+                {% endif %}
+            </td></tr>
+            <tr><th>GNFS Equivalent</th><td>
+                {{ composite.snfs_difficulty if composite.snfs_difficulty else 'N/A' }}
+            </td></tr>
+            <tr><th>Priority</th><td>{{ composite.priority }}</td></tr>
+            <tr><th>Created</th><td>{{ esc(composite.created_at) }}</td></tr>
+            <tr><th>Last Updated</th><td>{{ esc(composite.updated_at) }}</td></tr>
+            <tr><th>Status</th><td>
+                {% if composite.is_fully_factored %}
+                <span class="status-badge status-complete">Fully Factored</span>
+                {% else %}
+                <span class="status-badge status-active">Active</span>
+                {% endif %}
+                {% if composite.is_prime %}
+                <span class="status-badge status-complete">Prime</span>
+                {% endif %}
+            </td></tr>
+        </table>
+    </div>
+
+    {% set t_data = calc_t_progress(composite.current_t_level, composite.target_t_level) %}
+    <div class="card">
+        <h2>T-Level Progress</h2>
+        <table>
+            <tr><th>Current T-Level</th><td>t{{ t_data.current_t|round(2) }}</td></tr>
+            <tr><th>Target T-Level</th><td>t{{ t_data.target_t|round(2) }}</td></tr>
+            <tr><th>Progress</th><td>
+                <div class="progress-bar-container">
+                    <div class="progress-fill" style="width: {{ [t_data.progress_pct, 100]|min|round(1) }}%">
+                        {{ t_data.progress_pct|round(1) }}%
+                    </div>
+                </div>
+            </td></tr>
+        </table>
+    </div>
+
+    <div class="card">
+        <h2>Work Summary</h2>
+        <table>
+            <tr><th>Total Attempts</th><td>{{ progress.total_attempts }}</td></tr>
+            <tr><th>Total ECM Curves</th><td>{{ "{:,}".format(progress.total_ecm_curves) }}</td></tr>
+            <tr><th>P-1 Attempts</th><td>{{ progress.pm1_attempts }}</td></tr>
+            <tr><th>Factors Found</th><td>{{ progress.factors_found|length }}</td></tr>
+        </table>
+        {% if progress.factors_found %}
+        <p style="margin-top: 15px;">
+            <strong>Factors:</strong>
+            {% for f in progress.factors_found %}
+            <code>{{ esc(f) }}</code>{% if not loop.last %}, {% endif %}
+            {% endfor %}
+        </p>
+        {% endif %}
+    </div>
+
+    {% if active_work %}
+    <div class="card">
+        <h2>Active Work Assignments</h2>
+        <table>
+            <tr>
+                <th>Client ID</th>
+                <th>Method</th>
+                <th>B1</th>
+                <th>B2</th>
+                <th>Curves Requested</th>
+                <th>Status</th>
+                <th>Expires</th>
+            </tr>
+            {% for work in active_work %}
+            <tr>
+                <td>{{ esc(work.client_id) }}</td>
+                <td>{{ esc(work.method) }}</td>
+                <td>{{ "{:,}".format(work.b1) }}</td>
+                <td>{{ "{:,}".format(work.b2) }}</td>
+                <td>{{ work.curves_requested }}</td>
+                <td>{{ esc(work.status) }}</td>
+                <td>{{ esc(work.expires_at) }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
+    {% endif %}
+
+    <div class="card">
+        <h2>Recent ECM Attempts</h2>
+        {% if recent_attempts %}
+        <table>
+            <tr>
+                <th>Method</th>
+                <th>B1</th>
+                <th>B2</th>
+                <th>Curves Completed</th>
+                <th>Factor Found</th>
+                <th>Client</th>
+                <th>Submitted</th>
+            </tr>
+            {% for attempt in recent_attempts %}
+            <tr>
+                <td>{{ esc(attempt.method) }}</td>
+                <td>{{ "{:,}".format(attempt.b1) }}</td>
+                <td>{{ "{:,}".format(attempt.b2) }}</td>
+                <td>{{ "{:,}".format(attempt.curves_completed) }}</td>
+                <td class="number-display">{{ esc(attempt.factor_found) if attempt.factor_found else "None" }}</td>
+                <td>{{ esc(attempt.client_id) }}</td>
+                <td>{{ esc(attempt.created_at) }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+        {% else %}
+        <p>No attempts yet.</p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

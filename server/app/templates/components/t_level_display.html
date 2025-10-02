@@ -1,0 +1,13 @@
+{# T-level progress display component #}
+{% if target_t > 0 %}
+<div style="display: flex; align-items: center; gap: 8px;">
+    <div class="progress">
+        <div class="progress-bar" style="width: {{ [progress_pct, 100]|min }}%; background-color: {{ progress_color }};"></div>
+    </div>
+    <span style="font-size: 0.85em; font-weight: bold; color: {{ progress_color }};">
+        t{{ current_t|round(1) }} / t{{ target_t|round(1) }}
+    </span>
+</div>
+{% else %}
+<span style="color: #999;">N/A</span>
+{% endif %}

@@ -1,0 +1,238 @@
+{% extends "base.html" %}
+
+{% block title %}ECM Distributed Factorization Dashboard{% endblock %}
+
+{% block extra_head %}
+<script>
+    // Search function for composites table
+    function searchTable() {
+        const input = document.getElementById('searchInput');
+        const filter = input.value.toLowerCase();
+        const table = document.getElementById('compositesTable');
+        const rows = table.getElementsByTagName('tr');
+
+        // Loop through all table rows (skip header row)
+        for (let i = 1; i < rows.length; i++) {
+            const row = rows[i];
+            const cells = row.getElementsByTagName('td');
+            let found = false;
+
+            // Search in number column (first column)
+            if (cells.length > 0) {
+                const numberText = cells[0].textContent || cells[0].innerText;
+                if (numberText.toLowerCase().indexOf(filter) > -1) {
+                    found = true;
+                }
+            }
+
+            // Show/hide row based on search
+            if (found || filter === '') {
+                row.style.display = '';
+            } else {
+                row.style.display = 'none';
+            }
+        }
+    }
+
+    // Auto-refresh every 30 seconds
+    setTimeout(function() {
+        window.location.reload();
+    }, 30000);
+</script>
+{% endblock %}
+
+{% block body %}
+<h1>ECM Distributed Factorization Dashboard</h1>
+
+<div class="stats-grid" style="margin-bottom: 30px;">
+    <div class="stat-card">
+        <div class="stat-number">{{ total_composites }}</div>
+        <div class="stat-label">Total Composites</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-number">{{ total_attempts }}</div>
+        <div class="stat-label">Total Attempts</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-number">{{ total_factors }}</div>
+        <div class="stat-label">Factors Found</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-number">{{ fully_factored }}</div>
+        <div class="stat-label">Fully Factored</div>
+    </div>
+</div>
+
+<div class="section">
+    <div class="section-header">Recent Composites</div>
+    <div class="section-content">
+        <div class="search-box">
+            <input type="text" id="searchInput" placeholder="Search by number or composite..." onkeyup="searchTable()">
+        </div>
+        <table id="compositesTable">
+            <thead>
+                <tr>
+                    <th>Number</th>
+                    <th>Digit Length</th>
+                    <th>Status</th>
+                    <th>T-Level Progress</th>
+                    <th>Attempts</th>
+                    <th>Factors</th>
+                    <th>Added</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for comp in composites %}
+                {% set attempt_count = db.query(ECMAttempt).filter(ECMAttempt.composite_id == comp.id).count() %}
+                {% set comp_factors = db.query(Factor).filter(Factor.composite_id == comp.id).all() %}
+                {% set t_data = calc_t_progress(comp.current_t_level, comp.target_t_level) %}
+                <tr>
+                    <td class="number">
+                        {% if comp.number|length > 50 %}
+                        {{ comp.number[:50] }}...
+                        {% else %}
+                        {{ comp.number }}
+                        {% endif %}
+                    </td>
+                    <td>{{ comp.digit_length }}</td>
+                    <td>
+                        {% if comp.is_prime %}
+                        <span class="success">Prime</span>
+                        {% elif comp.is_fully_factored %}
+                        <span class="success">Fully Factored</span>
+                        {% else %}
+                        <span class="pending">Composite</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if t_data.target_t > 0 %}
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <div class="progress">
+                                <div class="progress-bar" style="width: {{ [t_data.progress_pct, 100]|min }}%; background-color: {{ t_data.progress_color }};"></div>
+                            </div>
+                            <span style="font-size: 0.85em; font-weight: bold; color: {{ t_data.progress_color }};">
+                                t{{ t_data.current_t|round(1) }} / t{{ t_data.target_t|round(1) }}
+                            </span>
+                        </div>
+                        {% else %}
+                        <span style="color: #999;">N/A</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ attempt_count }}</td>
+                    <td>
+                        {% if comp_factors %}
+                        {{ format_factors(comp_factors)|safe }}
+                        {% else %}
+                        None
+                        {% endif %}
+                    </td>
+                    <td class="small-text">{{ comp.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                    <td><a href="/api/v1/dashboard/composites/{{ comp.id }}/details" class="btn">Details</a></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="section">
+    <div class="section-header">Recent Factorization Attempts</div>
+    <div class="section-content">
+        <table>
+            <thead>
+                <tr>
+                    <th>Composite</th>
+                    <th>T-Level Progress</th>
+                    <th>Method</th>
+                    <th>B1</th>
+                    <th>Curves</th>
+                    <th>Factor Found</th>
+                    <th>Client</th>
+                    <th>Time</th>
+                    <th>Submitted</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for attempt in attempts %}
+                {% set comp = db.query(Composite).filter(Composite.id == attempt.composite_id).first() %}
+                {% set comp_display = (comp.number[:30] + '...') if (comp and comp.number|length > 30) else (comp.number if comp else 'Unknown') %}
+                {% set t_data = calc_t_progress(comp.current_t_level, comp.target_t_level) if comp else None %}
+                <tr>
+                    <td class="number">
+                        {% if comp %}
+                        <a href="/api/v1/dashboard/composites/{{ comp.id }}/details" style="color: inherit; text-decoration: none;">
+                            {{ comp_display }}
+                        </a>
+                        {% else %}
+                        {{ comp_display }}
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if t_data and t_data.target_t > 0 %}
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <div class="progress" style="width: 80px;">
+                                <div class="progress-bar" style="width: {{ [t_data.progress_pct, 100]|min }}%; background-color: {{ t_data.progress_color }};"></div>
+                            </div>
+                            <span style="font-size: 0.85em; font-weight: bold; color: {{ t_data.progress_color }};">
+                                t{{ t_data.current_t|round(1) }}/t{{ t_data.target_t|round(1) }}
+                            </span>
+                        </div>
+                        {% else %}
+                        <span style="color: #999;">N/A</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ attempt.method }}</td>
+                    <td>{{ attempt.b1 if attempt.b1 else 'N/A' }}</td>
+                    <td>{{ attempt.curves_completed }}</td>
+                    <td>
+                        {% if attempt.factor_found %}
+                        <span class="factor">{{ attempt.factor_found }}</span>
+                        {% else %}
+                        None
+                        {% endif %}
+                    </td>
+                    <td class="small-text">{{ attempt.client_id if attempt.client_id else 'Unknown' }}</td>
+                    <td>{{ attempt.execution_time_seconds|round(1) }}s</td>
+                    <td class="small-text">{{ attempt.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="section">
+    <div class="section-header">All Factors Found</div>
+    <div class="section-content">
+        <table>
+            <thead>
+                <tr>
+                    <th>Factor</th>
+                    <th>Composite</th>
+                    <th>Discovery Method</th>
+                    <th>Discovered</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for factor in factors %}
+                {% set comp = db.query(Composite).filter(Composite.id == factor.composite_id).first() %}
+                {% set attempt = db.query(ECMAttempt).filter(ECMAttempt.id == factor.found_by_attempt_id).first() %}
+                {% set comp_display = (comp.number[:40] + '...') if (comp and comp.number|length > 40) else (comp.number if comp else 'Unknown') %}
+                {% set method = attempt.method if attempt else 'Unknown' %}
+                <tr>
+                    <td class="factor number">{{ factor.factor }}</td>
+                    <td class="number">{{ comp_display }}</td>
+                    <td>{{ method }}</td>
+                    <td class="small-text">{{ factor.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="small-text" style="margin-top: 20px;">
+    <p>Dashboard auto-refreshes every 30 seconds. API Documentation: <a href="/docs">/docs</a></p>
+</div>
+{% endblock %}

@@ -1,0 +1,403 @@
+{% extends "base.html" %}
+
+{% block title %}ECM Admin Dashboard{% endblock %}
+
+{% block extra_head %}
+<script>
+    // Check if API key exists, redirect to login if not
+    const API_KEY = sessionStorage.getItem('admin_api_key');
+    if (!API_KEY) {
+        window.location.href = '/api/v1/admin/login';
+    }
+
+    // Add API key to all fetch requests
+    function fetchWithAuth(url, options = {}) {
+        options.headers = options.headers || {};
+        options.headers['X-Admin-Key'] = sessionStorage.getItem('admin_api_key');
+        return fetch(url, options).then(response => {
+            if (response.status === 401) {
+                sessionStorage.removeItem('admin_api_key');
+                window.location.href = '/api/v1/admin/login';
+                throw new Error('Unauthorized');
+            }
+            return response;
+        });
+    }
+
+    // Logout function
+    function logout() {
+        sessionStorage.removeItem('admin_api_key');
+        window.location.href = '/api/v1/admin/login';
+    }
+</script>
+{% endblock %}
+
+{% block body %}
+<div class="header">
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div>
+            <h1>🔧 ECM Coordination Dashboard</h1>
+            <p>Distributed ECM coordination middleware - work assignment and t-level progress tracking</p>
+        </div>
+        <button onclick="logout()" class="btn" style="background: #dc3545;">Logout</button>
+    </div>
+</div>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-number">{{ summary_stats.overview.total_composites }}</div>
+        <div class="stat-label">Total Composites</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-number">{{ summary_stats.overview.active_work_assignments }}</div>
+        <div class="stat-label">Active Work</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-number">{{ summary_stats.overview.active_clients }}</div>
+        <div class="stat-label">Active Clients</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-number">{{ summary_stats.health.work_queue_utilization }}%</div>
+        <div class="stat-label">Queue Utilization</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-number">{{ summary_stats.t_level_targeting.composites_with_targets }}</div>
+        <div class="stat-label">T-Level Targets Set</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-number">{{ summary_stats.health.t_level_coverage }}%</div>
+        <div class="stat-label">T-Level Coverage</div>
+    </div>
+</div>
+
+<div class="section">
+    <div class="section-header">📊 ECM Progress Overview</div>
+    <div class="section-content">
+        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+            <div>
+                <strong>Work Queue Status:</strong>
+                {% set queue_util = summary_stats.health.work_queue_utilization %}
+                <span class="{{ get_health_class(queue_util, 50, 0) }}">{{ queue_util }}% utilized</span>
+            </div>
+            <div>
+                <strong>T-Level Coverage:</strong>
+                {% set coverage = summary_stats.health.t_level_coverage %}
+                <span class="{{ get_health_class(coverage) }}">{{ coverage }}%</span>
+            </div>
+            <div>
+                <strong>Recent Activity (24h):</strong>
+                {{ summary_stats.recent_activity_24h.new_attempts }} attempts, {{ summary_stats.recent_activity_24h.factors_found }} factors
+            </div>
+        </div>
+
+        <div style="background: #f8f9fa; padding: 15px; border-radius: 5px;">
+            <h4 style="margin-top: 0;">⚡ ECM Coordination Status</h4>
+            <p style="margin: 0; color: #666;">
+                This system coordinates distributed ECM work across clients, tracking t-level progress and managing the work queue.
+                Projects can submit numbers with target t-levels and receive factorization results.
+            </p>
+        </div>
+    </div>
+</div>
+
+<div class="section">
+    <div class="section-header">⚡ Active Work Assignments</div>
+    <div class="section-content">
+        {% if recent_work %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Work ID</th>
+                    <th>Client</th>
+                    <th>Composite (digits)</th>
+                    <th>T-Level Target</th>
+                    <th>Method</th>
+                    <th>Parameters</th>
+                    <th>Progress</th>
+                    <th>Status</th>
+                    <th>Expires</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for work in recent_work %}
+                {% set progress_pct = (work.curves_completed / work.curves_requested * 100) if work.curves_requested > 0 else 0 %}
+                {% set status_class = format_work_status(work.status) %}
+                {% set composite_display = work.composite.number[:20] + '...' if work.composite.number|length > 20 else work.composite.number %}
+                {% set time_str = format_time(work.expires_at, now) %}
+                {% set current_t = work.composite.current_t_level or 0.0 %}
+                {% set target_t = work.composite.target_t_level or 0.0 %}
+                <tr>
+                    <td><span class="number">{{ work.id[:8] }}...</span></td>
+                    <td>{{ esc(work.client_id) }}</td>
+                    <td><span class="number">{{ esc(composite_display) }}</span> ({{ work.composite.digit_length }})</td>
+                    <td>
+                        <span style="font-size: 0.9em;">📊 t{{ current_t|round(1) }}→t{{ target_t|round(1) }}</span>
+                    </td>
+                    <td>{{ esc(work.method.upper()) }}</td>
+                    <td>B1={{ "{:,}".format(work.b1) }}{% if work.b2 %}, B2={{ "{:,}".format(work.b2) }}{% endif %}</td>
+                    <td>
+                        <div class="progress">
+                            <div class="progress-bar" style="width: {{ progress_pct }}%;"></div>
+                        </div>
+                        {{ work.curves_completed }}/{{ work.curves_requested }}
+                    </td>
+                    <td><span class="{{ status_class }}">{{ esc(work.status) }}</span></td>
+                    <td>{{ esc(time_str) }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p>No active work assignments</p>
+        {% endif %}
+    </div>
+</div>
+
+<div class="section">
+    <div class="section-header">📋 Composite Queue - Sorted by ECM Completion</div>
+    <div class="section-content">
+        <p style="margin-bottom: 15px; color: #666; font-style: italic;">
+            Showing unfactored composites sorted by completion percentage (closest to target t-level first)
+        </p>
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Number</th>
+                    <th>Digits</th>
+                    <th>T-Level Progress</th>
+                    <th>Priority</th>
+                    <th>Created</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for composite in composites %}
+                {% set composite_display = composite.number[:30] + '...' if composite.number|length > 30 else composite.number %}
+                {% set created_str = composite.created_at.strftime('%Y-%m-%d %H:%M') if composite.created_at else 'Unknown' %}
+                {% set t_data = calc_t_progress(composite.current_t_level, composite.target_t_level) %}
+                <tr>
+                    <td>{{ composite.id }}</td>
+                    <td><span class="number">{{ esc(composite_display) }}</span></td>
+                    <td>{{ composite.digit_length }}</td>
+                    <td>
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <div class="progress" style="width: 100px;">
+                                <div class="progress-bar" style="width: {{ [t_data.progress_pct, 100]|min }}%; background-color: {{ t_data.progress_color }};"></div>
+                            </div>
+                            <span style="font-size: 0.85em; font-weight: bold; color: {{ t_data.progress_color }};">
+                                t{{ t_data.current_t|round(1) }} / t{{ t_data.target_t|round(1) }} ({{ t_data.progress_pct|round(1) }}%)
+                            </span>
+                        </div>
+                    </td>
+                    <td>
+                        <span style="font-weight: bold; color: {{ '#198754' if composite.priority > 0 else '#666' }};">{{ composite.priority }}</span>
+                    </td>
+                    <td>{{ esc(created_str) }}</td>
+                    <td>
+                        <button class="btn" onclick="viewDetails({{ composite.id }})" style="margin-right: 5px;">Details</button>
+                        <button class="btn" onclick="removeComposite({{ composite.id }})" style="background: #dc3545;">Remove</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="section">
+    <div class="section-header">👥 Recent Clients</div>
+    <div class="section-content">
+        <table>
+            <thead>
+                <tr>
+                    <th>Client ID</th>
+                    <th>Work Count</th>
+                    <th>Last Seen</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for client_info in recent_clients %}
+                {% set last_seen_str = client_info.last_seen.strftime('%Y-%m-%d %H:%M') if client_info.last_seen else 'Unknown' %}
+                <tr>
+                    <td>{{ esc(client_info.client_id) }}</td>
+                    <td>{{ client_info.work_count }}</td>
+                    <td>{{ esc(last_seen_str) }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="section">
+    <div class="section-header">🎯 Recent Factors Found</div>
+    <div class="section-content">
+        {% if recent_factors %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Factor</th>
+                    <th>Composite</th>
+                    <th>Found</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for factor in recent_factors %}
+                {% set composite_display = factor.composite.number[:30] + '...' if factor.composite.number|length > 30 else factor.composite.number %}
+                {% set found_str = factor.created_at.strftime('%Y-%m-%d %H:%M') if factor.created_at else 'Unknown' %}
+                <tr>
+                    <td><span class="number">{{ esc(factor.factor) }}</span></td>
+                    <td><span class="number">{{ esc(composite_display) }}</span></td>
+                    <td>{{ esc(found_str) }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p>No factors found recently</p>
+        {% endif %}
+    </div>
+</div>
+
+<div class="section">
+    <div class="section-header">🛠️ Admin Tools</div>
+    <div class="section-content">
+        <div class="tools">
+            <h4>Quick Actions:</h4>
+            <button class="btn" onclick="location.href='/docs#/admin'">API Documentation</button>
+            <button class="btn" onclick="location.href='/api/v1/dashboard/'">User Dashboard</button>
+            <button class="btn" onclick="cleanupExpired()">Cleanup Expired Work</button>
+            <button class="btn" onclick="calculateTLevels()">Calculate T-Levels</button>
+            <button class="btn" onclick="recalculateAllTLevels()" style="background: #dc3545;">Fix Random T-Levels</button>
+            <button class="btn" onclick="refreshPage()">Refresh</button>
+        </div>
+
+        <div style="margin-top: 20px;">
+            <h4>Bulk Operations:</h4>
+            <p>Use the API endpoints to:</p>
+            <ul>
+                <li><strong>POST /admin/composites/upload</strong> - Upload composite files</li>
+                <li><strong>POST /admin/composites/bulk</strong> - Add numbers via JSON</li>
+                <li><strong>GET /admin/work/assignments</strong> - View all work assignments</li>
+                <li><strong>POST /admin/work/cleanup</strong> - Clean up expired work</li>
+            </ul>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function viewDetails(compositeId) {
+        const apiKey = sessionStorage.getItem('admin_api_key');
+        if (!apiKey) {
+            window.location.href = '/api/v1/admin/login';
+            return;
+        }
+
+        // Fetch the details page with auth header
+        fetch(`/api/v1/admin/composites/${compositeId}/details`, {
+            headers: {
+                'X-Admin-Key': apiKey
+            }
+        })
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('Unauthorized');
+            }
+            return response.text();
+        })
+        .then(html => {
+            document.open();
+            document.write(html);
+            document.close();
+            history.pushState(null, '', `/api/v1/admin/composites/${compositeId}/details`);
+        })
+        .catch(() => {
+            sessionStorage.removeItem('admin_api_key');
+            window.location.href = '/api/v1/admin/login';
+        });
+    }
+
+    function removeComposite(compositeId) {
+        if (confirm('PERMANENTLY REMOVE this composite from the queue?\\n\\nThis will:\\n- Cancel any active work assignments\\n- Delete all ECM attempts and factors\\n- Remove the composite entirely\\n\\nThis action cannot be undone!')) {
+            fetchWithAuth(`/api/v1/admin/composites/${compositeId}`, {method: 'DELETE'})
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'removed') {
+                        alert(`Composite ${compositeId} removed successfully.\\nCancelled ${data.cancelled_work_assignments} work assignments.`);
+                        location.reload();
+                    } else {
+                        alert('Error removing composite: ' + JSON.stringify(data));
+                    }
+                })
+                .catch(error => {
+                    alert('Error removing composite: ' + error);
+                });
+        }
+    }
+
+    function cleanupExpired() {
+        if (confirm('Clean up expired work assignments?')) {
+            fetchWithAuth('/api/v1/admin/work/cleanup', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => {
+                    alert('Cleaned up ' + data.cleaned_up + ' expired assignments');
+                    location.reload();
+                });
+        }
+    }
+
+    function calculateTLevels() {
+        if (confirm('Calculate t-levels for all composites using 4/13 * digits formula?')) {
+            fetchWithAuth('/api/v1/admin/composites/calculate-t-levels', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => {
+                    alert(data.message || 'T-levels calculated successfully');
+                    location.reload();
+                })
+                .catch(error => {
+                    alert('Error calculating t-levels: ' + error);
+                });
+        }
+    }
+
+    function recalculateAllTLevels() {
+        if (confirm('RECALCULATE ALL t-levels? This will replace current random t-level values with real calculations using the t-level executable.')) {
+            fetchWithAuth('/api/v1/admin/composites/recalculate-all-t-levels', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => {
+                    alert(data.message || 'All t-levels recalculated successfully');
+                    location.reload();
+                })
+                .catch(error => {
+                    alert('Error recalculating t-levels: ' + error);
+                });
+        }
+    }
+
+    function refreshPage() {
+        // Reload with auth header
+        const apiKey = sessionStorage.getItem('admin_api_key');
+        if (!apiKey) {
+            window.location.href = '/api/v1/admin/login';
+            return;
+        }
+
+        fetchWithAuth('/api/v1/admin/dashboard')
+            .then(response => response.text())
+            .then(html => {
+                document.open();
+                document.write(html);
+                document.close();
+            })
+            .catch(() => {
+                window.location.href = '/api/v1/admin/login';
+            });
+    }
+
+    // Auto-refresh every 30 seconds using fetch to maintain auth
+    setTimeout(() => refreshPage(), 30000);
+</script>
+{% endblock %}

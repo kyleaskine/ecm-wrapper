@@ -1,0 +1,983 @@
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Header, Request
+from fastapi.responses import HTMLResponse
+from sqlalchemy.orm import Session
+from sqlalchemy import and_, distinct, func, desc
+from typing import List, Optional, Dict, Any
+import io
+import logging
+from datetime import datetime, timedelta
+import html
+
+from ...database import get_db
+from ...services.composite_manager import CompositeManager
+from ...services.work_assignment import WorkAssignmentService
+# Removed family-related services for minimal ECM middleware
+from ...config import get_settings
+from ...dependencies import verify_admin_key
+from ...schemas.composites import (
+    BulkCompositeRequest,
+    ProjectCreate,
+    ProjectResponse,
+    ProjectStats
+)
+from ...templates import templates
+
+router = APIRouter()
+settings = get_settings()
+logger = logging.getLogger(__name__)
+
+# Initialize services
+composite_manager = CompositeManager()
+work_service = WorkAssignmentService(
+    default_timeout_minutes=settings.default_work_timeout_minutes,
+    max_work_per_client=settings.max_work_items_per_client
+)
+
+@router.post("/admin/composites/upload")
+async def upload_composites(
+    file: UploadFile = File(...),
+    source_type: str = Form("auto"),
+    default_priority: int = Form(0),
+    number_column: str = Form("number"),
+    priority_column: Optional[str] = Form(None),
+    project_name: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    _admin: bool = Depends(verify_admin_key)
+):
+    """
+    Upload composites from a file.
+
+    Supports text files (one number per line) and CSV files with headers.
+
+    CSV files can include these columns:
+    - number (required): Original number or mathematical form
+    - current_composite (optional): Current composite being factored
+    - has_snfs_form (optional): Boolean (true/false/1/0/yes/no)
+    - snfs_difficulty (optional): GNFS-equivalent difficulty (integer)
+    - priority (optional): Integer priority level
+
+    Args:
+        file: Uploaded file containing numbers
+        source_type: Type of file ('text', 'csv', or 'auto' to detect)
+        default_priority: Default priority for new composites
+        number_column: Column name for numbers in CSV files
+        priority_column: Optional column name for priorities in CSV
+        project_name: Optional project name to associate composites with
+        db: Database session
+
+    Returns:
+        Upload statistics
+    """
+    try:
+        content = await file.read()
+        content_str = content.decode('utf-8')
+
+        # Auto-detect file type if needed
+        if source_type == "auto":
+            if file.filename and file.filename.endswith('.csv'):
+                source_type = "csv"
+            else:
+                source_type = "text"
+
+        # Process based on file type
+        if source_type == "csv":
+            stats = composite_manager.bulk_load_composites(
+                db, content_str,
+                source_type="csv",
+                default_priority=default_priority,
+                project_name=project_name
+            )
+        else:
+            # Treat as text file - extract numbers from content
+            lines = content_str.strip().split('\n')
+            stats = composite_manager.bulk_load_composites(
+                db, lines,
+                source_type="list",
+                default_priority=default_priority,
+                project_name=project_name
+            )
+
+        return {
+            "filename": file.filename,
+            "file_size": len(content),
+            "source_type": source_type,
+            **stats
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error processing file: {str(e)}"
+        )
+
+
+@router.post("/admin/composites/bulk")
+async def bulk_add_composites(
+    numbers: List[str],
+    default_priority: int = 0,
+    project_name: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _admin: bool = Depends(verify_admin_key)
+):
+    """
+    Add a list of composite numbers.
+
+    Args:
+        numbers: List of number strings
+        default_priority: Default priority for new composites
+        project_name: Optional project name to associate composites with
+        db: Database session
+
+    Returns:
+        Addition statistics
+    """
+    try:
+        stats = composite_manager.bulk_load_composites(
+            db, numbers,
+            source_type="list",
+            default_priority=default_priority,
+            project_name=project_name
+        )
+
+        return {
+            "input_count": len(numbers),
+            **stats
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error processing numbers: {str(e)}"
+        )
+
+
+@router.post("/admin/composites/bulk-structured")
+async def bulk_add_composites_structured(
+    request: BulkCompositeRequest,
+    db: Session = Depends(get_db),
+    _admin: bool = Depends(verify_admin_key)
+):
+    """
+    Add composites with full metadata including SNFS fields.
+
+    Supports:
+    - number: Original number or mathematical form
+    - current_composite: Current composite being factored (optional)
+    - has_snfs_form: Has SNFS polynomial form (default: false)
+    - snfs_difficulty: GNFS-equivalent digit count (optional)
+    - priority: Priority level (default: 0)
+
+    Args:
+        request: Structured composite data with metadata
+        db: Database session
+
+    Returns:
+        Addition statistics
+    """
+    try:
+        logger.info("Bulk structured upload: %d composites requested", len(request.composites))
+
+        # Convert Pydantic models to dictionaries for the composite manager
+        composites_data = [
+            {
+                'number': c.number,
+                'current_composite': c.current_composite,
+                'has_snfs_form': c.has_snfs_form,
+                'snfs_difficulty': c.snfs_difficulty,
+                'priority': c.priority if c.priority is not None else request.default_priority
+            }
+            for c in request.composites
+        ]
+
+        logger.info("Converted to %d composite data items", len(composites_data))
+
+        stats = composite_manager.bulk_load_composites(
+            db, composites_data,
+            source_type="list",
+            default_priority=request.default_priority,
+            project_name=request.project_name
+        )
+
+        logger.info("Bulk load complete: %s", stats)
+
+        return {
+            "input_count": len(request.composites),
+            **stats
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error processing composites: {str(e)}"
+        )
+
+
+# Project Management Endpoints
+
+@router.post("/admin/projects", response_model=ProjectResponse)
+async def create_project(
+    project: ProjectCreate,
+    db: Session = Depends(get_db),
+    _admin: bool = Depends(verify_admin_key)
+):
+    """
+    Create a new project.
+
+    Args:
+        project: Project creation data
+        db: Database session
+
+    Returns:
+        Created project details
+    """
+    from ...models.projects import Project
+
+    # Check if project already exists
+    existing = db.query(Project).filter(Project.name == project.name).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Project '{project.name}' already exists"
+        )
+
+    new_project = Project(
+        name=project.name,
+        description=project.description
+    )
+    db.add(new_project)
+    db.commit()
+    db.refresh(new_project)
+
+    return new_project
+
+
+@router.delete("/admin/projects/by-name/{project_name}")
+async def delete_project_by_name(
+    project_name: str,
+    db: Session = Depends(get_db),
+    _admin: bool = Depends(verify_admin_key)
+):
+    """
+    Delete a project by name and its composite associations (ADMIN).
+
+    Note: This does NOT delete the composites themselves, only the
+    project-composite associations.
+
+    Args:
+        project_name: Project name
+        db: Database session
+
+    Returns:
+        Deletion confirmation
+    """
+    from ...models.projects import Project, ProjectComposite
+
+    project = db.query(Project).filter(Project.name == project_name).first()
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project '{project_name}' not found"
+        )
+
+    # Delete project-composite associations
+    db.query(ProjectComposite).filter(
+        ProjectComposite.project_id == project.id
+    ).delete()
+
+    # Delete project
+    db.delete(project)
+    db.commit()
+
+    return {
+        "message": f"Project '{project.name}' deleted successfully",
+        "project_id": project.id,
+        "project_name": project.name
+    }
+
+
+@router.delete("/admin/projects/{project_id}")
+async def delete_project_by_id(
+    project_id: int,
+    db: Session = Depends(get_db),
+    _admin: bool = Depends(verify_admin_key)
+):
+    """
+    Delete a project by ID and its composite associations (ADMIN).
+
+    Note: This does NOT delete the composites themselves, only the
+    project-composite associations.
+
+    Args:
+        project_id: Project ID
+        db: Database session
+
+    Returns:
+        Deletion confirmation
+    """
+    from ...models.projects import Project, ProjectComposite
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project {project_id} not found"
+        )
+
+    # Delete project-composite associations
+    db.query(ProjectComposite).filter(
+        ProjectComposite.project_id == project_id
+    ).delete()
+
+    # Delete project
+    db.delete(project)
+    db.commit()
+
+    return {
+        "message": f"Project '{project.name}' deleted successfully",
+        "project_id": project_id,
+        "project_name": project.name
+    }
+
+
+@router.get("/admin/composites/status")
+async def get_queue_status(db: Session = Depends(get_db), _admin: bool = Depends(verify_admin_key)):
+    """
+    Get comprehensive status of the work queue.
+
+    Returns:
+        Detailed statistics about composites and work assignments
+    """
+    try:
+        status_info = composite_manager.get_work_queue_status(db)
+        return status_info
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving status: {str(e)}"
+        )
+
+
+@router.get("/admin/composites/{composite_id}")
+async def get_composite_details(
+    composite_id: int,
+    db: Session = Depends(get_db),
+    _admin: bool = Depends(verify_admin_key)
+):
+    """
+    Get detailed information about a specific composite.
+
+    Args:
+        composite_id: ID of the composite
+        db: Database session
+
+    Returns:
+        Detailed composite information including attempts and active work
+    """
+    details = composite_manager.get_composite_details(db, composite_id)
+
+    if not details:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Composite not found"
+        )
+
+    return details
+
+
+@router.get("/admin/composites/{composite_id}/details", response_class=HTMLResponse)
+async def get_composite_details_page(
+    composite_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    x_admin_key: str = Header(None)
+):
+    """
+    Web page showing detailed information about a specific composite.
+    """
+    # Verify auth
+    settings = get_settings()
+    if not x_admin_key or x_admin_key != settings.admin_api_key:
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Unauthorized</title>
+            <script>
+                sessionStorage.removeItem('admin_api_key');
+                window.location.href = '/api/v1/admin/login';
+            </script>
+        </head>
+        <body>
+            <p>Redirecting to login...</p>
+        </body>
+        </html>
+        """
+
+    details = composite_manager.get_composite_details(db, composite_id)
+
+    if not details:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Composite not found"
+        )
+
+    return templates.TemplateResponse("admin/composite_details.html", {
+        "request": request,
+        "composite": details['composite'],
+        "progress": details['progress'],
+        "recent_attempts": details['recent_attempts'],
+        "active_work": details['active_work']
+    })
+
+
+@router.put("/admin/composites/{composite_id}/priority")
+async def set_composite_priority(
+    composite_id: int,
+    priority: int,
+    db: Session = Depends(get_db),
+    _admin: bool = Depends(verify_admin_key)
+):
+    """
+    Set priority for a composite.
+
+    Args:
+        composite_id: ID of the composite
+        priority: New priority value (higher = more priority)
+        db: Database session
+
+    Returns:
+        Success status
+    """
+    success = composite_manager.set_composite_priority(db, composite_id, priority)
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Composite not found"
+        )
+
+    return {
+        "composite_id": composite_id,
+        "priority": priority,
+        "status": "updated"
+    }
+
+
+@router.post("/admin/composites/{composite_id}/complete")
+async def mark_composite_complete(
+    composite_id: int,
+    reason: str = "manual",
+    db: Session = Depends(get_db),
+    _admin: bool = Depends(verify_admin_key)
+):
+    """
+    Mark a composite as fully factored.
+
+    This will cancel any active work assignments for this composite.
+
+    Args:
+        composite_id: ID of the composite
+        reason: Reason for marking complete
+        db: Database session
+
+    Returns:
+        Success status
+    """
+    success = composite_manager.mark_composite_complete(db, composite_id, reason)
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Composite not found"
+        )
+
+    return {
+        "composite_id": composite_id,
+        "status": "marked_complete",
+        "reason": reason
+    }
+
+
+@router.delete("/admin/composites/{composite_id}")
+async def remove_composite(
+    composite_id: int,
+    reason: str = "admin_removal",
+    db: Session = Depends(get_db),
+    _admin: bool = Depends(verify_admin_key)
+):
+    """
+    Remove a composite from the queue entirely.
+
+    This will cancel any active work assignments and delete the composite.
+
+    Args:
+        composite_id: ID of the composite to remove
+        reason: Reason for removal
+        db: Database session
+
+    Returns:
+        Success status
+    """
+    from ...models.composites import Composite
+    from ...models.work_assignments import WorkAssignment
+    from ...models.attempts import ECMAttempt
+    from ...models.factors import Factor
+
+    composite = db.query(Composite).filter(Composite.id == composite_id).first()
+
+    if not composite:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Composite not found"
+        )
+
+    # Cancel any active work assignments
+    active_work = db.query(WorkAssignment).filter(
+        and_(
+            WorkAssignment.composite_id == composite_id,
+            WorkAssignment.status.in_(['assigned', 'claimed', 'running'])
+        )
+    ).all()
+
+    for work in active_work:
+        work.status = 'cancelled'
+
+    # Delete related records
+    db.query(ECMAttempt).filter(ECMAttempt.composite_id == composite_id).delete()
+    db.query(Factor).filter(Factor.composite_id == composite_id).delete()
+    db.query(WorkAssignment).filter(WorkAssignment.composite_id == composite_id).delete()
+
+    # Delete the composite
+    db.delete(composite)
+    db.commit()
+
+    return {
+        "composite_id": composite_id,
+        "status": "removed",
+        "reason": reason,
+        "cancelled_work_assignments": len(active_work)
+    }
+
+
+@router.get("/admin/work/assignments")
+async def get_work_assignments(
+    status_filter: Optional[str] = None,
+    client_id: Optional[str] = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    _admin: bool = Depends(verify_admin_key)
+):
+    """
+    Get work assignments with optional filtering.
+
+    Args:
+        status_filter: Filter by status (assigned, claimed, running, completed, etc.)
+        client_id: Filter by client ID
+        limit: Maximum number of assignments to return
+        db: Database session
+
+    Returns:
+        List of work assignments
+    """
+    from ...models.work_assignments import WorkAssignment
+    from sqlalchemy import and_
+
+    query = db.query(WorkAssignment)
+
+    # Apply filters
+    filters = []
+    if status_filter:
+        filters.append(WorkAssignment.status == status_filter)
+    if client_id:
+        filters.append(WorkAssignment.client_id == client_id)
+
+    if filters:
+        query = query.filter(and_(*filters))
+
+    # Get assignments with composite info
+    assignments = query.order_by(
+        WorkAssignment.created_at.desc()
+    ).limit(limit).all()
+
+    return {
+        "assignments": [
+            {
+                "work_id": assignment.id,
+                "composite_id": assignment.composite_id,
+                "composite_number": assignment.composite.number[:20] + "..." if len(assignment.composite.number) > 20 else assignment.composite.number,
+                "composite_digits": assignment.composite.digit_length,
+                "client_id": assignment.client_id,
+                "method": assignment.method,
+                "b1": assignment.b1,
+                "b2": assignment.b2,
+                "curves_requested": assignment.curves_requested,
+                "curves_completed": assignment.curves_completed,
+                "status": assignment.status,
+                "priority": assignment.priority,
+                "assigned_at": assignment.assigned_at,
+                "claimed_at": assignment.claimed_at,
+                "expires_at": assignment.expires_at,
+                "completed_at": assignment.completed_at,
+                "estimated_time_minutes": assignment.estimated_time_minutes,
+                "is_expired": assignment.is_expired
+            }
+            for assignment in assignments
+        ],
+        "total_count": len(assignments),
+        "filters_applied": {
+            "status": status_filter,
+            "client_id": client_id
+        }
+    }
+
+
+@router.delete("/admin/work/assignments/{work_id}")
+async def cancel_work_assignment(
+    work_id: str,
+    reason: str = "admin_cancel",
+    db: Session = Depends(get_db),
+    _admin: bool = Depends(verify_admin_key)
+):
+    """
+    Cancel a work assignment (admin override).
+
+    Args:
+        work_id: ID of the work assignment to cancel
+        reason: Reason for cancellation
+        db: Database session
+
+    Returns:
+        Success status
+    """
+    from ...models.work_assignments import WorkAssignment
+
+    assignment = db.query(WorkAssignment).filter(
+        WorkAssignment.id == work_id
+    ).first()
+
+    if not assignment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Work assignment not found"
+        )
+
+    # Cancel the assignment
+    assignment.status = 'failed'
+    db.commit()
+
+    return {
+        "work_id": work_id,
+        "status": "cancelled",
+        "reason": reason,
+        "previous_status": assignment.status
+    }
+
+
+@router.post("/admin/work/cleanup")
+async def cleanup_expired_work(db: Session = Depends(get_db), _admin: bool = Depends(verify_admin_key)):
+    """
+    Manually trigger cleanup of expired work assignments.
+
+    Returns:
+        Number of assignments cleaned up
+    """
+    from ...models.work_assignments import WorkAssignment
+    from sqlalchemy import and_
+    from datetime import datetime
+
+    # Find expired assignments
+    expired_assignments = db.query(WorkAssignment).filter(
+        and_(
+            WorkAssignment.expires_at < datetime.utcnow(),
+            WorkAssignment.status.in_(['assigned', 'claimed', 'running'])
+        )
+    ).all()
+
+    # Mark them as timeout
+    for assignment in expired_assignments:
+        assignment.status = 'timeout'
+
+    db.commit()
+
+    return {
+        "cleaned_up": len(expired_assignments),
+        "status": "completed"
+    }
+
+
+@router.post("/admin/composites/calculate-t-levels")
+async def calculate_t_levels_for_all_composites(
+    recalculate_all: bool = False,
+    db: Session = Depends(get_db),
+    _admin: bool = Depends(verify_admin_key)
+):
+    """
+    Calculate and populate t-levels for all composites in the database.
+
+    Uses the 4/13 * digits formula with SNFS discounts for special forms.
+    Uses real t-level executable for current progress calculation.
+
+    Args:
+        recalculate_all: If True, recalculates current t-levels for ALL composites
+                        If False, only calculates for composites missing target t-levels
+
+    Returns:
+        Statistics about t-level calculations performed
+    """
+    from ...models.composites import Composite
+    from ...models.attempts import ECMAttempt
+    from ...services.t_level_calculator import TLevelCalculator
+
+    calculator = TLevelCalculator()
+
+    # Get composites to update
+    if recalculate_all:
+        composites = db.query(Composite).all()
+        operation_type = "Recalculated all"
+    else:
+        composites = db.query(Composite).filter(
+            Composite.target_t_level.is_(None)
+        ).all()
+        operation_type = "Updated new"
+
+    updated_count = 0
+    current_t_updated = 0
+
+    for composite in composites:
+        try:
+            # Calculate/update target t-level if not set or if recalculating all
+            if composite.target_t_level is None or recalculate_all:
+                target_t = calculator.calculate_target_t_level(
+                    composite.digit_length,
+                    special_form=None,  # No auto-detection, projects can specify if needed
+                    snfs_difficulty=composite.snfs_difficulty  # Use SNFS difficulty if available
+                )
+                composite.target_t_level = target_t
+
+            # Always recalculate current t-level from existing attempts using real executable
+            previous_attempts = db.query(ECMAttempt).filter(
+                ECMAttempt.composite_id == composite.id
+            ).all()
+
+            current_t = calculator.get_current_t_level_from_attempts(previous_attempts)
+            if current_t != composite.current_t_level:
+                composite.current_t_level = current_t
+                current_t_updated += 1
+
+            updated_count += 1
+
+        except Exception as e:
+            # Skip problematic composites but continue processing
+            logger.warning(f"Failed to update composite {composite.id}: {e}")
+            continue
+
+    # Commit all changes
+    db.commit()
+
+    return {
+        "status": "completed",
+        "composites_updated": updated_count,
+        "current_t_levels_updated": current_t_updated,
+        "operation_type": operation_type,
+        "message": f"{operation_type} t-levels for {updated_count} composites. Updated {current_t_updated} current t-level values using real executable."
+    }
+
+
+@router.post("/admin/composites/recalculate-all-t-levels")
+async def recalculate_all_t_levels(db: Session = Depends(get_db), _admin: bool = Depends(verify_admin_key)):
+    """
+    Force recalculation of ALL t-levels (both target and current) for all composites.
+
+    This will replace any existing current t-level values with fresh calculations
+    using the real t-level executable.
+
+    Returns:
+        Statistics about t-level recalculations performed
+    """
+    return await calculate_t_levels_for_all_composites(recalculate_all=True, db=db)
+
+
+@router.get("/admin/stats/summary")
+async def get_admin_summary(db: Session = Depends(get_db), _admin: bool = Depends(verify_admin_key)):
+    """
+    Get high-level summary statistics for admin dashboard.
+
+    Returns:
+        Summary statistics
+    """
+    from ...models.composites import Composite
+    from ...models.work_assignments import WorkAssignment
+    from ...models.attempts import ECMAttempt
+    from ...models.factors import Factor
+    from sqlalchemy import func, distinct
+    from datetime import datetime, timedelta
+
+    # Time range for recent activity
+    last_24h = datetime.utcnow() - timedelta(hours=24)
+    last_week = datetime.utcnow() - timedelta(days=7)
+
+    # Basic counts
+    total_composites = db.query(Composite).count()
+    factored_composites = db.query(Composite).filter(
+        Composite.is_fully_factored
+    ).count()
+    active_work = db.query(WorkAssignment).filter(
+        WorkAssignment.status.in_(['assigned', 'claimed', 'running'])
+    ).count()
+
+    # Recent activity
+    recent_attempts = db.query(ECMAttempt).filter(ECMAttempt.created_at >= last_24h).count()
+    recent_factors = db.query(Factor).filter(Factor.created_at >= last_24h).count()
+
+    # Active clients
+    active_clients = db.query(distinct(WorkAssignment.client_id)).filter(
+        and_(
+            WorkAssignment.status.in_(['assigned', 'claimed', 'running']),
+            WorkAssignment.created_at >= last_week
+        )
+    ).count()
+
+    # T-level targeting statistics
+    composites_with_target = db.query(Composite).filter(
+        and_(
+            Composite.target_t_level.isnot(None),
+            not Composite.is_fully_factored
+        )
+    ).count()
+
+    return {
+        "overview": {
+            "total_composites": total_composites,
+            "factored_composites": factored_composites,
+            "unfactored_composites": total_composites - factored_composites,
+            "active_work_assignments": active_work,
+            "active_clients": active_clients
+        },
+        "recent_activity_24h": {
+            "new_attempts": recent_attempts,
+            "factors_found": recent_factors
+        },
+        "t_level_targeting": {
+            "composites_with_targets": composites_with_target
+        },
+        "health": {
+            "factorization_rate": round((factored_composites / max(total_composites, 1)) * 100, 1),
+            "work_queue_utilization": round((active_work / max(total_composites - factored_composites, 1)) * 100, 1) if total_composites > factored_composites else 0,
+            "t_level_coverage": round((composites_with_target / max(total_composites - factored_composites, 1)) * 100, 1) if total_composites > factored_composites else 0
+        }
+    }
+
+
+# Family management endpoints removed for minimal ECM middleware
+
+
+@router.get("/admin/login", response_class=HTMLResponse)
+async def admin_login_page(request: Request):
+    """
+    Admin login page - prompts for API key and redirects to dashboard.
+    """
+    return templates.TemplateResponse("admin/login.html", {"request": request})
+
+
+async def verify_admin_key_optional(x_admin_key: str = Header(None)):
+    """
+    Optional admin key verification - returns the key if valid, None otherwise.
+    Used for pages that need to check auth but handle it in JavaScript.
+    """
+    settings = get_settings()
+    if x_admin_key and x_admin_key == settings.admin_api_key:
+        return x_admin_key
+    return None
+
+@router.get("/admin/dashboard", response_class=HTMLResponse)
+async def admin_dashboard(
+    request: Request,
+    db: Session = Depends(get_db),
+    x_admin_key: str = Header(None)
+):
+    """
+    Admin dashboard showing system status, work assignments, and management tools.
+    This endpoint allows initial page load without auth, but JavaScript checks the key.
+    """
+    # Verify auth via header
+    settings = get_settings()
+    if not x_admin_key or x_admin_key != settings.admin_api_key:
+        # Return error page that redirects to login
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Unauthorized</title>
+            <script>
+                // Redirect to login if no valid session
+                if (!sessionStorage.getItem('admin_api_key')) {
+                    window.location.href = '/api/v1/admin/login';
+                } else {
+                    // Key exists but invalid - clear and redirect
+                    sessionStorage.removeItem('admin_api_key');
+                    window.location.href = '/api/v1/admin/login';
+                }
+            </script>
+        </head>
+        <body>
+            <p>Redirecting to login...</p>
+        </body>
+        </html>
+        """
+
+    from ...models.composites import Composite
+    from ...models.work_assignments import WorkAssignment
+    from ...models.attempts import ECMAttempt
+    from ...models.factors import Factor
+    from ...models.clients import Client
+
+    # Get summary statistics
+    summary_stats = await get_admin_summary(db)
+
+    # Get recent work assignments
+    recent_work = db.query(WorkAssignment).order_by(
+        desc(WorkAssignment.created_at)
+    ).limit(20).all()
+
+    # Get composites sorted by ECM completion percentage (how close to target t-level)
+    # Only show unfactored composites with target t-levels set
+    composites = db.query(Composite).filter(
+        and_(
+            not Composite.is_fully_factored,
+            Composite.target_t_level.isnot(None)
+        )
+    ).all()
+
+    # Sort by completion percentage (current_t / target_t)
+    def get_completion_pct(comp):
+        if comp.target_t_level and comp.target_t_level > 0:
+            current_t = comp.current_t_level or 0.0
+            return (current_t / comp.target_t_level) * 100
+        return 0.0
+
+    composites.sort(key=get_completion_pct, reverse=True)
+    composites = composites[:50]  # Limit to 50
+
+    # Get recent clients
+    recent_clients = db.query(
+        WorkAssignment.client_id,
+        func.count(WorkAssignment.id).label('work_count'),
+        func.max(WorkAssignment.created_at).label('last_seen')
+    ).group_by(WorkAssignment.client_id).order_by(
+        desc('last_seen')
+    ).limit(10).all()
+
+    # Get recent factors
+    recent_factors = db.query(Factor).order_by(desc(Factor.created_at)).limit(10).all()
+
+    # Return template response
+    return templates.TemplateResponse("admin/dashboard.html", {
+        "request": request,
+        "summary_stats": summary_stats,
+        "recent_work": recent_work,
+        "composites": composites,
+        "recent_clients": recent_clients,
+        "recent_factors": recent_factors,
+        "now": datetime.utcnow()
+    })

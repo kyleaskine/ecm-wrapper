@@ -1,0 +1,6 @@
+{# Composite number display - truncates long numbers #}
+{% if number|length > max_length|default(50) %}
+{{ number[:max_length|default(50)] }}...
+{% else %}
+{{ number }}
+{% endif %}
