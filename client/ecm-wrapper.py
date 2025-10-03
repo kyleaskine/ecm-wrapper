@@ -341,7 +341,6 @@ class ECMWrapper(BaseWrapper):
             if save_residues:
                 residue_file = Path(save_residues)
                 residue_file.parent.mkdir(parents=True, exist_ok=True)
-                temp_cleanup = False
             else:
                 # Use configured residue directory with auto-generated filename
                 residue_dir = Path(self.config['execution']['residue_dir'])
@@ -352,7 +351,6 @@ class ECMWrapper(BaseWrapper):
                 composite_hash = hashlib.md5(composite.encode()).hexdigest()[:12]
                 timestamp = time.strftime('%Y%m%d_%H%M%S')
                 residue_file = residue_dir / f"residue_{composite_hash}_{timestamp}.txt"
-                temp_cleanup = False
                 self.logger.info(f"Using auto-generated residue file: {residue_file}")
             
             actual_curves = curves  # Initialize fallback
@@ -433,15 +431,6 @@ class ECMWrapper(BaseWrapper):
         
         results['curves_completed'] = actual_curves
         results['execution_time'] = time.time() - start_time
-
-        # Cleanup temporary directory after both stages are complete
-        if not resume_residues and temp_cleanup and 'temp_dir' in locals():
-            import shutil
-            try:
-                shutil.rmtree(temp_dir)
-                self.logger.debug(f"Cleaned up temporary directory: {temp_dir}")
-            except Exception as e:
-                self.logger.warning(f"Failed to cleanup temporary directory: {e}")
 
         return results
     

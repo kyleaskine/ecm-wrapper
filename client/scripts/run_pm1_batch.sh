@@ -1,6 +1,5 @@
 #!/bin/bash
 echo "Starting P-1 batch testing on $(wc -l < data/numbers.txt) numbers"
-echo "Using B1=1,000,000, B2=0 (Stage 1 only)"
 echo "Results will be logged to data/factors_found.txt"
 echo "=========================================="
 
