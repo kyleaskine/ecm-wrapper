@@ -339,19 +339,19 @@ class ECMWrapper(BaseWrapper):
         else:
             # Determine residue file location
             if save_residues:
-                residue_file = Path(save_residues)
-                residue_file.parent.mkdir(parents=True, exist_ok=True)
-            else:
-                # Use configured residue directory with auto-generated filename
+                # Save to configured residue directory with specified filename
                 residue_dir = Path(self.config['execution']['residue_dir'])
                 residue_dir.mkdir(parents=True, exist_ok=True)
-
-                # Generate filename: residue_<composite_hash>_<timestamp>.txt
+                residue_file = residue_dir / save_residues
+                self.logger.info(f"Will save residues to: {residue_file}")
+            else:
+                # Use temporary directory for transient residue files
+                import tempfile
                 import hashlib
                 composite_hash = hashlib.md5(composite.encode()).hexdigest()[:12]
                 timestamp = time.strftime('%Y%m%d_%H%M%S')
-                residue_file = residue_dir / f"residue_{composite_hash}_{timestamp}.txt"
-                self.logger.info(f"Using auto-generated residue file: {residue_file}")
+                residue_file = Path(tempfile.gettempdir()) / f"residue_{composite_hash}_{timestamp}.txt"
+                self.logger.info(f"Using temporary residue file: {residue_file}")
             
             actual_curves = curves  # Initialize fallback
             try:
@@ -379,28 +379,38 @@ class ECMWrapper(BaseWrapper):
                 
                 if not stage1_success:
                     self.logger.error("Stage 1 failed")
+                    results['curves_completed'] = 0  # No valid results on failure
                     results['execution_time'] = time.time() - start_time
+                    results['raw_output'] = stage1_output  # Include error output
                     return results
 
                 if not residue_file.exists():
                     self.logger.error(f"No residue file generated at: {residue_file}")
+                    results['curves_completed'] = 0  # No valid results
                     results['execution_time'] = time.time() - start_time
+                    results['raw_output'] = stage1_output if 'stage1_output' in locals() else "No residue file generated"
                     return results
 
                 # Check if residue file has content
                 if residue_file.stat().st_size == 0:
                     self.logger.error(f"Residue file is empty: {residue_file}")
+                    results['curves_completed'] = 0  # No valid results
                     results['execution_time'] = time.time() - start_time
+                    results['raw_output'] = stage1_output if 'stage1_output' in locals() else "Empty residue file"
                     return results
 
                 self.logger.info(f"Residue file created successfully: {residue_file} ({residue_file.stat().st_size} bytes)")
 
                 if save_residues:
-                    self.logger.info(f"Stage 1 residues saved to: {residue_file}")
+                    self.logger.info(f"Stage 1 residues saved permanently to: {residue_file}")
+                else:
+                    self.logger.debug(f"Stage 1 residues in temporary file (will be auto-deleted): {residue_file}")
 
             except Exception as e:
                 self.logger.error(f"Stage 1 execution failed: {e}")
+                results['curves_completed'] = 0  # No valid results on exception
                 results['execution_time'] = time.time() - start_time
+                results['raw_output'] = f"Stage 1 execution failed: {e}"
                 return results
 
         # Stage 2: Multi-threaded CPU execution (skip if B2=0)
@@ -1138,11 +1148,16 @@ def main():
             continue_after_factor=args.continue_after_factor
         )
     
-    # Submit results unless disabled
+    # Submit results unless disabled or failed
     if not args.no_submit:
-        program_name = f'gmp-ecm-{results.get("method", "ecm")}'
-        success = wrapper.submit_result(results, args.project, program_name)
-        sys.exit(0 if success else 1)
+        # Only submit if we actually completed some curves (not a failure)
+        if results.get('curves_completed', 0) > 0:
+            program_name = f'gmp-ecm-{results.get("method", "ecm")}'
+            success = wrapper.submit_result(results, args.project, program_name)
+            sys.exit(0 if success else 1)
+        else:
+            wrapper.logger.warning("Skipping result submission due to failure (0 curves completed)")
+            sys.exit(1)
 
 if __name__ == '__main__':
     main()

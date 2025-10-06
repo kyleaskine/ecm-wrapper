@@ -47,7 +47,7 @@ def create_ecm_parser() -> argparse.ArgumentParser:
                        help='Number of worker processes (default: CPU count)')
     
     # Residue file handling
-    parser.add_argument('--save-residues', type=str, help='Save stage 1 residues to file path')
+    parser.add_argument('--save-residues', type=str, help='Save stage 1 residues with specified filename in configured residue_dir')
     parser.add_argument('--resume-residues', type=str, help='Resume from existing residue file (skip stage 1)')
     parser.add_argument('--stage2-only', type=str, help='Run stage 2 only on residue file path')
 

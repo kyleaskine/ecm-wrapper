@@ -1,12 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func
-from typing import List
+from sqlalchemy import func, and_
+from typing import List, Optional
 
 from ...database import get_db
 from ...schemas.composites import (
     CompositeStats, EffortLevel, ECMWorkSummary,
-    BatchStatusRequest, BatchStatusResponse, CompositeBatchStatus
+    BatchStatusRequest, BatchStatusResponse, CompositeBatchStatus,
+    CompositeProgressItem, TopCompositesResponse
 )
 from ...models import Composite, ECMAttempt, Factor, ProjectComposite, Project
 from ...services.composites import CompositeService
@@ -137,3 +138,105 @@ async def get_batch_composite_status(
             ))
 
     return BatchStatusResponse(composites=results)
+
+
+@router.get("/composites/top-progress", response_model=TopCompositesResponse)
+async def get_top_composites_by_progress(
+    limit: int = Query(50, ge=1, le=500, description="Maximum number of composites to return"),
+    project_name: Optional[str] = Query(None, description="Filter by project name"),
+    min_priority: Optional[int] = Query(None, description="Minimum priority level"),
+    include_factored: bool = Query(False, description="Include fully factored composites"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get top composites ranked by ECM progress (current_t_level/target_t_level).
+
+    Returns composites sorted by completion percentage (highest first),
+    with optional filtering by project and priority.
+
+    Args:
+        limit: Maximum number of composites to return (default 50, max 500)
+        project_name: Optional project name filter
+        min_priority: Optional minimum priority filter
+        include_factored: Include fully factored composites (default False)
+        db: Database session
+
+    Returns:
+        TopCompositesResponse with composites sorted by progress
+    """
+    # Build base query
+    query = db.query(Composite)
+
+    # Base filters
+    filters = [Composite.target_t_level.isnot(None)]
+
+    if not include_factored:
+        filters.append(~Composite.is_fully_factored)
+
+    if min_priority is not None:
+        filters.append(Composite.priority >= min_priority)
+
+    # Project filter
+    if project_name:
+        # Find project
+        project = db.query(Project).filter(Project.name == project_name).first()
+        if not project:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Project '{project_name}' not found"
+            )
+
+        # Join with ProjectComposite to filter by project
+        query = query.join(
+            ProjectComposite,
+            ProjectComposite.composite_id == Composite.id
+        ).filter(ProjectComposite.project_id == project.id)
+
+    # Apply filters
+    composites = query.filter(and_(*filters)).all()
+
+    # Calculate completion percentage and sort
+    def get_completion_pct(comp):
+        if comp.target_t_level and comp.target_t_level > 0:
+            current_t = comp.current_t_level or 0.0
+            return (current_t / comp.target_t_level) * 100
+        return 0.0
+
+    composites.sort(key=get_completion_pct, reverse=True)
+    total = len(composites)
+    composites = composites[:limit]
+
+    # Get project associations for each composite
+    result_items = []
+    for comp in composites:
+        # Get associated projects
+        project_links = db.query(ProjectComposite).filter(
+            ProjectComposite.composite_id == comp.id
+        ).all()
+
+        project_names = []
+        for link in project_links:
+            proj = db.query(Project).filter(Project.id == link.project_id).first()
+            if proj:
+                project_names.append(proj.name)
+
+        result_items.append(CompositeProgressItem(
+            id=comp.id,
+            number=comp.number,
+            current_composite=comp.current_composite,
+            digit_length=comp.digit_length,
+            has_snfs_form=comp.has_snfs_form,
+            snfs_difficulty=comp.snfs_difficulty,
+            target_t_level=comp.target_t_level,
+            current_t_level=comp.current_t_level,
+            completion_pct=get_completion_pct(comp),
+            priority=comp.priority,
+            is_fully_factored=comp.is_fully_factored,
+            projects=project_names
+        ))
+
+    return TopCompositesResponse(
+        composites=result_items,
+        total=total,
+        limit=limit
+    )

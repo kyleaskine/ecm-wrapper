@@ -129,3 +129,24 @@ class CompositeBatchStatus(BaseModel):
 class BatchStatusResponse(BaseModel):
     """Schema for batch status response"""
     composites: List[CompositeBatchStatus] = Field(..., description="Status for each composite")
+
+class CompositeProgressItem(BaseModel):
+    """Schema for composite with progress information"""
+    id: int = Field(..., description="Composite ID")
+    number: str = Field(..., description="Original composite number")
+    current_composite: str = Field(..., description="Current composite being factored")
+    digit_length: int = Field(..., description="Decimal digit length")
+    has_snfs_form: bool = Field(..., description="Whether number has SNFS form")
+    snfs_difficulty: Optional[int] = Field(None, description="GNFS-equivalent digit count for SNFS")
+    target_t_level: Optional[float] = Field(None, description="Target t-level")
+    current_t_level: Optional[float] = Field(None, description="Current t-level achieved")
+    completion_pct: float = Field(..., description="ECM completion percentage (current_t_level / target_t_level * 100)")
+    priority: int = Field(..., description="Priority level")
+    is_fully_factored: bool = Field(..., description="Whether fully factored")
+    projects: List[str] = Field(default_factory=list, description="Associated projects")
+
+class TopCompositesResponse(BaseModel):
+    """Schema for top composites by progress response"""
+    composites: List[CompositeProgressItem] = Field(..., description="Composites sorted by progress")
+    total: int = Field(..., description="Total matching composites")
+    limit: int = Field(..., description="Requested limit")

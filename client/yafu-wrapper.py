@@ -171,11 +171,16 @@ def main():
             method=method
         )
     
-    # Submit results unless disabled
+    # Submit results unless disabled or failed
     if not args.no_submit:
-        program_name = f'yafu-{results.get("method", "ecm")}'
-        success = wrapper.submit_result(results, args.project, program_name)
-        sys.exit(0 if success else 1)
+        # Only submit if we actually completed some curves (not a failure)
+        if results.get('curves_completed', 0) > 0:
+            program_name = f'yafu-{results.get("method", "ecm")}'
+            success = wrapper.submit_result(results, args.project, program_name)
+            sys.exit(0 if success else 1)
+        else:
+            wrapper.logger.warning("Skipping result submission due to failure (0 curves completed)")
+            sys.exit(1)
 
 if __name__ == '__main__':
     main()
