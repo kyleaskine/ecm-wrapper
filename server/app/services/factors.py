@@ -6,35 +6,40 @@ from ..utils.number_utils import validate_integer, verify_complete_factorization
 
 class FactorService:
     @staticmethod
-    def add_factor(db: Session, composite_id: int, factor: str, attempt_id: Optional[int] = None) -> Tuple[Factor, bool]:
+    def add_factor(db: Session, composite_id: int, factor: str, attempt_id: Optional[int] = None,
+                   sigma: Optional[int] = None) -> Tuple[Factor, bool]:
         """
         Add a factor to a composite.
         Returns (factor, created) where created is True if new factor was added.
+
+        Args:
+            sigma: The sigma value that found this factor (ECM only)
         """
         # Validate factor
         if not validate_integer(factor):
             raise ValueError(f"Invalid factor format: {factor}")
-        
+
         # Check if factor already exists for this composite
         existing = db.query(Factor).filter(
             Factor.composite_id == composite_id,
             Factor.factor == factor
         ).first()
-        
+
         if existing:
             return existing, False
-        
+
         # Add new factor
         new_factor = Factor(
             composite_id=composite_id,
             factor=factor,
-            found_by_attempt_id=attempt_id
+            found_by_attempt_id=attempt_id,
+            sigma=sigma
         )
-        
+
         db.add(new_factor)
         db.commit()
         db.refresh(new_factor)
-        
+
         return new_factor, True
     
     @staticmethod

@@ -97,7 +97,7 @@ def serialize_ecm_attempt(attempt, _truncate_composite: bool = True) -> Dict[str
         "curves_completed": attempt.curves_completed,
         "curves_requested": attempt.curves_requested,
         "factor_found": attempt.factor_found,
-        "sigma": attempt.sigma,
+        "parametrization": attempt.parametrization,
         "execution_time_seconds": attempt.execution_time_seconds,
         "created_at": attempt.created_at
     }
@@ -120,6 +120,7 @@ def serialize_factor(factor, include_composite_details: bool = False) -> Dict[st
         "factor": factor.factor,
         "discovery_method": factor.discovery_method,
         "found_by_attempt_id": factor.found_by_attempt_id,
+        "sigma": factor.sigma,
         "created_at": factor.created_at
     }
 

@@ -11,6 +11,7 @@ class FactorResponse(BaseModel):
     factor: str = Field(..., description="The factor value")
     is_prime: Optional[bool] = Field(None, description="Whether factor is prime (if tested)")
     found_by_attempt_id: Optional[int] = Field(None, description="ECM attempt that found this factor")
+    sigma: Optional[int] = Field(None, description="Sigma value that found this factor (ECM only)")
     created_at: datetime = Field(..., description="When factor was discovered")
 
 class FactorWithComposite(BaseModel):
@@ -24,6 +25,7 @@ class FactorWithComposite(BaseModel):
     factor: str = Field(..., description="The factor value")
     is_prime: Optional[bool] = Field(None, description="Whether factor is prime (if tested)")
     found_by_attempt_id: Optional[int] = Field(None, description="ECM attempt that found this factor")
+    sigma: Optional[int] = Field(None, description="Sigma value that found this factor (ECM only)")
     created_at: datetime = Field(..., description="When factor was discovered")
     client_id: Optional[str] = Field(None, description="Client that found the factor")
     method: Optional[str] = Field(None, description="Method used to find factor (ecm, pm1, etc)")

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, ForeignKey, Boolean, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Text, ForeignKey, Boolean, BigInteger, UniqueConstraint
 from sqlalchemy.orm import relationship
 from .base import Base, TimestampMixin
 
@@ -10,6 +10,7 @@ class Factor(Base, TimestampMixin):
     factor = Column(Text, nullable=False)  # Store as string for arbitrary precision
     is_prime = Column(Boolean, default=None, nullable=True)  # NULL until primality tested
     found_by_attempt_id = Column(Integer, ForeignKey("ecm_attempts.id"), nullable=True)
+    sigma = Column(BigInteger, nullable=True)  # Sigma value that found this factor (ECM only)
     
     # Relationships
     composite = relationship("Composite")

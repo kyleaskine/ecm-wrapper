@@ -45,14 +45,42 @@ async def submit_result(
         composite, composite_created = CompositeService.get_or_create_composite(
             db, result_request.composite
         )
-        
+
+        # Get parametrization from explicit parameter or parse from sigma string
+        parametrization = result_request.parameters.parametrization
+        sigma = None
+
+        # Parse sigma string (format: "3:123456" or just "123456")
+        if result_request.parameters.sigma:
+            sigma_str = str(result_request.parameters.sigma)
+            if ':' in sigma_str:
+                parts = sigma_str.split(':', 1)
+                # If parametrization not explicitly provided, extract from sigma
+                if parametrization is None:
+                    parametrization = int(parts[0])
+                    # Validate parametrization from sigma string
+                    if parametrization not in [0, 1, 2, 3]:
+                        raise ValueError(f"Invalid parametrization {parametrization} in sigma string. Must be 0, 1, 2, or 3.")
+                sigma = int(parts[1])
+            else:
+                # Plain sigma value
+                sigma = int(sigma_str)
+                # Default to param 3 if not explicitly provided
+                if parametrization is None:
+                    parametrization = 3
+
+        # Final validation of parametrization
+        if parametrization is not None and parametrization not in [0, 1, 2, 3]:
+            raise ValueError(f"Invalid parametrization {parametrization}. Must be 0, 1, 2, or 3.")
+
         # Generate work hash for duplicate detection
         work_hash = ECMAttempt.generate_work_hash(
             result_request.composite,
             result_request.method,
             result_request.parameters.b1,
             result_request.parameters.b2,
-            result_request.parameters.sigma,
+            parametrization,
+            sigma,
             result_request.parameters.curves
         )
         
@@ -74,7 +102,7 @@ async def submit_result(
             method=result_request.method,
             b1=result_request.parameters.b1,
             b2=result_request.parameters.b2,
-            sigma=result_request.parameters.sigma,
+            parametrization=parametrization,
             curves_requested=result_request.parameters.curves or 0,
             curves_completed=result_request.results.curves_completed,
             factor_found=result_request.results.factor_found,
@@ -114,7 +142,7 @@ async def submit_result(
 
                 # Add factor to database
                 factor, factor_created = FactorService.add_factor(
-                    db, composite.id, factor_str, attempt.id
+                    db, composite.id, factor_str, attempt.id, sigma
                 )
                 factor_status = "new_factor" if factor_created else "known_factor"
 
@@ -142,6 +170,10 @@ async def submit_result(
             factor_status=factor_status
         )
         
+    except HTTPException:
+        # Re-raise HTTPExceptions (like validation errors) without modification
+        db.rollback()
+        raise
     except ValueError as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(e))

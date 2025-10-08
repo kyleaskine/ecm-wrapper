@@ -306,7 +306,8 @@ class TLevelCalculator:
                     b1_str = self._format_number_for_tlevel(attempt.b1)
                     # Use actual b2 value (including 0), only default to b1*100 if b2 is None
                     b2_str = self._format_number_for_tlevel(attempt.b2) if attempt.b2 is not None else self._format_number_for_tlevel(attempt.b1 * 100)
-                    param = "3"  # Default parameter set (can be made configurable later)
+                    # Use actual parametrization from attempt, default to 3 if not set
+                    param = str(attempt.parametrization) if attempt.parametrization is not None else "3"
 
                     curve_str = f"{attempt.curves_completed}@{b1_str},{b2_str},{param}"
                     curve_strings.append(curve_str)

@@ -120,7 +120,7 @@
                         {% endif %}
                     </td>
                     <td class="small-text">{{ attempt.client_id if attempt.client_id else 'Unknown' }}</td>
-                    <td>{{ attempt.execution_time_seconds|round(1) }}s</td>
+                    <td>{{ (attempt.execution_time_seconds|round(1) if attempt.execution_time_seconds is not none else 'N/A') }}{{ 's' if attempt.execution_time_seconds is not none else '' }}</td>
                     <td class="small-text">{{ attempt.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
                 </tr>
                 {% endfor %}

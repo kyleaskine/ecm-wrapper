@@ -133,6 +133,7 @@ class BaseWrapper:
                 'b1': results.get('b1'),
                 'b2': results.get('b2'),
                 'curves': results.get('curves_requested'),
+                'parametrization': results.get('parametrization', 3),  # Default to param 3 (GMP-ECM default)
                 'sigma': results.get('sigma')
             },
             'results': {
@@ -216,10 +217,16 @@ class BaseWrapper:
         except Exception as e:
             self.logger.error(f"Failed to save submission data: {e}")
     
-    def _submit_additional_factors(self, results: Dict[str, Any], 
+    def _submit_additional_factors(self, results: Dict[str, Any],
                                   project: Optional[str], program: str):
         """Submit additional factors found in the same run."""
+        # Get factor-to-sigma mapping if available
+        factor_sigmas = results.get('factor_sigmas', {})
+
         for factor in results['factors_found'][1:]:
+            # Use the specific sigma for this factor, or fall back to the main sigma
+            factor_sigma = factor_sigmas.get(factor, results.get('sigma'))
+
             payload = {
                 'composite': results['composite'],
                 'project': project,
@@ -231,7 +238,8 @@ class BaseWrapper:
                     'b1': results.get('b1'),
                     'b2': results.get('b2'),
                     'curves': results.get('curves_requested'),
-                    'sigma': results.get('sigma')
+                    'parametrization': results.get('parametrization', 3),
+                    'sigma': factor_sigma
                 },
                 'results': {
                     'factor_found': factor,

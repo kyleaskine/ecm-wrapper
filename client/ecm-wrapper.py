@@ -166,9 +166,17 @@ class ECMWrapper(BaseWrapper):
             results['factors_found'] = []
         results['factors_found'].extend(unique_factors.keys())
 
+        # Store factor-to-sigma mapping for multiple factor submissions
+        if 'factor_sigmas' not in results:
+            results['factor_sigmas'] = {}
+        results['factor_sigmas'].update(unique_factors)
+
         # Set the main factor for compatibility (use first factor found)
         main_factor = list(unique_factors.keys())[0]
         results['factor_found'] = main_factor
+
+        # Store sigma for the main factor (for API submission)
+        results['sigma'] = unique_factors[main_factor]
 
         self.logger.info(f"Factors found: {list(unique_factors.keys())}")
 
@@ -285,6 +293,18 @@ class ECMWrapper(BaseWrapper):
         # Final deduplication of factors found across all batches
         if 'factors_found' in results and results['factors_found']:
             results['factors_found'] = list(dict.fromkeys(results['factors_found']))  # Preserve order while deduplicating
+
+        # Extract parametrization from raw output (look for "sigma=1:xxx" or "sigma=3:xxx")
+        if 'parametrization' not in results:
+            parametrization = 3  # Default to param 3
+            raw_output = results.get('raw_output', '')
+            # Look for sigma pattern in output
+            sigma_match = ECMPatterns.SIGMA_COLON_FORMAT.search(raw_output)
+            if sigma_match:
+                sigma_str = sigma_match.group(1)
+                if ':' in sigma_str:
+                    parametrization = int(sigma_str.split(':')[0])
+            results['parametrization'] = parametrization
 
         # Save raw output if configured
         if self.config['execution']['save_raw_output']:
@@ -438,7 +458,17 @@ class ECMWrapper(BaseWrapper):
             sigma_used = stage2_sigma if stage2_factor else None
             self.logger.info(f"Factor found in {stage_found}: {factor_found}")
             self.log_factor_found(composite, factor_found, b1, b2, curves, method="ecm", sigma=sigma_used, program="GMP-ECM (ECM)")
-        
+
+        # Extract parametrization from stage 1 output
+        parametrization = 3  # Default
+        if stage1_output:
+            sigma_match = ECMPatterns.SIGMA_COLON_FORMAT.search(stage1_output)
+            if sigma_match:
+                sigma_str = sigma_match.group(1)
+                if ':' in sigma_str:
+                    parametrization = int(sigma_str.split(':')[0])
+        results['parametrization'] = parametrization
+
         results['curves_completed'] = actual_curves
         results['execution_time'] = time.time() - start_time
 
@@ -872,10 +902,20 @@ class ECMWrapper(BaseWrapper):
         # Remove duplicate sigma values and log summary
         unique_sigma_values = list(set(all_sigma_values))
         self.logger.info(f"Multiprocess run used {len(unique_sigma_values)} unique sigma values")
-        
+
+        # Extract parametrization from sigma values (format: "1:xxx" or "3:xxx")
+        parametrization = None
+        if unique_sigma_values:
+            first_sigma = unique_sigma_values[0]
+            if ':' in first_sigma:
+                parametrization = int(first_sigma.split(':')[0])
+            else:
+                parametrization = 3  # Default
+
         results['factor_found'] = factor_found
         results['sigma'] = factor_sigma  # Sigma that found the factor (if any)
         results['sigma_values'] = unique_sigma_values  # All sigma values used
+        results['parametrization'] = parametrization
         results['curves_completed'] = actual_curves_completed
         results['execution_time'] = time.time() - start_time
         
