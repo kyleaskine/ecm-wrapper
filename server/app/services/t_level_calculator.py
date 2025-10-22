@@ -354,6 +354,34 @@ class TLevelCalculator:
         logger.info("Using fallback t-level estimation (returns 0.0)")
         return 0.0
 
+    def recalculate_composite_t_level(self, db, composite) -> float:
+        """
+        Recalculate the t-level for a composite based on all its ECM attempts.
+
+        Args:
+            db: Database session
+            composite: Composite model instance
+
+        Returns:
+            Updated t-level value
+        """
+        from ..models.attempts import ECMAttempt
+
+        # Get all ECM attempts for this composite
+        attempts = db.query(ECMAttempt).filter(
+            ECMAttempt.composite_id == composite.id
+        ).all()
+
+        # Calculate new t-level
+        new_t_level = self.get_current_t_level_from_attempts(attempts)
+
+        # Update composite
+        composite.current_t_level = new_t_level
+        db.commit()
+
+        logger.info(f"Recalculated t-level for composite {composite.id}: {new_t_level}")
+        return new_t_level
+
     def suggest_next_ecm_parameters(self, target_t_level: float,
                                   current_t_level: float,
                                   digit_length: int) -> Dict[str, Any]:

@@ -99,3 +99,21 @@ def get_work_service(settings_dep=Depends(get_settings)):
         default_timeout_minutes=settings_dep.default_work_timeout_minutes,
         max_work_per_client=settings_dep.max_work_items_per_client
     )
+
+
+def get_t_level_calculator():
+    """
+    Dependency for t-level calculator service injection.
+
+    Returns:
+        TLevelCalculator instance
+
+    Example:
+        @router.post("/calculate")
+        async def calculate_t_level(
+            t_level_calc: TLevelCalculator = Depends(get_t_level_calculator)
+        ):
+            return t_level_calc.calculate_target_t_level(digit_length)
+    """
+    from .services.t_level_calculator import TLevelCalculator
+    return TLevelCalculator()

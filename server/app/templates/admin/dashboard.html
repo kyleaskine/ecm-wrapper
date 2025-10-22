@@ -261,6 +261,87 @@
 </div>
 
 <div class="section">
+    <div class="section-header">📊 Recent Curves (ECM Attempts)</div>
+    <div class="section-content">
+        {% if recent_attempts %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Composite</th>
+                    <th>Bits</th>
+                    <th>Digits</th>
+                    <th>T-Level Progress</th>
+                    <th>Method</th>
+                    <th>B1</th>
+                    <th>Curves</th>
+                    <th>Factor Found</th>
+                    <th>Client</th>
+                    <th>Time</th>
+                    <th>Submitted</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for attempt in recent_attempts %}
+                {% set comp = db.query(Composite).filter(Composite.id == attempt.composite_id).first() %}
+                {% set comp_display = (comp.number[:30] + '...') if (comp and comp.number|length > 30) else (comp.number if comp else 'Unknown') %}
+                {% set t_data = calc_t_progress(comp.current_t_level, comp.target_t_level) if comp else None %}
+                {% set comp_int = comp.current_composite|int if comp and comp.current_composite else 0 %}
+                {% set comp_bits = comp_int.bit_length() if comp_int > 0 else 0 %}
+                {% set comp_digits = comp.current_composite|length if comp and comp.current_composite else 0 %}
+                <tr>
+                    <td class="number">
+                        {% if comp %}
+                        <a href="/api/v1/admin/composites/{{ comp.id }}/details" style="color: inherit; text-decoration: none;">
+                            {{ comp_display }}
+                        </a>
+                        {% else %}
+                        {{ comp_display }}
+                        {% endif %}
+                    </td>
+                    <td>{{ comp_bits if comp_bits > 0 else 'N/A' }}</td>
+                    <td>{{ comp_digits if comp_digits > 0 else 'N/A' }}</td>
+                    <td>
+                        {% if t_data and t_data.target_t > 0 %}
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <div class="progress" style="width: 80px;">
+                                <div class="progress-bar" style="width: {{ [t_data.progress_pct, 100]|min }}%; background-color: {{ t_data.progress_color }}"></div>
+                            </div>
+                            <span class="small-text" style="font-weight: bold; color: {{ t_data.progress_color }}">
+                                t{{ t_data.current_t|round(1) }}/t{{ t_data.target_t|round(1) }}
+                            </span>
+                        </div>
+                        {% else %}
+                        <span style="color: #999;">N/A</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ attempt.method }}</td>
+                    <td>{{ attempt.b1 if attempt.b1 else 'N/A' }}</td>
+                    <td>{{ attempt.curves_completed }}</td>
+                    <td>
+                        {% if attempt.factor_found %}
+                        <span class="factor">{{ attempt.factor_found }}</span>
+                        {% else %}
+                        None
+                        {% endif %}
+                    </td>
+                    <td class="small-text">{{ attempt.client_id if attempt.client_id else 'Unknown' }}</td>
+                    <td>{{ (attempt.execution_time_seconds|round(1) if attempt.execution_time_seconds is not none else 'N/A') }}{{ 's' if attempt.execution_time_seconds is not none else '' }}</td>
+                    <td class="small-text">{{ attempt.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                    <td>
+                        <button class="btn" onclick="deleteCurve({{ attempt.id }}, {{ comp.id if comp else 'null' }})" style="background: #dc3545; font-size: 0.85em; padding: 4px 8px;">Delete</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p>No recent curves found</p>
+        {% endif %}
+    </div>
+</div>
+
+<div class="section">
     <div class="section-header">🛠️ Admin Tools</div>
     <div class="section-content">
         <div class="tools">
@@ -395,6 +476,29 @@
             .catch(() => {
                 window.location.href = '/api/v1/admin/login';
             });
+    }
+
+    function deleteCurve(attemptId, compositeId) {
+        if (!compositeId) {
+            alert('Cannot delete curve: composite ID not found');
+            return;
+        }
+
+        if (confirm(`Delete this curve (attempt #${attemptId})?\n\nThis will:\n- Remove the ECM attempt from the database\n- Recalculate the t-level for the composite\n\nThis action cannot be undone!`)) {
+            fetchWithAuth(`/api/v1/admin/attempts/${attemptId}?composite_id=${compositeId}`, {method: 'DELETE'})
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'deleted') {
+                        alert(`Curve deleted successfully.\n\nT-level updated:\n  Before: t${data.old_t_level}\n  After: t${data.new_t_level}`);
+                        location.reload();
+                    } else {
+                        alert('Error deleting curve: ' + JSON.stringify(data));
+                    }
+                })
+                .catch(error => {
+                    alert('Error deleting curve: ' + error);
+                });
+        }
     }
 
     // Auto-refresh every 30 seconds using fetch to maintain auth

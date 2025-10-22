@@ -63,7 +63,7 @@ class PipelineStats:
 def gpu_worker(wrapper: ECMWrapper, numbers: list, b1: int, curves: int,
                residue_queue: queue.Queue, stats: PipelineStats,
                use_gpu: bool, gpu_device: Optional[int], gpu_curves: Optional[int],
-               verbose: bool, logger: logging.Logger):
+               verbose: bool, shutdown_event: threading.Event, logger: logging.Logger):
     """
     GPU worker thread: Process stage 1 for all numbers.
 
@@ -72,6 +72,10 @@ def gpu_worker(wrapper: ECMWrapper, numbers: list, b1: int, curves: int,
     logger.info(f"[GPU Thread] Starting stage 1 processing for {len(numbers)} numbers")
 
     for i, number in enumerate(numbers, 1):
+        # Check for shutdown signal
+        if shutdown_event.is_set():
+            logger.info("[GPU Thread] Shutdown requested, stopping stage 1 processing")
+            break
         try:
             logger.info(f"[GPU Thread] [{i}/{len(numbers)}] Starting stage 1 for {number[:30]}...")
 
@@ -118,6 +122,7 @@ def gpu_worker(wrapper: ECMWrapper, numbers: list, b1: int, curves: int,
                 'stage1_factor': stage1_factor,
                 'all_factors': all_factors,
                 'stage1_time': stage1_time,
+                'stage1_output': stage1_output,  # Pass output for parametrization extraction
                 'index': i,
                 'total': len(numbers)
             })
@@ -134,7 +139,7 @@ def cpu_worker(wrapper: ECMWrapper, b1: int, b2: int, stage2_workers: int,
                residue_queue: queue.Queue, stats: PipelineStats,
                verbose: bool, project: Optional[str], no_submit: bool,
                continue_after_factor: bool, progress_interval: int,
-               logger: logging.Logger):
+               shutdown_event: threading.Event, logger: logging.Logger):
     """
     CPU worker thread: Process stage 2 from residue queue.
 
@@ -143,6 +148,11 @@ def cpu_worker(wrapper: ECMWrapper, b1: int, b2: int, stage2_workers: int,
     logger.info(f"[CPU Thread] Starting stage 2 processing with {stage2_workers} workers")
 
     while True:
+        # Check for shutdown signal
+        if shutdown_event.is_set():
+            logger.info("[CPU Thread] Shutdown requested, draining queue and stopping")
+            # Don't process new work, but finish current item if in progress
+            break
         # Get next residue from queue
         work_item = residue_queue.get()
 
@@ -160,19 +170,23 @@ def cpu_worker(wrapper: ECMWrapper, b1: int, b2: int, stage2_workers: int,
             stage1_factor = work_item['stage1_factor']
             all_factors = work_item['all_factors']
             stage1_time = work_item['stage1_time']
+            stage1_output = work_item['stage1_output']
             idx = work_item['index']
             total = work_item['total']
 
-            logger.info(f"[CPU Thread] [{idx}/{total}] Starting stage 2 for {number[:30]}...")
+            logger.info(f"[CPU Thread] [{idx}/{total}] Processing result for {number[:30]}...")
 
-            # Skip stage 2 if factor found in stage 1 and B2 is 0
+            # Skip stage 2 if factor found in stage 1
             stage2_time = 0.0
-            if stage1_factor and b2 == 0:
-                logger.info(f"[CPU Thread] [{idx}/{total}] Skipping stage 2 (B2=0, factor found in stage 1)")
+            actual_b2 = 0 if stage1_factor else b2  # Set b2=0 when factor found in stage 1
+
+            if stage1_factor:
+                logger.info(f"[CPU Thread] [{idx}/{total}] Skipping stage 2 (factor found in stage 1)")
                 stage2_factor = None
                 stage2_sigma = None
             elif b2 > 0:
                 # Run stage 2
+                logger.info(f"[CPU Thread] [{idx}/{total}] Starting stage 2 for {number[:30]}...")
                 stage2_start = time.time()
                 early_termination = wrapper.config['programs']['gmp_ecm'].get('early_termination', True) and not continue_after_factor
                 stage2_result = wrapper._run_stage2_multithread(
@@ -186,8 +200,7 @@ def cpu_worker(wrapper: ECMWrapper, b1: int, b2: int, stage2_workers: int,
                 )
                 stage2_time = time.time() - stage2_start
 
-                # Extract factor and sigma
-                # Note: stage2_result is (factor, sigma) tuple if factor found, None if no factor
+                # Extract factor and sigma from stage 2
                 stage2_factor = None
                 stage2_sigma = None
                 if stage2_result:
@@ -201,31 +214,46 @@ def cpu_worker(wrapper: ECMWrapper, b1: int, b2: int, stage2_workers: int,
                 stage2_factor = None
                 stage2_sigma = None
 
-            # Submit results (split failure is rare and already logged as error)
-            if not no_submit:
-                factor_found = stage1_factor or stage2_factor
-
+            # Submit results (skip if shutdown requested or split failure)
+            if not no_submit and not shutdown_event.is_set():
                 # Calculate total execution time (stage 1 + stage 2)
                 total_time = stage1_time + stage2_time
 
-                # Build results dict for submission
+                # Build results dict using wrapper's pattern
                 results = {
                     'composite': number,
                     'b1': b1_actual,
-                    'b2': b2,
+                    'b2': actual_b2,  # Use actual_b2 (0 when factor found in stage 1)
                     'curves_requested': curves,
                     'curves_completed': curves,
-                    'factor_found': factor_found,
                     'method': 'ecm',
                     'two_stage': True,
                     'stage2_workers': stage2_workers,
                     'execution_time': total_time,
-                    'raw_output': ''
+                    'raw_output': stage1_output  # Include actual stage 1 output
                 }
 
-                # Handle multiple factors from stage 1
+                # Handle factors found in stage 1 using wrapper's method
                 if all_factors:
-                    results['factors_found'] = [f[0] for f in all_factors]
+                    wrapper._log_and_store_factors(
+                        all_factors, results, number, b1_actual, actual_b2, curves, "ecm", "GMP-ECM (ECM)"
+                    )
+                elif stage2_factor:
+                    # Handle stage 2 factor
+                    results['factor_found'] = stage2_factor
+                    results['sigma'] = stage2_sigma
+                    wrapper.log_factor_found(number, stage2_factor, b1_actual, actual_b2, curves,
+                                           method="ecm", sigma=stage2_sigma, program="GMP-ECM (ECM)")
+
+                # Extract parametrization from stage 1 output (reuse ecm-wrapper pattern)
+                parametrization = 3  # Default
+                if stage1_output:
+                    sigma_match = ecm_wrapper_module.ECMPatterns.SIGMA_COLON_FORMAT.search(stage1_output)
+                    if sigma_match:
+                        sigma_str = sigma_match.group(1)
+                        if ':' in sigma_str:
+                            parametrization = int(sigma_str.split(':')[0])
+                results['parametrization'] = parametrization
 
                 wrapper.submit_result(results, project, 'gmp-ecm-ecm')
                 logger.info(f"[CPU Thread] [{idx}/{total}] Submitted results (total time: {total_time:.1f}s)")
@@ -320,12 +348,15 @@ def main():
     # Create bounded queue (maxsize=1 keeps stages synchronized)
     residue_queue = queue.Queue(maxsize=1)
 
+    # Create shutdown event for graceful termination
+    shutdown_event = threading.Event()
+
     # Start CPU thread first (it will block waiting for work)
     cpu_thread = threading.Thread(
         target=cpu_worker,
         args=(wrapper, b1, b2, args.stage2_workers, residue_queue, stats,
               args.verbose, args.project, args.no_submit,
-              args.continue_after_factor, args.progress_interval, logger),
+              args.continue_after_factor, args.progress_interval, shutdown_event, logger),
         name="CPU-Stage2"
     )
     cpu_thread.start()
@@ -334,15 +365,40 @@ def main():
     gpu_thread = threading.Thread(
         target=gpu_worker,
         args=(wrapper, numbers, b1, curves, residue_queue, stats,
-              use_gpu, args.gpu_device, args.gpu_curves, args.verbose, logger),
+              use_gpu, args.gpu_device, args.gpu_curves, args.verbose, shutdown_event, logger),
         name="GPU-Stage1"
     )
     gpu_thread.start()
 
     # Wait for both threads to complete
     logger.info("Pipeline started, waiting for completion...")
-    gpu_thread.join()
-    cpu_thread.join()
+    try:
+        gpu_thread.join()
+        cpu_thread.join()
+    except KeyboardInterrupt:
+        logger.info("\n" + "="*60)
+        logger.info("Interrupt received, shutting down gracefully...")
+        logger.info("="*60)
+        shutdown_event.set()
+
+        # Give threads time to finish current work
+        logger.info("Waiting for threads to complete current work...")
+        gpu_thread.join(timeout=10)
+        cpu_thread.join(timeout=10)
+
+        if gpu_thread.is_alive() or cpu_thread.is_alive():
+            logger.warning("Threads did not terminate gracefully, forcing exit")
+        else:
+            logger.info("Threads terminated gracefully")
+
+        # Print partial stats
+        logger.info("="*60)
+        logger.info("Pipeline interrupted!")
+        logger.info(f"  Partial progress: {stats.stage2_completed}/{stats.total_numbers} numbers processed")
+        logger.info(f"  Factors found: {stats.factors_found}")
+        logger.info("  No results submitted for interrupted work")
+        logger.info("="*60)
+        sys.exit(1)
 
     # Final stats
     elapsed = time.time() - stats.start_time
