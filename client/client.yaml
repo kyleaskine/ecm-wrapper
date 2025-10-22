@@ -1,5 +1,16 @@
 api:
+  # Single endpoint (for backward compatibility)
   endpoint: http://localhost:8000/api/v1
+
+  # Multiple endpoints (submit to all of them)
+  # Uncomment and configure to submit to multiple servers simultaneously
+  # This allows testing on dev while tracking production work
+  # endpoints:
+  #   - url: http://localhost:8000/api/v1
+  #     name: local-dev
+  #   - url: https://production.example.com/api/v1
+  #     name: production
+
   retry_attempts: 3
   timeout: 30
 

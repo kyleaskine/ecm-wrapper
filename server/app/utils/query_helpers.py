@@ -8,6 +8,8 @@ from typing import Optional
 from sqlalchemy import and_, desc, func, distinct
 from sqlalchemy.orm import Session
 
+from .calculations import CompositeCalculations
+
 
 def get_recent_work_assignments(
     db: Session,
@@ -87,14 +89,8 @@ def get_composites_by_completion(
 
     composites = query.filter(and_(*filters)).all()
 
-    # Sort by completion percentage
-    def get_completion_pct(comp):
-        if comp.target_t_level and comp.target_t_level > 0:
-            current_t = comp.current_t_level or 0.0
-            return (current_t / comp.target_t_level) * 100
-        return 0.0
-
-    composites.sort(key=get_completion_pct, reverse=True)
+    # Sort by completion percentage using centralized calculation
+    composites = CompositeCalculations.sort_composites_by_progress(composites, reverse=True)
     return composites[:limit]
 
 

@@ -6,6 +6,7 @@ from ...database import get_db
 from ...schemas.work import WorkRequest, WorkResponse
 from ...services.work_assignment import WorkAssignmentService
 from ...config import get_settings
+from ...utils.transactions import transaction_scope
 
 router = APIRouter()
 settings = get_settings()
@@ -61,8 +62,9 @@ async def get_work(
         min_digits=min_digits
     )
 
-    # Get work assignment
-    work_response = work_service.get_work_for_client(db, work_request)
+    # Get work assignment within transaction
+    with transaction_scope(db, "get_work"):
+        work_response = work_service.get_work_for_client(db, work_request)
 
     return work_response
 
@@ -86,7 +88,8 @@ async def claim_work(
     Returns:
         Success status
     """
-    success = work_service.claim_work(db, work_id, client_id)
+    with transaction_scope(db, "claim_work"):
+        success = work_service.claim_work(db, work_id, client_id)
 
     if not success:
         raise HTTPException(
@@ -116,7 +119,8 @@ async def start_work(
     Returns:
         Success status
     """
-    success = work_service.start_work(db, work_id, client_id)
+    with transaction_scope(db, "start_work"):
+        success = work_service.start_work(db, work_id, client_id)
 
     if not success:
         raise HTTPException(
@@ -151,9 +155,10 @@ async def update_progress(
     Returns:
         Success status
     """
-    success = work_service.update_progress(
-        db, work_id, client_id, curves_completed, message
-    )
+    with transaction_scope(db, "update_progress"):
+        success = work_service.update_progress(
+            db, work_id, client_id, curves_completed, message
+        )
 
     if not success:
         raise HTTPException(
@@ -188,7 +193,8 @@ async def complete_work(
     Returns:
         Success status
     """
-    success = work_service.complete_work(db, work_id, client_id)
+    with transaction_scope(db, "complete_work"):
+        success = work_service.complete_work(db, work_id, client_id)
 
     if not success:
         raise HTTPException(
@@ -221,7 +227,8 @@ async def abandon_work(
     Returns:
         Success status
     """
-    success = work_service.abandon_work(db, work_id, client_id)
+    with transaction_scope(db, "abandon_work"):
+        success = work_service.abandon_work(db, work_id, client_id)
 
     if not success:
         raise HTTPException(
@@ -252,30 +259,21 @@ async def get_client_work_status(
         List of work assignments for the client
     """
     from ...models.work_assignments import WorkAssignment
-    from sqlalchemy import and_
+    from ...models.composites import Composite
+    from ...utils.serializers import serialize_work_assignment
+    from sqlalchemy.orm import joinedload
 
-    work_assignments = db.query(WorkAssignment).filter(
+    # Eagerly load composite relationship to avoid N+1 queries
+    work_assignments = db.query(WorkAssignment).options(
+        joinedload(WorkAssignment.composite)
+    ).filter(
         WorkAssignment.client_id == client_id
     ).order_by(WorkAssignment.created_at.desc()).limit(50).all()
 
     return {
         "client_id": client_id,
         "work_assignments": [
-            {
-                "work_id": work.id,
-                "composite_id": work.composite_id,
-                "method": work.method,
-                "b1": work.b1,
-                "b2": work.b2,
-                "curves_requested": work.curves_requested,
-                "curves_completed": work.curves_completed,
-                "status": work.status,
-                "assigned_at": work.assigned_at,
-                "claimed_at": work.claimed_at,
-                "expires_at": work.expires_at,
-                "completed_at": work.completed_at,
-                "estimated_time_minutes": work.estimated_time_minutes
-            }
+            serialize_work_assignment(work, truncate_composite=True)
             for work in work_assignments
         ]
     }

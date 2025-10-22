@@ -128,30 +128,46 @@ class ResidueFileManager:
             with open(file_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
 
-            # Find header and curve sections
+            # Detect format: GPU format (single-line) vs old format (multi-line)
+            # GPU format: each line has METHOD=...; PARAM=...; SIGMA=...; etc
+            # Old format: separate N=, B1=, SIGMA= lines
+            is_gpu_format = any('METHOD=ECM' in line and 'SIGMA=' in line and ';' in line for line in lines[:5])
+            self.logger.debug(f"Detected {'GPU' if is_gpu_format else 'CPU'} residue file format")
+
             header_lines: List[str] = []
             curve_blocks: List[List[str]] = []
-            current_block: List[str] = []
 
-            for line in lines:
-                # Header lines (N, B1, METHOD, etc.)
-                if any(marker in line for marker in ['N=', 'B1=', 'METHOD=ECM', 'CHECKSUM=']):
-                    header_lines.append(line)
-                # Sigma line starts a new curve block
-                elif 'SIGMA=' in line:
-                    if current_block:
-                        curve_blocks.append(current_block)
-                    current_block = [line]
-                # Continuation of current curve block
-                elif current_block:
-                    current_block.append(line)
+            if is_gpu_format:
+                # GPU format: each line is a complete curve
+                for line in lines:
+                    if ECMPatterns.RESUME_SIGMA_PATTERN.search(line):
+                        curve_blocks.append([line])
+            else:
+                # Old format: multi-line curves
+                current_block: List[str] = []
+                for line in lines:
+                    # Header lines (N, B1, METHOD, etc.)
+                    if any(marker in line for marker in ['N=', 'B1=', 'METHOD=ECM', 'CHECKSUM=']):
+                        header_lines.append(line)
+                    # Sigma line starts a new curve block
+                    elif ECMPatterns.RESUME_SIGMA_PATTERN.search(line):
+                        if current_block:
+                            curve_blocks.append(current_block)
+                        current_block = [line]
+                    # Continuation of current curve block
+                    elif current_block:
+                        current_block.append(line)
 
-            # Add final block
-            if current_block:
-                curve_blocks.append(current_block)
+                # Add final block
+                if current_block:
+                    curve_blocks.append(current_block)
 
             if not curve_blocks:
                 self.logger.warning(f"No curve blocks found in {file_path}")
+                # Debug: show first 20 lines of the file
+                self.logger.warning(f"File content (first 20 lines):")
+                for i, line in enumerate(lines[:20], 1):
+                    self.logger.warning(f"  Line {i}: {line.rstrip()}")
                 return []
 
             # Calculate curves per chunk

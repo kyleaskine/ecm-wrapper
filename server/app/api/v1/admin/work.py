@@ -10,6 +10,7 @@ from ....database import get_db
 from ....dependencies import verify_admin_key
 from ....utils.serializers import serialize_work_assignment
 from ....utils.query_helpers import get_recent_work_assignments, get_expired_work_assignments
+from ....utils.transactions import transaction_scope
 
 router = APIRouter()
 
@@ -66,8 +67,8 @@ async def cancel_work_assignment(
         )
 
     # Cancel the assignment
-    assignment.status = 'failed'
-    db.commit()
+    with transaction_scope(db, "cancel_work"):
+        assignment.status = 'failed'
 
     return {
         "work_id": work_id,
@@ -87,10 +88,9 @@ async def cleanup_expired_work(
     expired_assignments = get_expired_work_assignments(db)
 
     # Mark them as timeout
-    for assignment in expired_assignments:
-        assignment.status = 'timeout'
-
-    db.commit()
+    with transaction_scope(db, "cleanup_work"):
+        for assignment in expired_assignments:
+            assignment.status = 'timeout'
 
     return {
         "cleaned_up": len(expired_assignments),

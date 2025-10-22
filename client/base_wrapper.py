@@ -29,14 +29,42 @@ class BaseWrapper:
         username = self.config['client']['username']
         cpu_name = self.config['client']['cpu_name']
         self.client_id = f"{username}-{cpu_name}"
-        self.api_endpoint = self.config['api']['endpoint']
 
-        # Initialize API client
-        self.api_client = APIClient(
-            api_endpoint=self.api_endpoint,
-            timeout=self.config['api']['timeout'],
-            retry_attempts=self.config['api']['retry_attempts']
-        )
+        # Initialize API client(s) - support both single endpoint and multiple endpoints
+        self.api_clients = []
+        api_config = self.config['api']
+
+        # Check if multiple endpoints are configured
+        if 'endpoints' in api_config and api_config['endpoints']:
+            # Multiple endpoints mode
+            for endpoint_config in api_config['endpoints']:
+                client = APIClient(
+                    api_endpoint=endpoint_config['url'],
+                    timeout=api_config['timeout'],
+                    retry_attempts=api_config['retry_attempts']
+                )
+                self.api_clients.append({
+                    'client': client,
+                    'name': endpoint_config.get('name', endpoint_config['url']),
+                    'url': endpoint_config['url']
+                })
+            self.logger.info(f"Configured {len(self.api_clients)} API endpoints: {', '.join([c['name'] for c in self.api_clients])}")
+        else:
+            # Single endpoint mode (backward compatibility)
+            self.api_endpoint = api_config['endpoint']
+            client = APIClient(
+                api_endpoint=self.api_endpoint,
+                timeout=api_config['timeout'],
+                retry_attempts=api_config['retry_attempts']
+            )
+            self.api_clients.append({
+                'client': client,
+                'name': 'default',
+                'url': self.api_endpoint
+            })
+
+        # Keep backward compatibility reference to first client
+        self.api_client = self.api_clients[0]['client']
 
     def _validate_working_directory(self):
         """Validate that we're running from the correct directory."""
@@ -159,9 +187,14 @@ class BaseWrapper:
 
     def submit_result(self, results: Dict[str, Any], project: Optional[str] = None,
                      program: str = "unknown") -> bool:
-        """Submit results to API with retry logic."""
-        # Build payload using APIClient
-        payload = self.api_client.build_submission_payload(
+        """
+        Submit results to API endpoint(s) with retry logic.
+
+        If multiple endpoints are configured, submits to all of them.
+        Returns True if at least one submission succeeded.
+        """
+        # Build payload once (same for all endpoints)
+        payload = self.api_clients[0]['client'].build_submission_payload(
             composite=results['composite'],
             client_id=self.client_id,
             method=results.get('method', 'ecm'),
@@ -171,24 +204,49 @@ class BaseWrapper:
             project=project
         )
 
-        # Submit using APIClient
-        success = self.api_client.submit_result(
-            payload=payload,
-            save_on_failure=True,
-            results_context=results
-        )
+        # Submit to all configured endpoints
+        submission_results = []
+        for api_client_info in self.api_clients:
+            api_client = api_client_info['client']
+            endpoint_name = api_client_info['name']
 
-        # Submit additional factors if present and first submission succeeded
-        if success and 'factors_found' in results and len(results['factors_found']) > 1:
-            self.api_client.submit_multiple_factors(
-                results=results,
-                client_id=self.client_id,
-                program=program,
-                program_version=self.get_program_version(program),
-                project=project
-            )
+            try:
+                self.logger.info(f"Submitting to {endpoint_name} ({api_client_info['url']})")
+                success = api_client.submit_result(
+                    payload=payload,
+                    save_on_failure=True,
+                    results_context=results
+                )
 
-        return success
+                if success:
+                    self.logger.info(f"✓ Successfully submitted to {endpoint_name}")
+                    submission_results.append(True)
+
+                    # Submit additional factors if present and submission succeeded
+                    if 'factors_found' in results and len(results['factors_found']) > 1:
+                        api_client.submit_multiple_factors(
+                            results=results,
+                            client_id=self.client_id,
+                            program=program,
+                            program_version=self.get_program_version(program),
+                            project=project
+                        )
+                else:
+                    self.logger.warning(f"✗ Failed to submit to {endpoint_name}")
+                    submission_results.append(False)
+
+            except Exception as e:
+                self.logger.error(f"✗ Error submitting to {endpoint_name}: {str(e)}")
+                submission_results.append(False)
+
+        # Log summary if multiple endpoints
+        if len(self.api_clients) > 1:
+            success_count = sum(submission_results)
+            total_count = len(submission_results)
+            self.logger.info(f"Submission summary: {success_count}/{total_count} endpoints succeeded")
+
+        # Return True if at least one submission succeeded
+        return any(submission_results)
 
     def create_base_results(self, composite: str, method: str = "ecm", **kwargs) -> Dict[str, Any]:
         """Create standardized results dictionary."""

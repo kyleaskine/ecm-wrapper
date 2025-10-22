@@ -69,7 +69,7 @@ class FactorService:
         )
 
         db.add(new_factor)
-        db.commit()
+        db.flush()  # Make visible within transaction
         db.refresh(new_factor)
 
         return new_factor, True

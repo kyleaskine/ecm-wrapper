@@ -3,8 +3,17 @@
 # client.local.yaml is gitignored and will override settings from client.yaml
 
 api:
+  # Single endpoint mode (simple configuration)
   endpoint: https://ecm.kyleaskine.com/api/v1
   # endpoint: http://localhost:8000/api/v1  # Uncomment for local testing
+
+  # Multiple endpoints mode (submit to all servers simultaneously)
+  # Uncomment to enable multi-endpoint submission (useful for testing dev while tracking production work)
+  # endpoints:
+  #   - url: http://localhost:8000/api/v1
+  #     name: local-dev
+  #   - url: https://ecm.kyleaskine.com/api/v1
+  #     name: production
 
 client:
   username: YourUsername

@@ -117,6 +117,7 @@ def gpu_worker(wrapper: ECMWrapper, numbers: list, b1: int, curves: int,
                 'curves': actual_curves,
                 'stage1_factor': stage1_factor,
                 'all_factors': all_factors,
+                'stage1_time': stage1_time,
                 'index': i,
                 'total': len(numbers)
             })
@@ -158,12 +159,14 @@ def cpu_worker(wrapper: ECMWrapper, b1: int, b2: int, stage2_workers: int,
             curves = work_item['curves']
             stage1_factor = work_item['stage1_factor']
             all_factors = work_item['all_factors']
+            stage1_time = work_item['stage1_time']
             idx = work_item['index']
             total = work_item['total']
 
             logger.info(f"[CPU Thread] [{idx}/{total}] Starting stage 2 for {number[:30]}...")
 
             # Skip stage 2 if factor found in stage 1 and B2 is 0
+            stage2_time = 0.0
             if stage1_factor and b2 == 0:
                 logger.info(f"[CPU Thread] [{idx}/{total}] Skipping stage 2 (B2=0, factor found in stage 1)")
                 stage2_factor = None
@@ -184,6 +187,7 @@ def cpu_worker(wrapper: ECMWrapper, b1: int, b2: int, stage2_workers: int,
                 stage2_time = time.time() - stage2_start
 
                 # Extract factor and sigma
+                # Note: stage2_result is (factor, sigma) tuple if factor found, None if no factor
                 stage2_factor = None
                 stage2_sigma = None
                 if stage2_result:
@@ -197,9 +201,12 @@ def cpu_worker(wrapper: ECMWrapper, b1: int, b2: int, stage2_workers: int,
                 stage2_factor = None
                 stage2_sigma = None
 
-            # Submit results
+            # Submit results (split failure is rare and already logged as error)
             if not no_submit:
                 factor_found = stage1_factor or stage2_factor
+
+                # Calculate total execution time (stage 1 + stage 2)
+                total_time = stage1_time + stage2_time
 
                 # Build results dict for submission
                 results = {
@@ -212,7 +219,7 @@ def cpu_worker(wrapper: ECMWrapper, b1: int, b2: int, stage2_workers: int,
                     'method': 'ecm',
                     'two_stage': True,
                     'stage2_workers': stage2_workers,
-                    'execution_time': 0,  # Not tracking total time per number
+                    'execution_time': total_time,
                     'raw_output': ''
                 }
 
@@ -221,6 +228,7 @@ def cpu_worker(wrapper: ECMWrapper, b1: int, b2: int, stage2_workers: int,
                     results['factors_found'] = [f[0] for f in all_factors]
 
                 wrapper.submit_result(results, project, 'gmp-ecm-ecm')
+                logger.info(f"[CPU Thread] [{idx}/{total}] Submitted results (total time: {total_time:.1f}s)")
 
             stats.increment_stage2()
             logger.info(f"[CPU Thread] [{idx}/{total}] Complete ({stats.get_summary()})")

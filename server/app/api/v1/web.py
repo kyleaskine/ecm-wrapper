@@ -5,7 +5,9 @@ from sqlalchemy import desc
 from typing import List
 
 from ...database import get_db
+from ...dependencies import get_composite_service
 from ...models import Composite, ECMAttempt, Factor
+from ...services.composites import CompositeService
 from ...templates import templates
 
 router = APIRouter()
@@ -50,7 +52,8 @@ async def dashboard(request: Request, db: Session = Depends(get_db)):
 @router.get("/composites/find")
 async def find_composite_public(
     q: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    composite_service: CompositeService = Depends(get_composite_service)
 ):
     """Find composite by ID, number (formula), or current_composite value.
 
@@ -62,9 +65,8 @@ async def find_composite_public(
         Redirect to the composite's details page
     """
     from fastapi.responses import RedirectResponse
-    from ...services.composites import CompositeService
 
-    composite = CompositeService.find_composite_by_identifier(db, q)
+    composite = composite_service.find_composite_by_identifier(db, q)
     if not composite:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -82,15 +84,13 @@ async def find_composite_public(
 async def get_composite_details_public(
     composite_id: int,
     request: Request,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    composite_service: CompositeService = Depends(get_composite_service)
 ):
     """
     Public web page showing detailed information about a specific composite.
     """
-    from ...services.composite_manager import CompositeManager
-
-    composite_manager = CompositeManager()
-    details = composite_manager.get_composite_details(db, composite_id)
+    details = composite_service.get_composite_details(db, composite_id)
 
     if not details:
         return """

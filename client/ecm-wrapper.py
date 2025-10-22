@@ -440,12 +440,15 @@ class ECMWrapper(BaseWrapper):
                 )
 
                 if stage1_factor:
+                    # Stage 2 was never run, so set b2=0
+                    results['b2'] = 0
+
                     # Log ALL unique factors found in Stage 1
                     if all_stage1_factors:
-                        self._log_and_store_factors(all_stage1_factors, results, composite, b1, b2, curves, "ecm", "GMP-ECM (ECM)")
+                        self._log_and_store_factors(all_stage1_factors, results, composite, b1, 0, curves, "ecm", "GMP-ECM (ECM)")
                     else:
                         # Fallback to single factor logging
-                        self.log_factor_found(composite, stage1_factor, b1, b2, curves, method="ecm", sigma=None, program="GMP-ECM (ECM)")
+                        self.log_factor_found(composite, stage1_factor, b1, 0, curves, method="ecm", sigma=None, program="GMP-ECM (ECM)")
                         results['factor_found'] = stage1_factor
 
                     results['curves_completed'] = actual_curves
@@ -580,7 +583,9 @@ class ECMWrapper(BaseWrapper):
                 actual_curves = int(curve_match.group(1))
                 self.logger.info(f"Stage 1 actually completed {actual_curves} curves")
 
-            return process.returncode == 0, factor, actual_curves, output, all_factors
+            # Success if returncode is 0 (no factor) or if a factor was found (returncode 8)
+            success = process.returncode == 0 or factor is not None
+            return success, factor, actual_curves, output, all_factors
 
         except subprocess.SubprocessError as e:
             self.logger.error(f"Stage 1 subprocess error: {e}")

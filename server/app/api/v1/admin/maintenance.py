@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from ....database import get_db
 from ....dependencies import verify_admin_key
+from ....utils.transactions import transaction_scope
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -51,36 +52,34 @@ async def calculate_t_levels_for_all_composites(
     updated_count = 0
     current_t_updated = 0
 
-    for composite in composites:
-        try:
-            # Calculate/update target t-level if not set or if recalculating all
-            if composite.target_t_level is None or recalculate_all:
-                target_t = calculator.calculate_target_t_level(
-                    composite.digit_length,
-                    special_form=None,
-                    snfs_difficulty=composite.snfs_difficulty
-                )
-                composite.target_t_level = target_t
+    with transaction_scope(db, "recalculate_t_levels"):
+        for composite in composites:
+            try:
+                # Calculate/update target t-level if not set or if recalculating all
+                if composite.target_t_level is None or recalculate_all:
+                    target_t = calculator.calculate_target_t_level(
+                        composite.digit_length,
+                        special_form=None,
+                        snfs_difficulty=composite.snfs_difficulty
+                    )
+                    composite.target_t_level = target_t
 
-            # Recalculate current t-level from existing attempts
-            previous_attempts = db.query(ECMAttempt).filter(
-                ECMAttempt.composite_id == composite.id
-            ).all()
+                # Recalculate current t-level from existing attempts
+                previous_attempts = db.query(ECMAttempt).filter(
+                    ECMAttempt.composite_id == composite.id
+                ).all()
 
-            current_t = calculator.get_current_t_level_from_attempts(previous_attempts)
-            if current_t != composite.current_t_level:
-                composite.current_t_level = current_t
-                current_t_updated += 1
+                current_t = calculator.get_current_t_level_from_attempts(previous_attempts)
+                if current_t != composite.current_t_level:
+                    composite.current_t_level = current_t
+                    current_t_updated += 1
 
-            updated_count += 1
+                updated_count += 1
 
-        except Exception as e:
-            # Skip problematic composites but continue processing
-            logger.warning("Failed to update composite %s: %s", composite.id, e)
-            continue
-
-    # Commit all changes
-    db.commit()
+            except Exception as e:
+                # Skip problematic composites but continue processing
+                logger.warning("Failed to update composite %s: %s", composite.id, e)
+                continue
 
     return {
         "status": "completed",

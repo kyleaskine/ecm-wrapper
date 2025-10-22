@@ -95,6 +95,22 @@ curl -X POST http://localhost:8000/api/v1/results/ecm \
   -d '{"client_id": "test", "composite": "123", "factors": ["3", "41"]}'
 ```
 
+### Server Refactoring Documentation
+
+**IMPORTANT:** The server codebase underwent significant refactoring (Phase 1 & 2) on 2025-10-21:
+
+- **[REFACTORING_GUIDE.md](./server/REFACTORING_GUIDE.md)** - Complete migration guide with examples
+- **[REFACTORING_QUICK_REFERENCE.md](./server/REFACTORING_QUICK_REFERENCE.md)** - Quick lookup for new patterns
+
+**Key changes:**
+- ✅ Unified service architecture with dependency injection
+- ✅ Centralized error handling utilities
+- ✅ Centralized calculation utilities
+- ✅ Eliminated 300-400 lines of duplicate code
+- ✅ All routes use dependency injection (no module-level singletons)
+
+**If you're adding new routes or services, follow the patterns in the refactoring guide.**
+
 ## Architecture Overview
 
 ### ECM Coordination Model
@@ -206,6 +222,41 @@ Essential tables for ECM coordination:
 - **ECM factor extraction**: `r'Factor found in step \d+: (\d+)'` (ecm-wrapper.py:108)
 - **YAFU output parsing**: Multiple patterns for P/Q notation and factor formats (yafu-wrapper.py:144-198)
 - **Timeout handling**: 1 hour for ECM, 2-4 hours for YAFU operations
+
+## Recent Bug Fixes and Improvements
+
+### Two-Stage ECM Improvements
+- **Exit code handling**: Fixed stage 1 to treat factor discovery (exit code 8) as success, not failure
+- **B2 parameter accuracy**: When factor found in stage 1, now correctly submits with `b2=0` (stage 2 never ran)
+- **Timing accuracy**: Pipeline now submits combined stage1 + stage2 execution time
+
+### Residue File Handling
+- **GPU format support**: `residue_manager.py` now auto-detects and handles both GPU (single-line) and CPU (multi-line) residue file formats
+- **Format detection**: Checks first 5 lines for `METHOD=ECM; SIGMA=...; ...` pattern to identify GPU format
+
+### FactorDB Integration (aliquot-wrapper.py)
+- **Retry logic**: 3 automatic retries with exponential backoff (1s, 2s) for transient server errors (502, etc.)
+- **Enhanced logging**: All FactorDB operations logged to `client/data/logs/ecm_client.log` with:
+  - Success/failure status for each factor submission
+  - Partial failure tracking (some factors succeed, others fail)
+  - Retry attempt logging with countdowns
+- **View logs**: `grep "FactorDB" client/data/logs/ecm_client.log`
+
+### Aliquot Sequence Factorization
+- **Primality checks**: Added Miller-Rabin primality tests after trial division AND after ECM
+- **CADO-NFS failure detection**: Now properly detects when CADO crashes and stops sequence instead of submitting partial results
+- **Early termination**: Avoids wasting compute on ECM/CADO when cofactor is already prime
+
+### Pipeline Batch Processing
+- **Failure handling**: No longer submits results when stage 2 fails (e.g., residue file split errors)
+- **No false failures**: Fixed detection logic - `None` return from stage 2 means "no factor found" (success), not failure
+
+### Server Dashboard Improvements
+- **Group order display**: Composite details page now shows elliptic curve group order data for factors
+  - Shows: Factor, Sigma, Group Order, Group Order Factorization
+  - Only displayed when group order information is available (requires sigma and parametrization)
+- **Deduplicated factors**: Work summary now shows unique factors sorted numerically
+  - Same factor appearing in multiple attempts now shown only once
 
 ## Important File Locations
 

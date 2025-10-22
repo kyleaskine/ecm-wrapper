@@ -123,3 +123,31 @@ pylint *.py
 
 Required Python packages: `subprocess`, `yaml`, `requests`, `pathlib`
 External binaries: GMP-ECM and YAFU must be installed and accessible via configured paths
+
+## Recent Improvements
+
+### ECM Two-Stage Processing
+- **Exit code handling**: Stage 1 now correctly treats factor discovery (exit code 8) as success
+- **B2 accuracy**: When factor found in stage 1, results submitted with `b2=0` (stage 2 never ran)
+- **GPU residue format**: Auto-detects and handles GPU single-line residue file format
+
+### Aliquot Sequence Factorization (`aliquot-wrapper.py`)
+- **Primality checks**: Miller-Rabin tests after trial division AND after ECM to avoid wasting time
+- **CADO-NFS failure detection**: Properly detects CADO crashes and stops instead of submitting partial results
+- **FactorDB integration enhancements**:
+  - 3 automatic retries with exponential backoff (1s, 2s) for transient errors (502, timeouts)
+  - Comprehensive logging to `data/logs/ecm_client.log`
+  - Partial failure tracking (some factors succeed, others fail)
+  - View logs: `grep "FactorDB" data/logs/ecm_client.log`
+
+### Batch Pipeline (`scripts/run_batch_pipeline.py`)
+- **GPU format support**: Fixed residue file splitting for GPU-generated files
+- **Timing accuracy**: Submits combined stage1 + stage2 execution time
+- **No false failures**: Fixed detection - `None` means "no factor found" (success), not failure
+- **Testing mode**: Use `--no-submit` flag to test without submitting results
+
+### Residue File Manager (`residue_manager.py`)
+- **Format auto-detection**: Handles both GPU (single-line) and CPU (multi-line) residue formats
+- **GPU format**: `METHOD=ECM; PARAM=3; SIGMA=...; B1=...; N=...; X=...; ...` (all on one line)
+- **CPU format**: Separate `N=`, `B1=`, `SIGMA=` lines with multi-line curve blocks
+- **Debug logging**: Shows detected format and first 20 lines on parsing failures

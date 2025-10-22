@@ -22,15 +22,16 @@ from sqlalchemy.orm import Session
 
 from ....config import get_settings
 from ....database import get_db
-from ....dependencies import verify_admin_key
+from ....dependencies import verify_admin_key, get_composite_service
 from ....schemas.composites import BulkCompositeRequest
-from ....services.composite_manager import CompositeManager
+from ....services.composites import CompositeService
 from ....templates import templates
 from ....utils.html_helpers import get_unauthorized_redirect_html
+from ....utils.errors import get_or_404, not_found_error
+from ....utils.transactions import transaction_scope
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-composite_manager = CompositeManager()
 
 # Security: Maximum file upload size (10 MB)
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024
@@ -45,6 +46,7 @@ async def upload_composites(
     priority_column: Optional[str] = Form(None),  # pylint: disable=unused-argument
     project_name: Optional[str] = Form(None),
     db: Session = Depends(get_db),
+    composite_service: CompositeService = Depends(get_composite_service),
     _admin: bool = Depends(verify_admin_key)
 ):
     """Upload composites from a file.
@@ -75,18 +77,19 @@ async def upload_composites(
         if source_type == "auto":
             source_type = "csv" if file.filename and file.filename.endswith('.csv') else "text"
 
-        # Process based on file type
-        if source_type == "csv":
-            stats = composite_manager.bulk_load_composites(
-                db, content_str, source_type="csv",
-                default_priority=default_priority, project_name=project_name
-            )
-        else:
-            lines = content_str.strip().split('\n')
-            stats = composite_manager.bulk_load_composites(
-                db, lines, source_type="list",
-                default_priority=default_priority, project_name=project_name
-            )
+        # Process based on file type within a transaction
+        with transaction_scope(db, "bulk_upload"):
+            if source_type == "csv":
+                stats = composite_service.bulk_load_composites(
+                    db, content_str, source_type="csv",
+                    default_priority=default_priority, project_name=project_name
+                )
+            else:
+                lines = content_str.strip().split('\n')
+                stats = composite_service.bulk_load_composites(
+                    db, lines, source_type="list",
+                    default_priority=default_priority, project_name=project_name
+                )
 
         return {
             "filename": file.filename,
@@ -108,14 +111,16 @@ async def bulk_add_composites(
     default_priority: int = 0,
     project_name: Optional[str] = None,
     db: Session = Depends(get_db),
+    composite_service: CompositeService = Depends(get_composite_service),
     _admin: bool = Depends(verify_admin_key)
 ):
     """Add a list of composite numbers."""
     try:
-        stats = composite_manager.bulk_load_composites(
-            db, numbers, source_type="list",
-            default_priority=default_priority, project_name=project_name
-        )
+        with transaction_scope(db, "bulk_add"):
+            stats = composite_service.bulk_load_composites(
+                db, numbers, source_type="list",
+                default_priority=default_priority, project_name=project_name
+            )
         return {"input_count": len(numbers), **stats}
     except Exception as e:
         logger.error("Bulk add error: %s", str(e), exc_info=True)
@@ -129,6 +134,7 @@ async def bulk_add_composites(
 async def bulk_add_composites_structured(
     request: BulkCompositeRequest,
     db: Session = Depends(get_db),
+    composite_service: CompositeService = Depends(get_composite_service),
     _admin: bool = Depends(verify_admin_key)
 ):
     """Add composites with full metadata including SNFS fields."""
@@ -148,11 +154,12 @@ async def bulk_add_composites_structured(
             for c in request.composites
         ]
 
-        stats = composite_manager.bulk_load_composites(
-            db, composites_data, source_type="list",
-            default_priority=request.default_priority,
-            project_name=request.project_name
-        )
+        with transaction_scope(db, "bulk_structured"):
+            stats = composite_service.bulk_load_composites(
+                db, composites_data, source_type="list",
+                default_priority=request.default_priority,
+                project_name=request.project_name
+            )
 
         return {"input_count": len(request.composites), **stats}
     except Exception as e:
@@ -166,11 +173,12 @@ async def bulk_add_composites_structured(
 @router.get("/composites/status")
 async def get_queue_status(
     db: Session = Depends(get_db),
+    composite_service: CompositeService = Depends(get_composite_service),
     _admin: bool = Depends(verify_admin_key)
 ):
     """Get comprehensive status of the work queue."""
     try:
-        return composite_manager.get_work_queue_status(db)
+        return composite_service.get_work_queue_status(db)
     except Exception as e:
         logger.error("Queue status error: %s", str(e), exc_info=True)
         raise HTTPException(
@@ -183,6 +191,7 @@ async def get_queue_status(
 async def find_composite(
     q: str,
     db: Session = Depends(get_db),
+    composite_service: CompositeService = Depends(get_composite_service),
     _admin: bool = Depends(verify_admin_key)
 ):
     """Find composite by ID, number (formula), or current_composite value.
@@ -195,14 +204,12 @@ async def find_composite(
         Redirect to the composite's details page
     """
     from fastapi.responses import RedirectResponse
-    from ....services.composites import CompositeService
 
-    composite = CompositeService.find_composite_by_identifier(db, q)
-    if not composite:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Composite not found: {q}"
-        )
+    composite = get_or_404(
+        composite_service.find_composite_by_identifier(db, q),
+        "Composite",
+        q
+    )
 
     # Redirect to the canonical details page URL
     return RedirectResponse(
@@ -215,15 +222,14 @@ async def find_composite(
 async def get_composite_details(
     composite_id: int,
     db: Session = Depends(get_db),
+    composite_service: CompositeService = Depends(get_composite_service),
     _admin: bool = Depends(verify_admin_key)
 ):
     """Get detailed information about a specific composite."""
-    details = composite_manager.get_composite_details(db, composite_id)
-    if not details:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Composite not found"
-        )
+    details = get_or_404(
+        composite_service.get_composite_details(db, composite_id),
+        "Composite"
+    )
     return details
 
 
@@ -232,6 +238,7 @@ async def get_composite_details_page(
     composite_id: int,
     request: Request,
     db: Session = Depends(get_db),
+    composite_service: CompositeService = Depends(get_composite_service),
     x_admin_key: str = Header(None)
 ):
     """Web page showing detailed information about a specific composite."""
@@ -240,12 +247,10 @@ async def get_composite_details_page(
     if not x_admin_key or not secrets.compare_digest(x_admin_key, settings.admin_api_key):
         return get_unauthorized_redirect_html()
 
-    details = composite_manager.get_composite_details(db, composite_id)
-    if not details:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Composite not found"
-        )
+    details = get_or_404(
+        composite_service.get_composite_details(db, composite_id),
+        "Composite"
+    )
 
     return templates.TemplateResponse("admin/composite_details.html", {
         "request": request,
@@ -262,15 +267,13 @@ async def set_composite_priority(
     composite_id: int,
     priority: int,
     db: Session = Depends(get_db),
+    composite_service: CompositeService = Depends(get_composite_service),
     _admin: bool = Depends(verify_admin_key)
 ):
     """Set priority for a composite."""
-    success = composite_manager.set_composite_priority(db, composite_id, priority)
+    success = composite_service.set_composite_priority(db, composite_id, priority)
     if not success:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Composite not found"
-        )
+        raise not_found_error("Composite")
     return {
         "composite_id": composite_id,
         "priority": priority,
@@ -283,15 +286,13 @@ async def mark_composite_complete(
     composite_id: int,
     reason: str = "manual",
     db: Session = Depends(get_db),
+    composite_service: CompositeService = Depends(get_composite_service),
     _admin: bool = Depends(verify_admin_key)
 ):
     """Mark a composite as fully factored."""
-    success = composite_manager.mark_composite_complete(db, composite_id, reason)
+    success = composite_service.mark_composite_complete(db, composite_id, reason)
     if not success:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Composite not found"
-        )
+        raise not_found_error("Composite")
     return {
         "composite_id": composite_id,
         "status": "marked_complete",
@@ -304,44 +305,11 @@ async def remove_composite(
     composite_id: int,
     reason: str = "admin_removal",
     db: Session = Depends(get_db),
+    composite_service: CompositeService = Depends(get_composite_service),
     _admin: bool = Depends(verify_admin_key)
 ):
     """Remove a composite from the queue entirely."""
-    from ....models.composites import Composite
-    from ....models.work_assignments import WorkAssignment
-    from ....models.attempts import ECMAttempt
-    from ....models.factors import Factor
-
-    composite = db.query(Composite).filter(Composite.id == composite_id).first()
-    if not composite:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Composite not found"
-        )
-
-    # Cancel active work assignments
-    active_work = db.query(WorkAssignment).filter(
-        and_(
-            WorkAssignment.composite_id == composite_id,
-            WorkAssignment.status.in_(['assigned', 'claimed', 'running'])
-        )
-    ).all()
-
-    for work in active_work:
-        work.status = 'cancelled'
-
-    # Delete related records
-    db.query(ECMAttempt).filter(ECMAttempt.composite_id == composite_id).delete()
-    db.query(Factor).filter(Factor.composite_id == composite_id).delete()
-    db.query(WorkAssignment).filter(WorkAssignment.composite_id == composite_id).delete()
-
-    # Delete the composite
-    db.delete(composite)
-    db.commit()
-
-    return {
-        "composite_id": composite_id,
-        "status": "removed",
-        "reason": reason,
-        "cancelled_work_assignments": len(active_work)
-    }
+    result = composite_service.delete_composite(db, composite_id, reason)
+    if not result:
+        raise not_found_error("Composite")
+    return result

@@ -328,13 +328,18 @@ class AliquotWrapper(BaseWrapper):
         # Use CADO-NFS for remaining cofactor
         self.logger.info(f"Cofactor is {cofactor_digits} digits (composite), using CADO-NFS")
         cado_results = self.cado.run_cado_nfs(composite=str(current_composite), threads=self.threads, verbose=self.verbose)
+
+        # Check if CADO succeeded
+        if not cado_results.get('success', False):
+            self.logger.error(f"CADO-NFS failed to factor C{cofactor_digits}")
+            return False, {}, cado_results
+
         cado_factors = cado_results.get('factors_found', [])
         if cado_factors:
             all_factors.extend(cado_factors)
-
-        if not all_factors:
-            self.logger.error("Hybrid factorization failed - no factors found")
-            return False, {}, ecm_results
+        else:
+            self.logger.error("CADO-NFS succeeded but found no factors")
+            return False, {}, cado_results
 
         factorization = self.parse_factorization(all_factors)
         self.logger.info(f"Final factorization: {self.format_factorization(factorization)}")
@@ -586,24 +591,42 @@ class AliquotWrapper(BaseWrapper):
             for prime, exp in sorted(new_factors_to_submit.items()):
                 # Submit each occurrence of this prime factor
                 for occurrence in range(exp):
-                    try:
-                        form_data = {
-                            "number": str(n),
-                            "factor": str(prime)
-                        }
+                    submitted = False
+                    last_error = None
 
-                        response = requests.post(
-                            submission_url,
-                            data=form_data,
-                            cookies=cookies,
-                            timeout=30
-                        )
-                        response.raise_for_status()
-                        success_count += 1
-                        self.logger.debug(f"FactorDB: Submitted factor {prime} for {n}")
-                    except requests.RequestException as factor_err:
-                        failed_factors.append((prime, str(factor_err)))
-                        self.logger.error(f"FactorDB: Failed to submit factor {prime} (occurrence {occurrence+1}/{exp}): {factor_err}")
+                    # Retry up to 3 times with exponential backoff
+                    for attempt in range(3):
+                        try:
+                            form_data = {
+                                "number": str(n),
+                                "factor": str(prime)
+                            }
+
+                            response = requests.post(
+                                submission_url,
+                                data=form_data,
+                                cookies=cookies,
+                                timeout=30
+                            )
+                            response.raise_for_status()
+                            success_count += 1
+                            submitted = True
+                            if attempt > 0:
+                                self.logger.info(f"FactorDB: Submitted factor {prime} for {n} (succeeded on retry {attempt+1})")
+                            else:
+                                self.logger.debug(f"FactorDB: Submitted factor {prime} for {n}")
+                            break  # Success, exit retry loop
+                        except requests.RequestException as factor_err:
+                            last_error = factor_err
+                            if attempt < 2:  # Don't sleep after last attempt
+                                import time
+                                wait_time = 2 ** attempt  # 1s, 2s exponential backoff
+                                self.logger.warning(f"FactorDB: Retry {attempt+1}/3 failed for factor {prime} (occurrence {occurrence+1}/{exp}): {factor_err}. Retrying in {wait_time}s...")
+                                time.sleep(wait_time)
+
+                    if not submitted:
+                        failed_factors.append((prime, str(last_error)))
+                        self.logger.error(f"FactorDB: Failed to submit factor {prime} after 3 attempts (occurrence {occurrence+1}/{exp}): {last_error}")
 
             if failed_factors:
                 self.logger.warning(f"FactorDB: Partial submission - {success_count} succeeded, {len(failed_factors)} failed for {n}")

@@ -246,7 +246,7 @@ class WorkAssignmentService:
             logger.info(f"Marked work assignment {work.id} as timeout")
 
         if expired_work:
-            db.commit()
+            db.flush()  # Make changes visible within transaction
 
     def _find_suitable_composite(self, db: Session, work_request: WorkRequest) -> Optional[Composite]:
         """Find a composite suitable for the client's capabilities."""
@@ -343,7 +343,7 @@ class WorkAssignmentService:
         )
 
         db.add(work_assignment)
-        db.commit()
+        db.flush()  # Get ID and make visible within transaction
         db.refresh(work_assignment)
 
         logger.info(f"Created work assignment {work_id} for client {client_id}: "
@@ -366,7 +366,7 @@ class WorkAssignmentService:
 
         work.status = 'claimed'
         work.claimed_at = datetime.utcnow()
-        db.commit()
+        db.flush()  # Make changes visible within transaction
 
         logger.info(f"Work assignment {work_id} claimed by client {client_id}")
         return True
@@ -385,7 +385,7 @@ class WorkAssignmentService:
             return False
 
         work.status = 'running'
-        db.commit()
+        db.flush()  # Make changes visible within transaction
         return True
 
     def update_progress(self, db: Session, work_id: str, client_id: str,
@@ -410,7 +410,7 @@ class WorkAssignmentService:
         if curves_completed > work.curves_completed:
             work.extend_deadline()
 
-        db.commit()
+        db.flush()  # Make changes visible within transaction
         return True
 
     def complete_work(self, db: Session, work_id: str, client_id: str) -> bool:
@@ -428,7 +428,7 @@ class WorkAssignmentService:
 
         work.status = 'completed'
         work.completed_at = datetime.utcnow()
-        db.commit()
+        db.flush()  # Make changes visible within transaction
 
         logger.info(f"Work assignment {work_id} completed by client {client_id}")
         return True
@@ -448,7 +448,7 @@ class WorkAssignmentService:
 
         # Mark as failed so it can be reassigned
         work.status = 'failed'
-        db.commit()
+        db.flush()  # Make changes visible within transaction
 
         logger.info(f"Work assignment {work_id} abandoned by client {client_id}")
         return True

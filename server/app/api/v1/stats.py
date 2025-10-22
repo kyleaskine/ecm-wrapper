@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_
 
 from ...database import get_db
+from ...dependencies import get_composite_service
 from ...schemas.composites import (
     CompositeStats, EffortLevel, ECMWorkSummary,
     BatchStatusRequest, BatchStatusResponse, CompositeBatchStatus,
@@ -12,13 +13,16 @@ from ...schemas.composites import (
 )
 from ...models import Composite, ECMAttempt, Factor, ProjectComposite, Project
 from ...services.composites import CompositeService
+from ...utils.errors import get_or_404, not_found_error
+from ...utils.calculations import CompositeCalculations, ECMCalculations
 
 router = APIRouter()
 
 @router.get("/stats/{composite}", response_model=CompositeStats)
 async def get_composite_stats(
     composite: str = Path(..., description="The composite number to get stats for"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    composite_service: CompositeService = Depends(get_composite_service)
 ):
     """
     Get comprehensive statistics for a composite number.
@@ -30,9 +34,11 @@ async def get_composite_stats(
     - Associated projects
     """
     # Get composite from database
-    comp = CompositeService.get_composite_by_number(db, composite)
-    if not comp:
-        raise HTTPException(status_code=404, detail="Composite not found in database")
+    comp = get_or_404(
+        composite_service.get_composite_by_number(db, composite),
+        "Composite",
+        composite
+    )
 
     # Get all factors
     factors = db.query(Factor).filter(Factor.composite_id == comp.id).all()
@@ -54,16 +60,10 @@ async def get_composite_stats(
     last_attempt = max((attempt.created_at for attempt in attempts), default=None)
 
     # Group efforts by B1 level
-    effort_groups = {}
-    for attempt in attempts:
-        b1 = attempt.b1
-        if b1 not in effort_groups:
-            effort_groups[b1] = 0
-        effort_groups[b1] += attempt.curves_completed
-
+    effort_data = ECMCalculations.group_attempts_by_b1_sorted(attempts)
     effort_by_level = [
-        EffortLevel(b1=b1, curves=curves)
-        for b1, curves in sorted(effort_groups.items())
+        EffortLevel(b1=item['b1'], curves=item['curves'])
+        for item in effort_data
     ]
 
     ecm_work = ECMWorkSummary(
@@ -180,12 +180,11 @@ async def get_top_composites_by_progress(
     # Project filter
     if project_name:
         # Find project
-        project = db.query(Project).filter(Project.name == project_name).first()
-        if not project:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Project '{project_name}' not found"
-            )
+        project = get_or_404(
+            db.query(Project).filter(Project.name == project_name).first(),
+            "Project",
+            project_name
+        )
 
         # Join with ProjectComposite to filter by project
         query = query.join(
@@ -197,13 +196,7 @@ async def get_top_composites_by_progress(
     composites = query.filter(and_(*filters)).all()
 
     # Calculate completion percentage and sort
-    def get_completion_pct(comp):
-        if comp.target_t_level and comp.target_t_level > 0:
-            current_t = comp.current_t_level or 0.0
-            return (current_t / comp.target_t_level) * 100
-        return 0.0
-
-    composites.sort(key=get_completion_pct, reverse=True)
+    composites = CompositeCalculations.sort_composites_by_progress(composites, reverse=True)
     total = len(composites)
     composites = composites[:limit]
 
@@ -230,7 +223,7 @@ async def get_top_composites_by_progress(
             snfs_difficulty=comp.snfs_difficulty,
             target_t_level=comp.target_t_level,
             current_t_level=comp.current_t_level,
-            completion_pct=get_completion_pct(comp),
+            completion_pct=CompositeCalculations.get_completion_percentage(comp),
             priority=comp.priority,
             is_fully_factored=comp.is_fully_factored,
             projects=project_names

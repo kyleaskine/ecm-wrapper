@@ -105,6 +105,28 @@ Pipeline Stats: 1/100 complete, 0 factors found, 1.5 min elapsed
 - **Early termination**: Stage 2 workers can terminate early when factor found (unless `--continue-after-factor`)
 - **Result submission**: Automatic submission after each number completes (unless `--no-submit`)
 
+## Recent Bug Fixes
+
+### GPU Residue File Format Support
+- Fixed residue file splitting to handle GPU-generated residue files (single-line format)
+- Auto-detects format: GPU (`METHOD=ECM; SIGMA=...; ...`) vs CPU (multi-line)
+- Eliminates "No curve blocks found" errors with GPU stage 1
+
+### Accurate Timing Submission
+- Now submits combined `stage1_time + stage2_time` as execution time
+- Previous versions submitted 0 for execution time
+- Timing data is passed through the queue from GPU thread to CPU thread
+
+### Improved Failure Handling
+- Fixed false "Stage 2 failed" errors when no factor found
+- `None` return from stage 2 correctly treated as "no factor found" (success), not failure
+- Split failures are rare and properly logged separately
+
+### Factor Discovery in Stage 1
+- Fixed exit code handling: GMP-ECM returns exit code 8 when finding a factor (not 0)
+- Stage 1 now considered successful when factor found, regardless of exit code
+- Prevents "Stage 1 failed" errors immediately after discovering a factor
+
 ## Comparison with run_batch.sh
 
 **run_batch.sh** (Sequential):
