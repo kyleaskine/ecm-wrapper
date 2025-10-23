@@ -76,11 +76,7 @@ class CompositeService:
         Raises:
             ValueError: If number format is invalid
         """
-        # Validate the number string
-        if not validate_integer(number) and current_composite is None:
-            raise ValueError(f"Invalid number format: {number}")
-
-        # Check if composite already exists
+        # Check if composite already exists FIRST
         # Match by number OR current_composite to handle both upload scenarios
         existing = db.query(Composite).filter(
             (Composite.number == number) | (Composite.current_composite == number)
@@ -129,9 +125,11 @@ class CompositeService:
             return existing, False, updated
 
         # Create new composite
+        # If no current_composite provided, use number field (for backwards compatibility)
         if current_composite is None:
             current_composite = number
 
+        # Validate that current_composite is a valid integer
         if not validate_integer(current_composite):
             raise ValueError(f"Invalid current_composite format: {current_composite}")
 
