@@ -85,6 +85,7 @@ class CompositeService:
         if existing:
             # Update existing composite with new metadata
             updated = False
+            t_level_needs_update = False
 
             if current_composite is not None and existing.current_composite != current_composite:
                 if not validate_integer(current_composite):
@@ -92,6 +93,7 @@ class CompositeService:
                 existing.current_composite = current_composite
                 existing.digit_length = calculate_digit_length(current_composite)
                 updated = True
+                t_level_needs_update = True  # digit_length affects target t-level
 
             if has_snfs_form is not None and existing.has_snfs_form != has_snfs_form:
                 existing.has_snfs_form = has_snfs_form
@@ -100,6 +102,7 @@ class CompositeService:
             if snfs_difficulty is not None and existing.snfs_difficulty != snfs_difficulty:
                 existing.snfs_difficulty = snfs_difficulty
                 updated = True
+                t_level_needs_update = True  # snfs_difficulty affects target t-level
 
             if is_prime is not None and existing.is_prime != is_prime:
                 existing.is_prime = is_prime
@@ -121,6 +124,22 @@ class CompositeService:
                     number[:20] + "..." if len(number) > 20 else number,
                     existing.id
                 )
+
+                # Recalculate t-level if metadata that affects it changed
+                if t_level_needs_update:
+                    try:
+                        self.update_t_level(db, existing.id)
+                        logger.info(
+                            "Recalculated t-level for composite %s (target: %.1f)",
+                            existing.id,
+                            existing.target_t_level
+                        )
+                    except Exception as e:
+                        # Log but don't fail the update
+                        logger.warning(
+                            "Failed to update t-level for composite %s: %s",
+                            existing.id, str(e)
+                        )
 
             return existing, False, updated
 

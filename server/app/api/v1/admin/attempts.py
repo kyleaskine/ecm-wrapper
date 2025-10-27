@@ -54,6 +54,9 @@ async def delete_attempt(
     # Delete the attempt
     db.delete(attempt)
 
+    # Flush the deletion to ensure it's excluded from the recalculation query
+    db.flush()
+
     # Recalculate t-level for the composite (both operations in one transaction)
     new_t_level = t_level_calc.recalculate_composite_t_level(db, composite)
 
