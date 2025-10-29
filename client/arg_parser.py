@@ -17,6 +17,8 @@ def create_ecm_parser() -> argparse.ArgumentParser:
 
     # Core parameters
     parser.add_argument('--composite', '-n', help='Number to factor')
+    parser.add_argument('--request-work', action='store_true',
+                       help='Request work assignment from server (alternative to --composite)')
     parser.add_argument('--b1', type=int, help='B1 bound (overrides config)')
     parser.add_argument('--b2', type=int, help='B2 bound')
     parser.add_argument('--curves', '-c', type=int, help='Number of curves')
@@ -102,6 +104,17 @@ def validate_ecm_args(args: argparse.Namespace, config: Optional[Dict[str, Any]]
         Dictionary mapping argument names to error messages
     """
     errors = {}
+
+    # Work request mode validation
+    if hasattr(args, 'request_work') and args.request_work:
+        if args.composite:
+            errors['composite'] = "Cannot specify both --request-work and --composite. Choose one."
+        if args.tlevel:
+            errors['tlevel'] = "T-level mode not compatible with --request-work (server assigns parameters)."
+        if args.b1 or args.b2:
+            errors['parameters'] = "Cannot override B1/B2 in --request-work mode (server assigns parameters)."
+        # When requesting work, composite validation is skipped
+        return errors
 
     # T-level mode validation
     if hasattr(args, 'tlevel') and args.tlevel:

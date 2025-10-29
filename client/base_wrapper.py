@@ -185,26 +185,20 @@ class BaseWrapper:
             print(f"📋 Logged to: {factors_file}")
             print(f"📋 JSON: {factors_json_file}")
 
-    def submit_result(self, results: Dict[str, Any], project: Optional[str] = None,
-                     program: str = "unknown") -> bool:
+    def submit_payload_to_endpoints(self, payload: Dict[str, Any],
+                                    save_on_failure: bool = True,
+                                    results_context: Optional[Dict[str, Any]] = None) -> bool:
         """
-        Submit results to API endpoint(s) with retry logic.
+        Submit a pre-built payload to all configured API endpoints.
 
-        If multiple endpoints are configured, submits to all of them.
-        Returns True if at least one submission succeeded.
+        Args:
+            payload: Pre-built API submission payload
+            save_on_failure: Whether to save failed submissions to disk
+            results_context: Optional full results dict for failure persistence
+
+        Returns:
+            True if at least one submission succeeded, False otherwise
         """
-        # Build payload once (same for all endpoints)
-        payload = self.api_clients[0]['client'].build_submission_payload(
-            composite=results['composite'],
-            client_id=self.client_id,
-            method=results.get('method', 'ecm'),
-            program=program,
-            program_version=self.get_program_version(program),
-            results=results,
-            project=project
-        )
-
-        # Submit to all configured endpoints
         submission_results = []
         for api_client_info in self.api_clients:
             api_client = api_client_info['client']
@@ -214,8 +208,8 @@ class BaseWrapper:
                 self.logger.info(f"Submitting to {endpoint_name} ({api_client_info['url']})")
                 success = api_client.submit_result(
                     payload=payload,
-                    save_on_failure=True,
-                    results_context=results
+                    save_on_failure=save_on_failure,
+                    results_context=results_context
                 )
 
                 if success:
@@ -237,6 +231,32 @@ class BaseWrapper:
 
         # Return True if at least one submission succeeded
         return any(submission_results)
+
+    def submit_result(self, results: Dict[str, Any], project: Optional[str] = None,
+                     program: str = "unknown") -> bool:
+        """
+        Submit results to API endpoint(s) with retry logic.
+
+        If multiple endpoints are configured, submits to all of them.
+        Returns True if at least one submission succeeded.
+        """
+        # Build payload once (same for all endpoints)
+        payload = self.api_clients[0]['client'].build_submission_payload(
+            composite=results['composite'],
+            client_id=self.client_id,
+            method=results.get('method', 'ecm'),
+            program=program,
+            program_version=self.get_program_version(program),
+            results=results,
+            project=project
+        )
+
+        # Submit to all configured endpoints
+        return self.submit_payload_to_endpoints(
+            payload=payload,
+            save_on_failure=True,
+            results_context=results
+        )
 
     def create_base_results(self, composite: str, method: str = "ecm", **kwargs) -> Dict[str, Any]:
         """Create standardized results dictionary."""

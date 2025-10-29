@@ -13,8 +13,6 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
-import requests
-
 # Import BaseWrapper to reuse config loading logic
 from base_wrapper import BaseWrapper
 
@@ -155,33 +153,14 @@ class FailedResultsResender(BaseWrapper):
             return None
 
     def submit_result(self, submission: Dict[str, Any]) -> bool:
-        """Submit a single result to the API."""
-        url = f"{self.api_endpoint}/submit_result"
-
-        # Get timeout from config, default to 30 seconds
-        timeout = self.config.get('api', {}).get('timeout', 30)
-
-        try:
-            response = requests.post(
-                url,
-                json=submission,
-                timeout=timeout
-            )
-            response.raise_for_status()
-
-            result = response.json()
-            status = result.get('factor_status', 'unknown')
-
-            if status == 'duplicate':
-                print(f"🔄 Duplicate work detected for composite {submission['composite'][:50]}...")
-            else:
-                print(f"✅ Successfully resubmitted: {result.get('message')}")
-
-            return True
-
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Submission failed: {e}")
-            return False
+        """Submit a single result to all configured API endpoints using BaseWrapper infrastructure."""
+        # Use BaseWrapper's submit_payload_to_endpoints method
+        # Note: save_on_failure=False since we're already retrying a failed submission
+        return self.submit_payload_to_endpoints(
+            payload=submission,
+            save_on_failure=False,
+            results_context=None
+        )
 
     def mark_as_submitted(self, result_file: str):
         """Mark a result file as successfully submitted."""
@@ -276,8 +255,15 @@ Arguments:
 
     try:
         resender = FailedResultsResender(config_file, dry_run=dry_run)
-        print(f"🌐 API Endpoint: {resender.api_endpoint}")
+
+        # Print endpoint info (handle both single and multi-endpoint configs)
+        if hasattr(resender, 'api_endpoint'):
+            print(f"🌐 API Endpoint: {resender.api_endpoint}")
+        else:
+            endpoints_str = ', '.join([c['name'] for c in resender.api_clients])
+            print(f"🌐 API Endpoints: {endpoints_str}")
         print()
+
         stats = resender.resend_failed_results()
 
         print("\n📊 Resend Summary:")

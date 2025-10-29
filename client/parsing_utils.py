@@ -13,9 +13,9 @@ logger = logging.getLogger(__name__)
 # Timeout constants (seconds)
 class Timeouts:
     ECM_DEFAULT = 3600  # 1 hour
-    YAFU_ECM = 7200     # 2 hours
-    YAFU_AUTO = 14400   # 4 hours for NFS
-    CADO_NFS = 28800    # 8 hours for large NFS jobs
+    YAFU_ECM = None     # No timeout (for aliquot sequences)
+    YAFU_AUTO = None    # No timeout (for aliquot sequences)
+    CADO_NFS = None     # No timeout (for aliquot sequences)
 
 
 # Compiled regex patterns for performance
@@ -141,6 +141,11 @@ def _extract_factors_with_patterns(output: str) -> List[Tuple[str, Optional[str]
     This is the single source of truth for factor extraction, ensuring both
     parse_ecm_output() and parse_ecm_output_multiple() use identical logic.
 
+    Strategy:
+    - Start with PRIME_FACTOR matches (GMP-ECM's primality-tested results)
+    - Add GPU_FACTOR/STANDARD_FACTOR matches that are NOT products of known primes
+    - This avoids submitting composite factors like p1*p2 while keeping all legitimate factors
+
     Args:
         output: ECM program output
 
@@ -151,32 +156,93 @@ def _extract_factors_with_patterns(output: str) -> List[Tuple[str, Optional[str]
     factors = []
     seen_factors = set()  # Deduplicate factors found by multiple patterns
 
-    # Pattern 1: Prime factor announcements (highest priority - most reliable)
-    for match in ECMPatterns.PRIME_FACTOR.finditer(output):
-        factor = match.group(1)
-        if factor not in seen_factors:
-            sigma = extract_sigma_for_factor(output, factor, match.start())
-            factors.append((factor, sigma, "PRIME_FACTOR"))
-            seen_factors.add(factor)
-            logger.debug(f"Found factor via PRIME_FACTOR: {factor}")
+    # Step 1: Collect all factors from GPU and standard patterns (these have sigma values)
+    # Use dict to avoid duplicates: factor -> (sigma, pattern_name)
+    gpu_and_standard_map = {}
 
-    # Pattern 2: GPU format (includes sigma in match)
+    # Pattern 1: GPU format (includes sigma in match)
     for match in ECMPatterns.GPU_FACTOR.finditer(output):
         factor = match.group(1)
-        if factor not in seen_factors:
+        if factor not in gpu_and_standard_map:
             sigma = f"3:{match.group(2)}" if match.group(2) else None
-            factors.append((factor, sigma, "GPU_FACTOR"))
-            seen_factors.add(factor)
-            logger.debug(f"Found factor via GPU_FACTOR: {factor}")
+            gpu_and_standard_map[factor] = (sigma, "GPU_FACTOR")
+            logger.debug(f"Found factor via GPU_FACTOR: {factor} with sigma {sigma}")
 
-    # Pattern 3: Standard format
+    # Pattern 2: Standard format
     for match in ECMPatterns.STANDARD_FACTOR.finditer(output):
         factor = match.group(1)
-        if factor not in seen_factors:
+        if factor not in gpu_and_standard_map:
             sigma = extract_sigma_for_factor(output, factor, match.start())
-            factors.append((factor, sigma, "STANDARD_FACTOR"))
-            seen_factors.add(factor)
-            logger.debug(f"Found factor via STANDARD_FACTOR: {factor}")
+            gpu_and_standard_map[factor] = (sigma, "STANDARD_FACTOR")
+            logger.debug(f"Found factor via STANDARD_FACTOR: {factor} with sigma {sigma}")
+
+    # Step 2: Process prime factor announcements (GMP-ECM's primality-tested results)
+    # For each prime, find which GPU/STANDARD factor it divides and use that sigma
+    used_gpu_factors = set()  # Track which GPU factors have been matched to primes
+
+    for match in ECMPatterns.PRIME_FACTOR.finditer(output):
+        prime = match.group(1)
+        if prime in seen_factors:
+            continue
+
+        prime_int = int(prime)
+        matched_sigma = None
+
+        # Find the GPU/STANDARD factor that this prime divides
+        # Strategy: Prefer exact matches first, then divisibility matches
+        for gpu_factor, (gpu_sigma, pattern_name) in gpu_and_standard_map.items():
+            gpu_factor_int = int(gpu_factor)
+            # Exact match - this GPU report is the prime itself
+            if gpu_factor_int == prime_int:
+                matched_sigma = gpu_sigma
+                used_gpu_factors.add(gpu_factor)  # Mark as used
+                logger.debug(f"Prime {prime} exact match with GPU factor, using sigma {gpu_sigma}")
+                break
+
+        # If no exact match, look for a composite that contains this prime
+        if matched_sigma is None:
+            for gpu_factor, (gpu_sigma, pattern_name) in gpu_and_standard_map.items():
+                gpu_factor_int = int(gpu_factor)
+                if gpu_factor_int > prime_int and gpu_factor_int % prime_int == 0:
+                    matched_sigma = gpu_sigma
+                    logger.debug(f"Prime {prime} divides composite {gpu_factor}, using sigma {gpu_sigma}")
+                    break
+
+        # If no match found, try the fallback extraction
+        if matched_sigma is None:
+            matched_sigma = extract_sigma_for_factor(output, prime, match.start())
+            logger.debug(f"Prime {prime} using fallback sigma extraction: {matched_sigma}")
+
+        factors.append((prime, matched_sigma, "PRIME_FACTOR"))
+        seen_factors.add(prime)
+        logger.debug(f"Added prime factor: {prime} with sigma {matched_sigma}")
+
+    # Step 3: Add remaining GPU/STANDARD factors that aren't composites or already used
+    known_primes = [int(f[0]) for f in factors]
+
+    for candidate_factor, (candidate_sigma, pattern_name) in gpu_and_standard_map.items():
+        # Skip if already used (matched to a PRIME_FACTOR)
+        if candidate_factor in used_gpu_factors or candidate_factor in seen_factors:
+            logger.debug(f"Skipping {candidate_factor} (already used)")
+            continue
+
+        candidate_int = int(candidate_factor)
+
+        # Check if this candidate is divisible by any known prime (making it composite)
+        is_composite = False
+        for prime in known_primes:
+            if candidate_int > prime and candidate_int % prime == 0:
+                cofactor = candidate_int // prime
+                is_composite = True
+                logger.debug(f"Filtering {candidate_factor} (composite: {prime} × {cofactor})")
+                break
+
+        # If not divisible by any known prime, include it
+        if not is_composite:
+            factors.append((candidate_factor, candidate_sigma, pattern_name))
+            seen_factors.add(candidate_factor)
+            known_primes.append(candidate_int)  # Add to known primes for future checks
+            logger.debug(f"Added GPU/STANDARD factor: {candidate_factor}")
 
     return factors
 
