@@ -1282,57 +1282,6 @@ def main():
     errors = validate_ecm_args(args, wrapper.config)
     print_validation_errors(errors)
 
-    # Handle work request mode
-    work_id = None
-    if hasattr(args, 'request_work') and args.request_work:
-        client_id = wrapper.config['client'].get('username', 'default_user')
-        wrapper.logger.info(f"Requesting work assignment for client: {client_id}")
-
-        work_assignment = wrapper.api_client.get_work_assignment(
-            client_id=client_id,
-            methods='ecm,pm1,pp1',  # Accept all methods
-            max_digits=None  # No digit limit
-        )
-
-        if not work_assignment:
-            wrapper.logger.error("Failed to get work assignment from server")
-            sys.exit(1)
-
-        if 'work_id' not in work_assignment:
-            # No work available
-            wrapper.logger.info(work_assignment.get('message', 'No work available'))
-            sys.exit(0)
-
-        # Extract work assignment details
-        work_id = work_assignment['work_id']
-        args.composite = work_assignment['composite']
-        args.method = work_assignment['method']
-
-        # Extract parameters from parameters dict
-        params = work_assignment.get('parameters', {})
-        args.b1 = params.get('b1')
-        args.b2 = params.get('b2')  # May be None
-        args.curves = params.get('curves')
-
-        wrapper.logger.info(
-            f"Work assignment received: {work_id}\n"
-            f"  Method: {args.method}\n"
-            f"  Composite: {len(args.composite)}-digit number\n"
-            f"  B1: {args.b1}, B2: {args.b2}\n"
-            f"  Curves: {args.curves}"
-        )
-
-        # Claim and start the work to transition to "running" state
-        if not wrapper.api_client.claim_work(work_id, client_id):
-            wrapper.logger.error("Failed to claim work assignment")
-            sys.exit(1)
-
-        if not wrapper.api_client.start_work(work_id, client_id):
-            wrapper.logger.error("Failed to start work assignment")
-            sys.exit(1)
-
-        wrapper.logger.info(f"Work {work_id} claimed and started")
-
     # Use shared argument processing utilities
     b1_default, b2_default = get_method_defaults(wrapper.config, args.method)
     b1 = args.b1 or b1_default
@@ -1453,19 +1402,6 @@ def main():
         if results.get('curves_completed', 0) > 0:
             program_name = f'gmp-ecm-{results.get("method", "ecm")}'
             success = wrapper.submit_result(results, args.project, program_name)
-
-            # Mark work as completed if this was a work assignment
-            if work_id and success:
-                client_id = wrapper.config['client'].get('username', 'default_user')
-                completion_success = wrapper.api_client.complete_work(
-                    work_id=work_id,
-                    client_id=client_id,
-                    curves_completed=results.get('curves_completed', 0),
-                    execution_time=results.get('execution_time', 0.0)
-                )
-                if not completion_success:
-                    wrapper.logger.warning(f"Failed to mark work {work_id} as completed (but results were submitted)")
-
             sys.exit(0 if success else 1)
         else:
             wrapper.logger.warning("Skipping result submission due to failure (0 curves completed)")
