@@ -199,7 +199,7 @@ async def complete_work(
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Work assignment not found or not in running state"
+            detail="Work assignment not found or not in active state (assigned/claimed/running)"
         )
 
     return {"status": "completed", "work_id": work_id}

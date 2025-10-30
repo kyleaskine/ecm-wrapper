@@ -15,12 +15,14 @@ from ...models.attempts import ECMAttempt
 from ...models.work_assignments import WorkAssignment
 from ...services.t_level_calculator import TLevelCalculator
 from ...utils.transactions import transaction_scope
+from ...config import get_settings
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 # Initialize t-level calculator
 t_level_calc = TLevelCalculator()
+settings = get_settings()
 
 
 @router.get("/ecm-work")
@@ -50,6 +52,28 @@ async def get_ecm_work(
         ECMWorkResponse with assigned work or explanation if no work available
     """
     with transaction_scope(db, "get_ecm_work"):
+        # Check if client has too much active work
+        active_work_count = db.query(WorkAssignment).filter(
+            and_(
+                WorkAssignment.client_id == client_id,
+                WorkAssignment.status.in_(['assigned', 'claimed', 'running'])
+            )
+        ).count()
+
+        if active_work_count >= settings.max_work_items_per_client:
+            response_data = {
+                "work_id": None,
+                "composite_id": None,
+                "composite": None,
+                "digit_length": None,
+                "current_t_level": None,
+                "target_t_level": None,
+                "expires_at": None,
+                "message": f"Client has {active_work_count} active work assignments (max: {settings.max_work_items_per_client})"
+            }
+            content = json.dumps(response_data, default=str) + "\n"
+            return Response(content=content, media_type="application/json")
+
         # Build query for suitable composites
         query = db.query(Composite).filter(
             and_(

@@ -419,7 +419,7 @@ class WorkAssignmentService:
             and_(
                 WorkAssignment.id == work_id,
                 WorkAssignment.client_id == client_id,
-                WorkAssignment.status == 'running'
+                WorkAssignment.status.in_(['assigned', 'claimed', 'running'])
             )
         ).first()
 
