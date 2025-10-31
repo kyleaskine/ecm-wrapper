@@ -1122,7 +1122,8 @@ class ECMWrapper(BaseWrapper):
     def run_ecm_with_tlevel(self, composite: str, target_tlevel: float,
                            batch_size: int = 100, workers: int = 1,
                            use_two_stage: bool = False, verbose: bool = False,
-                           start_b1: Optional[int] = None) -> Dict[str, Any]:
+                           start_b1: Optional[int] = None, no_submit: bool = False,
+                           project: Optional[str] = None) -> Dict[str, Any]:
         """
         Run ECM progressively until target t-level reached.
         Uses progressive approach: starts at t20 and increases by 5 digits each step.
@@ -1136,6 +1137,8 @@ class ECMWrapper(BaseWrapper):
             use_two_stage: Use two-stage GPU mode (default: False)
             verbose: Verbose output
             start_b1: DEPRECATED - uses optimal B1 from Zimmermann table
+            no_submit: Skip API submission if True (default: False)
+            project: Optional project name for API submission
 
         Returns:
             Results dict with:
@@ -1222,6 +1225,12 @@ class ECMWrapper(BaseWrapper):
             current_t_level = self._calculate_tlevel(curve_history)
             self.logger.info(f"Reached t{current_t_level:.3f} after {curves_completed} curves")
 
+            # Submit this step's results if submission enabled
+            if not no_submit and curves_completed > 0:
+                program_name = f'gmp-ecm-{batch_results.get("method", "ecm")}'
+                self.logger.info(f"Submitting results for t{step_target:.1f} step (B1={optimal_b1}, {curves_completed} curves)")
+                self.submit_result(batch_results, project, program_name)
+
             # Handle factors
             found_factors = batch_results.get('factors_found', [])
             if found_factors:
@@ -1239,6 +1248,12 @@ class ECMWrapper(BaseWrapper):
                 if current_composite == 1:
                     self.logger.info("Fully factored by progressive ECM")
                     break
+
+                # Reset curve history for the new cofactor
+                # The work we've done doesn't directly apply to the smaller cofactor
+                curve_history = []
+                current_t_level = 0.0
+                self.logger.info(f"Starting fresh t-level progression on C{new_digits} cofactor")
             else:
                 self.logger.info(f"No factors found at this step")
 
@@ -1306,7 +1321,9 @@ def main():
             batch_size=args.batch_size,
             workers=args.workers if args.multiprocess else 1,
             use_two_stage=args.two_stage,
-            verbose=args.verbose
+            verbose=args.verbose,
+            no_submit=args.no_submit,
+            project=args.project
         )
     # Run ECM - choose mode based on arguments (validation already done by validate_ecm_args)
     elif args.resume_residues:
@@ -1397,7 +1414,8 @@ def main():
         )
 
     # Submit results unless disabled or failed
-    if not args.no_submit:
+    # Skip submission for t-level mode (each step already submitted)
+    if not args.no_submit and not (hasattr(args, 'tlevel') and args.tlevel):
         # Only submit if we actually completed some curves (not a failure)
         if results.get('curves_completed', 0) > 0:
             program_name = f'gmp-ecm-{results.get("method", "ecm")}'

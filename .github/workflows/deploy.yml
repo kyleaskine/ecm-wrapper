@@ -3,8 +3,9 @@ name: Deploy to Digital Ocean
 on:
   push:
     branches: [ main ]
-    paths: 
+    paths:
       - 'server/**'
+      - '.github/workflows/deploy.yml'
   workflow_dispatch:
     inputs:
       environment:

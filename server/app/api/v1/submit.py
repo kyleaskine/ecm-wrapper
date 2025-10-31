@@ -204,8 +204,19 @@ async def submit_result(
                             if not is_trivial_factor(factor_str, result_request.composite):
                                 # Check if this factor divides the current cofactor
                                 if verify_factor_divides(factor_str, current_cofactor):
+                                    # Check if dividing would result in 1 (final prime)
+                                    new_cofactor = divide_factor(current_cofactor, factor_str)
+                                    if new_cofactor == "1":
+                                        # This is the final prime - don't divide it out
+                                        logger.info(
+                                            f"Rejecting final prime factor {factor_str[:20]}{'...' if len(factor_str) > 20 else ''} "
+                                            f"- leaving as composite and marking as prime"
+                                        )
+                                        # We'll mark as prime after the loop
+                                        continue
+
                                     # Divide from the running cofactor (starts as original composite)
-                                    current_cofactor = divide_factor(current_cofactor, factor_str)
+                                    current_cofactor = new_cofactor
                                     logger.info(
                                         f"Divided out factor {factor_str[:20]}{'...' if len(factor_str) > 20 else ''}, "
                                         f"cofactor now has {len(current_cofactor)} digits"
