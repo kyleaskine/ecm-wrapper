@@ -133,7 +133,7 @@
                 {% for f in factors_with_group_orders %}
                 <tr>
                     <td class="number-display">{{ esc(f.factor) }}</td>
-                    <td>{{ "{:,}".format(f.sigma) if f.sigma else "N/A" }}</td>
+                    <td>{{ "{:,}".format(f.sigma|int) if f.sigma else "N/A" }}</td>
                     <td class="number-display">{{ esc(f.group_order) if f.group_order else "N/A" }}</td>
                     <td class="number-display">{{ esc(f.group_order_factorization) if f.group_order_factorization else "N/A" }}</td>
                 </tr>
