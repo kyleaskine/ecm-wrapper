@@ -18,7 +18,8 @@ class ECMWorkerProcess:
     """Encapsulates single-process ECM execution for multiprocessing pools."""
 
     def __init__(self, worker_id: int, composite: str, b1: int, b2: Optional[int],
-                 curves: int, verbose: bool, method: str, ecm_path: str):
+                 curves: int, verbose: bool, method: str, ecm_path: str,
+                 progress_interval: int = 0, progress_queue=None):
         """
         Initialize ECM worker process.
 
@@ -31,6 +32,8 @@ class ECMWorkerProcess:
             verbose: Enable verbose output
             method: Method name (ecm, pm1, pp1)
             ecm_path: Path to GMP-ECM binary
+            progress_interval: Report progress every N curves (0 to disable)
+            progress_queue: Queue for sending progress updates to parent
         """
         self.worker_id = worker_id
         self.composite = composite
@@ -40,6 +43,8 @@ class ECMWorkerProcess:
         self.verbose = verbose
         self.method = method
         self.ecm_path = ecm_path
+        self.progress_interval = progress_interval
+        self.progress_queue = progress_queue
 
     def execute(self, stop_event=None) -> Dict[str, Any]:
         """
@@ -83,14 +88,24 @@ class ECMWorkerProcess:
             sigma_found = None
             sigma_values = []
             current_curve_sigma = None  # Track sigma for the curve currently running
+            last_progress_report = 0
 
             def process_line(line: str, output_lines: list) -> None:
                 """Process each output line for curve tracking and factor detection."""
-                nonlocal curves_completed, factor_found, sigma_found, sigma_values, current_curve_sigma
+                nonlocal curves_completed, factor_found, sigma_found, sigma_values, current_curve_sigma, last_progress_report
 
                 # Track progress
                 if "Step 1 took" in line:
                     curves_completed += 1
+
+                    # Send progress updates if enabled
+                    if self.progress_interval > 0 and self.progress_queue is not None:
+                        if curves_completed - last_progress_report >= self.progress_interval:
+                            self.progress_queue.put({
+                                'worker_id': self.worker_id,
+                                'curves_completed': curves_completed
+                            })
+                            last_progress_report = curves_completed
 
                 # Collect sigma values and track current curve's sigma
                 sigma_match = ECMPatterns.SIGMA_COLON_FORMAT.search(line) or \
@@ -162,13 +177,15 @@ class ECMWorkerProcess:
 
 def run_worker_ecm_process(worker_id: int, composite: str, b1: int, b2: Optional[int],
                            curves: int, verbose: bool, method: str, ecm_path: str,
-                           result_queue, stop_event) -> None:
+                           result_queue, stop_event, progress_interval: int = 0,
+                           progress_queue=None) -> None:
     """
     Global wrapper function for multiprocessing compatibility.
 
     This thin wrapper allows ECMWorkerProcess to be used with multiprocessing
     by providing a pickleable top-level function.
     """
-    worker = ECMWorkerProcess(worker_id, composite, b1, b2, curves, verbose, method, ecm_path)
+    worker = ECMWorkerProcess(worker_id, composite, b1, b2, curves, verbose, method, ecm_path,
+                            progress_interval, progress_queue)
     result = worker.execute(stop_event)
     result_queue.put(result)

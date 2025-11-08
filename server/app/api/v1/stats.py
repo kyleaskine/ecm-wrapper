@@ -1,15 +1,15 @@
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import and_
+from sqlalchemy import and_, case, func
 
 from ...database import get_db
 from ...dependencies import get_composite_service
 from ...schemas.composites import (
     CompositeStats, EffortLevel, ECMWorkSummary,
     BatchStatusRequest, BatchStatusResponse, CompositeBatchStatus,
-    CompositeProgressItem, TopCompositesResponse
+    CompositeProgressItem, TopCompositesRequest, TopCompositesResponse
 )
 from ...models import Composite, ECMAttempt, Factor, ProjectComposite, Project
 from ...services.composites import CompositeService
@@ -141,30 +141,37 @@ async def get_batch_composite_status(
     return BatchStatusResponse(composites=results)
 
 
-@router.get("/composites/top-progress", response_model=TopCompositesResponse)
+@router.post("/composites/top-progress", response_model=TopCompositesResponse)
 async def get_top_composites_by_progress(
-    limit: int = Query(50, ge=1, le=1000, description="Maximum number of composites to return"),
-    project_name: Optional[str] = Query(None, description="Filter by project name"),
-    min_priority: Optional[int] = Query(None, description="Minimum priority level"),
-    include_factored: bool = Query(False, description="Include fully factored composites"),
+    request: TopCompositesRequest,
     db: Session = Depends(get_db)
 ):
     """
     Get top composites ranked by ECM progress (current_t_level/target_t_level).
 
     Returns composites sorted by completion percentage (highest first),
-    with optional filtering by project and priority.
+    with optional filtering by project, priority, difficulty, and specific formulas.
+
+    This is a POST endpoint to support large formula lists that would exceed URL length limits.
 
     Args:
-        limit: Maximum number of composites to return (default 50, max 1000)
-        project_name: Optional project name filter
-        min_priority: Optional minimum priority filter
-        include_factored: Include fully factored composites (default False)
+        request: Request body with filtering and pagination options
+                 - Difficulty filtering uses effective_difficulty = min(digit_length, snfs_difficulty)
+                   if snfs_difficulty exists, otherwise digit_length
         db: Database session
 
     Returns:
         TopCompositesResponse with composites sorted by progress
     """
+    # Extract values from request
+    limit = request.limit
+    project_name = request.project_name
+    min_priority = request.min_priority
+    include_factored = request.include_factored
+    formulas = request.formulas
+    min_difficulty = request.min_difficulty
+    max_difficulty = request.max_difficulty
+
     # Build base query
     query = db.query(Composite)
 
@@ -176,6 +183,21 @@ async def get_top_composites_by_progress(
 
     if min_priority is not None:
         filters.append(Composite.priority >= min_priority)
+
+    if formulas is not None and len(formulas) > 0:
+        filters.append(Composite.number.in_(formulas))
+
+    # Difficulty filters (effective difficulty = min of digit_length and snfs_difficulty)
+    # Use coalesce to handle NULL: least(digit_length, snfs_difficulty) OR digit_length if NULL
+    if min_difficulty is not None or max_difficulty is not None:
+        effective_difficulty = func.coalesce(
+            func.least(Composite.digit_length, Composite.snfs_difficulty),
+            Composite.digit_length
+        )
+        if min_difficulty is not None:
+            filters.append(effective_difficulty >= min_difficulty)
+        if max_difficulty is not None:
+            filters.append(effective_difficulty <= max_difficulty)
 
     # Project filter
     if project_name:

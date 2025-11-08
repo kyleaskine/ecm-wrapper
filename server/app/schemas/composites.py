@@ -152,6 +152,16 @@ class CompositeProgressItem(BaseModel):
         default_factory=list, description="Associated projects"
     )
 
+class TopCompositesRequest(BaseModel):
+    """Schema for top composites by progress request"""
+    limit: int = Field(50, ge=1, le=1000, description="Maximum number of composites to return")
+    project_name: Optional[str] = Field(None, description="Filter by project name")
+    min_priority: Optional[int] = Field(None, description="Minimum priority level")
+    include_factored: bool = Field(False, description="Include fully factored composites")
+    formulas: Optional[List[str]] = Field(None, description="Filter to only these composite formulas")
+    min_difficulty: Optional[float] = Field(None, description="Minimum effective difficulty (min of digit_length and snfs_difficulty)")
+    max_difficulty: Optional[float] = Field(None, description="Maximum effective difficulty (min of digit_length and snfs_difficulty)")
+
 class TopCompositesResponse(BaseModel):
     """Schema for top composites by progress response"""
     composites: List[CompositeProgressItem] = Field(

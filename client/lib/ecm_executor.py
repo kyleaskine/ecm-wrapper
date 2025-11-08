@@ -154,9 +154,9 @@ class ECMExecutor:
             # Parse output for factors
             factors_found = parse_ecm_output_multiple(output)
 
-            for factor_str in factors_found:
-                # Each factor needs its sigma extracted from output
-                sigma = self._extract_sigma_for_factor(output, factor_str)
+            for factor_str, sigma_from_parse in factors_found:
+                # Each factor comes with its sigma from parsing, fallback to extraction if needed
+                sigma = sigma_from_parse or self._extract_sigma_for_factor(output, factor_str)
                 result.add_factor(factor_str, sigma)
 
             if result.factors:

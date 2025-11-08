@@ -3,7 +3,7 @@ import subprocess
 import time
 import sys
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, cast
 from lib.base_wrapper import BaseWrapper
 from lib.parsing_utils import parse_ecm_output_multiple, count_ecm_steps_completed, ECMPatterns
 from lib.residue_manager import ResidueFileManager
@@ -176,7 +176,7 @@ class ECMWrapper(BaseWrapper):
                 use_gpu: bool = False, gpu_device: Optional[int] = None,
                 gpu_curves: Optional[int] = None, verbose: bool = False,
                 method: str = "ecm", continue_after_factor: bool = False,
-                quiet: bool = False) -> Dict[str, Any]:
+                quiet: bool = False, progress_interval: int = 0) -> Dict[str, Any]:
         """Run GMP-ECM or P-1 and capture output"""
         ecm_path = self.config['programs']['gmp_ecm']['path']
 
@@ -236,14 +236,19 @@ class ECMWrapper(BaseWrapper):
             try:
                 # Track progress in callback
                 batch_curves_completed = 0
+                last_progress_report = 0
 
                 def progress_callback(line, output_lines):
-                    nonlocal batch_curves_completed
+                    nonlocal batch_curves_completed, last_progress_report
                     if "Step 1 took" in line:
                         batch_curves_completed += 1
                         total_completed = curves_completed + batch_curves_completed
-                        if total_completed % 10 == 0:
-                            self.logger.info(f"Completed {total_completed}/{curves} curves")
+                        # Report progress based on progress_interval setting
+                        interval = progress_interval if progress_interval > 0 else 10
+                        if total_completed - last_progress_report >= interval:
+                            percentage = (total_completed / curves * 100) if curves > 0 else 0
+                            self.logger.info(f"Progress: {total_completed}/{curves} curves ({percentage:.1f}%)")
+                            last_progress_report = total_completed
 
                 # Stream subprocess output
                 _, output_lines = self._stream_subprocess_output(
@@ -251,7 +256,8 @@ class ECMWrapper(BaseWrapper):
                 )
 
                 stdout = '\n'.join(output_lines)
-                results['raw_outputs'].append(stdout)
+                raw_outputs = cast(List[str], results['raw_outputs'])
+                raw_outputs.append(stdout)
 
                 # Parse output for factors using multiple factor parsing
                 all_factors = parse_ecm_output_multiple(stdout)
@@ -268,7 +274,8 @@ class ECMWrapper(BaseWrapper):
                         # Store factors without logging
                         if 'factors_found' not in results:
                             results['factors_found'] = []
-                        results['factors_found'].extend([f[0] for f in all_factors])
+                        factors_list = cast(List[str], results['factors_found'])
+                        factors_list.extend([f[0] for f in all_factors])
                         if not results.get('factor_found'):
                             results['factor_found'] = all_factors[0][0]
 
@@ -294,17 +301,19 @@ class ECMWrapper(BaseWrapper):
                 break
 
         results['execution_time'] = time.time() - start_time
-        results['raw_output'] = '\n'.join(results['raw_outputs'])
+        raw_outputs_for_join = cast(List[str], results['raw_outputs'])
+        results['raw_output'] = '\n'.join(raw_outputs_for_join)
 
         # Final deduplication of factors found across all batches and full factorization
         if 'factors_found' in results and results['factors_found'] and not quiet:
             processor = ResultProcessor(self, composite, method, b1, b2, curves, f"GMP-ECM ({method.upper()})")
-            processor.fully_factor_and_store(results['factors_found'], results, quiet=False)
+            factors_for_processing = cast(List[str], results['factors_found'])
+            processor.fully_factor_and_store(factors_for_processing, results, quiet=False)
 
         # Extract parametrization from raw output (look for "sigma=1:xxx" or "sigma=3:xxx")
         if 'parametrization' not in results:
             parametrization = 3  # Default to param 3
-            raw_output = results.get('raw_output', '')
+            raw_output = cast(str, results.get('raw_output', ''))
             # Look for sigma pattern in output
             sigma_match = ECMPatterns.SIGMA_COLON_FORMAT.search(raw_output)
             if sigma_match:
@@ -582,7 +591,8 @@ class ECMWrapper(BaseWrapper):
 
     def run_ecm_multiprocess(self, composite: str, b1: int, b2: Optional[int] = None,
                             curves: int = 100, workers: int = 4, verbose: bool = False,
-                            method: str = "ecm", continue_after_factor: bool = False) -> Dict[str, Any]:
+                            method: str = "ecm", continue_after_factor: bool = False,
+                            progress_interval: int = 0) -> Dict[str, Any]:
         """Run ECM using multi-process approach: each worker runs full ECM cycles"""
 
         self.logger.info(f"Running multi-process ECM: {workers} workers, {curves} total curves")
@@ -621,9 +631,10 @@ class ECMWrapper(BaseWrapper):
         # to avoid pickling issues with instance methods
         import multiprocessing as mp
 
-        # Create shared variables for early termination
+        # Create shared variables for early termination and progress tracking
         manager = mp.Manager()
         result_queue = manager.Queue()
+        progress_queue = manager.Queue()
         stop_event = manager.Event()
 
         # Start worker processes
@@ -632,7 +643,8 @@ class ECMWrapper(BaseWrapper):
             p = mp.Process(
                 target=run_worker_ecm_process,
                 args=(worker_id, composite, b1, b2, worker_curves, verbose, method,
-                      self.config['programs']['gmp_ecm']['path'], result_queue, stop_event)
+                      self.config['programs']['gmp_ecm']['path'], result_queue, stop_event,
+                      progress_interval, progress_queue)
             )
             p.start()
             processes.append(p)
@@ -644,10 +656,27 @@ class ECMWrapper(BaseWrapper):
         total_curves_completed = 0
         completed_workers = 0
         results_received = []
+        worker_progress = {}  # Track progress per worker: {worker_id: curves_completed}
 
         # Use a shorter timeout and check processes more frequently
         while completed_workers < len(processes):
             got_result = False
+
+            # Check for progress updates from workers
+            try:
+                while True:  # Drain all progress updates
+                    progress_update = progress_queue.get_nowait()
+                    worker_id = progress_update['worker_id']
+                    curves_done = progress_update['curves_completed']
+                    worker_progress[worker_id] = curves_done
+
+                    # Display aggregated progress if enabled
+                    if progress_interval > 0:
+                        total_progress = sum(worker_progress.values())
+                        percentage = (total_progress / curves * 100) if curves > 0 else 0
+                        self.logger.info(f"Progress: {total_progress}/{curves} curves ({percentage:.1f}%) across {len(worker_progress)} worker(s)")
+            except:
+                pass  # Queue is empty
 
             # Try to get results from queue with short timeout
             try:
@@ -1201,7 +1230,8 @@ class ECMWrapper(BaseWrapper):
                            use_two_stage: bool = False, verbose: bool = False,
                            start_b1: Optional[int] = None, no_submit: bool = False,
                            project: Optional[str] = None,
-                           auto_adjust_target: bool = False) -> Dict[str, Any]:
+                           auto_adjust_target: bool = False,
+                           progress_interval: int = 0) -> Dict[str, Any]:
         """
         Run ECM progressively until target t-level reached.
         Uses progressive approach: starts at specified t-level and increases by 5 digits each step.
@@ -1301,7 +1331,8 @@ class ECMWrapper(BaseWrapper):
                     b1=optimal_b1,
                     curves=curves_needed,
                     use_gpu=True,
-                    verbose=verbose
+                    verbose=verbose,
+                    progress_interval=progress_interval
                 )
             elif workers > 1:
                 batch_results = self.run_ecm_multiprocess(
@@ -1309,14 +1340,16 @@ class ECMWrapper(BaseWrapper):
                     b1=optimal_b1,
                     curves=curves_needed,
                     workers=workers,
-                    verbose=verbose
+                    verbose=verbose,
+                    progress_interval=progress_interval
                 )
             else:
                 batch_results = self.run_ecm(
                     composite=str(current_composite),
                     b1=optimal_b1,
                     curves=curves_needed,
-                    verbose=verbose
+                    verbose=verbose,
+                    progress_interval=progress_interval
                 )
 
             curves_completed = batch_results.get('curves_completed', 0)
@@ -1455,7 +1488,8 @@ def main():
             use_two_stage=args.two_stage,
             verbose=args.verbose,
             no_submit=args.no_submit,
-            project=args.project
+            project=args.project,
+            progress_interval=args.progress_interval
         )
     # Run ECM - choose mode based on arguments (validation already done by validate_ecm_args)
     elif args.resume_residues:
