@@ -32,13 +32,14 @@ async def get_ecm_work(
     min_digits: Optional[int] = None,
     max_digits: Optional[int] = None,
     timeout_days: int = 5,
+    work_type: str = "standard",
     db: Session = Depends(get_db)
 ):
     """
     Get ECM work assignment with t-level targeting.
 
-    This endpoint returns the smallest incomplete composite (current_t < target_t)
-    that matches the filter criteria.
+    This endpoint returns an incomplete composite (current_t < target_t)
+    that matches the filter criteria, sorted by work_type strategy.
 
     Args:
         client_id: Unique identifier for the requesting client
@@ -46,12 +47,20 @@ async def get_ecm_work(
         min_digits: Minimum number of digits
         max_digits: Maximum number of digits
         timeout_days: Work assignment expiration in days (default: 5)
+        work_type: Work assignment strategy - "standard" (smallest first) or "progressive" (least ECM done first)
         db: Database session
 
     Returns:
         ECMWorkResponse with assigned work or explanation if no work available
     """
     with transaction_scope(db, "get_ecm_work"):
+        # Validate work_type parameter
+        if work_type not in ["standard", "progressive"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid work_type: {work_type}. Must be 'standard' or 'progressive'"
+            )
+
         # Check if client has too much active work
         active_work_count = db.query(WorkAssignment).filter(
             and_(
@@ -100,11 +109,20 @@ async def get_ecm_work(
 
         query = query.filter(~Composite.id.in_(active_work_composites))
 
-        # Order by smallest digit length first, then oldest submission
-        composite = query.order_by(
-            Composite.digit_length.asc(),
-            Composite.created_at.asc()
-        ).first()
+        # Apply sorting strategy based on work_type
+        if work_type == "progressive":
+            # Progressive: prioritize composites with least ECM work done
+            composite = query.order_by(
+                Composite.current_t_level.asc(),
+                Composite.target_t_level.asc(),
+                Composite.digit_length.asc()
+            ).first()
+        else:  # "standard"
+            # Standard: prioritize smallest composites first
+            composite = query.order_by(
+                Composite.digit_length.asc(),
+                Composite.created_at.asc()
+            ).first()
 
         # No work available
         if not composite:
@@ -168,6 +186,12 @@ async def get_ecm_work(
                    f"{composite.digit_length}-digit composite, "
                    f"t{composite.current_t_level:.1f} → t{composite.target_t_level:.1f}")
 
+        # Build message based on work type strategy
+        if work_type == "progressive":
+            message = f"Assigned composite with least ECM work (t{composite.current_t_level:.1f})"
+        else:
+            message = "Assigned smallest incomplete composite"
+
         response_data = {
             "work_id": work_id,
             "composite_id": composite.id,
@@ -176,7 +200,7 @@ async def get_ecm_work(
             "current_t_level": composite.current_t_level,
             "target_t_level": composite.target_t_level,
             "expires_at": expires_at.isoformat() if expires_at else None,
-            "message": "Assigned smallest incomplete composite"
+            "message": message
         }
         content = json.dumps(response_data, default=str) + "\n"
         return Response(content=content, media_type="application/json")

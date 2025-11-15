@@ -28,6 +28,15 @@ python3 client/yafu-wrapper.py --composite "123456789012345" --mode auto
 # Test without API submission
 python3 client/ecm-wrapper.py --composite "123456789012345" --no-submit
 
+# Auto-work mode - continuously request and process work from server
+python3 client/ecm-wrapper.py --auto-work                    # Use server's target t-levels
+python3 client/ecm-wrapper.py --auto-work --work-count 5     # Process 5 assignments then exit
+python3 client/ecm-wrapper.py --auto-work --tlevel 35        # Override with client t-level
+python3 client/ecm-wrapper.py --auto-work --b1 50000 --b2 5000000 --curves 100  # Override with B1/B2
+python3 client/ecm-wrapper.py --auto-work --two-stage --b1 50000 --b2 5000000   # GPU two-stage mode
+python3 client/ecm-wrapper.py --auto-work --multiprocess --workers 8            # Multiprocess mode
+python3 client/ecm-wrapper.py --auto-work --min-digits 60 --max-digits 80       # Filter by size
+
 # Run batch processing scripts
 cd client/scripts/
 ./run_batch.sh                    # ECM batch
@@ -119,6 +128,49 @@ pytest test_factorization.py -v               # Test parsing logic
 - ✅ All routes use dependency injection (no module-level singletons)
 
 **If you're adding new routes or services, follow the patterns in the refactoring guide.**
+
+## New Features (2025-11)
+
+### Auto-Work Mode
+Clients can now continuously request and process work assignments from the server without manually specifying composites:
+
+**Implementation:**
+- **Client**: New `--auto-work` flag in `ecm-wrapper.py` (lines 1547-1751)
+- **API**: Uses `/ecm-work` endpoint to request assignments
+- **Work Lifecycle**: Automatic claim → execute → submit → complete workflow
+
+**Features:**
+- **Server t-level mode (default)**: Uses server's target_t_level and current_t_level from work assignment
+- **Client override modes**: Override with `--b1/--b2` or `--tlevel`
+- **Work count limit**: `--work-count N` to process N assignments then exit
+- **Filtering**: `--min-digits`, `--max-digits`, `--priority` to filter work
+- **Mode support**: Compatible with `--multiprocess` and `--two-stage` (B1/B2 mode only)
+- **Graceful shutdown**: Ctrl+C abandons current work assignment properly
+
+**API Methods** (`client/lib/api_client.py`):
+- `get_ecm_work()` - Request work from `/ecm-work` endpoint
+- `complete_work()` - Mark work complete via `POST /work/{work_id}/complete`
+- `abandon_work()` - Release work via `DELETE /work/{work_id}`
+
+**Example workflows:**
+```bash
+# Simple: Use server t-levels, run until stopped
+python3 ecm-wrapper.py --auto-work
+
+# Batch: Process 10 assignments
+python3 ecm-wrapper.py --auto-work --work-count 10
+
+# Custom params with multiprocess
+python3 ecm-wrapper.py --auto-work --tlevel 35 --multiprocess --workers 8
+```
+
+### Google Colab Support
+New `colab_setup.ipynb` notebook for running ECM client in Google Colab:
+- One-click setup with username input
+- Automatic ECM binary download from GitHub releases
+- Pre-configured with production API endpoint
+- GPU acceleration enabled by default
+- Instructions for batch processing via file upload
 
 ## Architecture Overview
 

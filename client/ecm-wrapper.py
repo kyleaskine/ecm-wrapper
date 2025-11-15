@@ -1544,6 +1544,207 @@ def main():
 
     signal.signal(signal.SIGINT, signal_handler)
 
+    # Auto-work mode: continuously request and process work assignments
+    if hasattr(args, 'auto_work') and args.auto_work:
+        work_count_limit = args.work_count if hasattr(args, 'work_count') and args.work_count else None
+
+        print("=" * 60)
+        if work_count_limit:
+            print(f"Auto-work mode enabled - will process {work_count_limit} assignment(s)")
+        else:
+            print("Auto-work mode enabled - requesting work from server")
+            print("Press Ctrl+C to stop")
+        print("=" * 60)
+        print()
+
+        # Get client ID from config
+        client_id = wrapper.config['client']['username']
+        current_work_id = None
+        completed_count = 0
+
+        try:
+            while not wrapper.interrupted:
+                # Request work from server
+                work = wrapper.api_client.get_ecm_work(
+                    client_id=client_id,
+                    min_digits=args.min_digits if hasattr(args, 'min_digits') else None,
+                    max_digits=args.max_digits if hasattr(args, 'max_digits') else None,
+                    priority=args.priority if hasattr(args, 'priority') else None,
+                    work_type=args.work_type if hasattr(args, 'work_type') else 'standard'
+                )
+
+                if not work:
+                    # No work available, wait and retry
+                    wrapper.logger.info("No work available, waiting 30 seconds before retry...")
+                    time.sleep(30)
+                    continue
+
+                # Store current work ID for cleanup on interrupt
+                current_work_id = work['work_id']
+                composite = work['composite']
+                digit_length = work['digit_length']
+
+                print()
+                print("=" * 60)
+                print(f"Processing work assignment {current_work_id}")
+                print(f"Composite: {composite[:50]}... ({digit_length} digits)")
+                print(f"T-level: {work.get('current_t_level', 0):.1f} → {work.get('target_t_level', 0):.1f}")
+                print("=" * 60)
+                print()
+
+                # Execute ECM - determine mode from parameters
+                try:
+                    has_b1_b2 = args.b1 is not None and args.b2 is not None
+                    has_client_tlevel = hasattr(args, 'tlevel') and args.tlevel is not None
+
+                    # Determine execution mode
+                    if has_client_tlevel or (not has_b1_b2 and not has_client_tlevel):
+                        # T-level mode (client-specified or server default)
+                        target_tlevel = args.tlevel if has_client_tlevel else work.get('target_t_level', 35.0)
+
+                        # Start from user-specified level, server's current level, or 0
+                        if hasattr(args, 'start_tlevel') and args.start_tlevel is not None:
+                            start_tlevel = args.start_tlevel
+                        else:
+                            start_tlevel = work.get('current_t_level', 0.0)
+
+                        mode_desc = "client t-level" if has_client_tlevel else "server t-level"
+                        print(f"Mode: {mode_desc} (start: {start_tlevel:.1f}, target: {target_tlevel:.1f})")
+
+                        # Resolve worker count for multiprocess
+                        workers = resolve_worker_count(args) if args.multiprocess else 1
+
+                        results = wrapper.run_ecm_with_tlevel(
+                            composite=composite,
+                            target_tlevel=target_tlevel,
+                            start_tlevel=start_tlevel,
+                            batch_size=args.batch_size if hasattr(args, 'batch_size') else 100,
+                            workers=workers,
+                            use_two_stage=False,  # T-level mode doesn't use two-stage
+                            verbose=args.verbose,
+                            no_submit=False,  # Always submit in auto-work mode
+                            project=args.project,
+                            progress_interval=args.progress_interval if hasattr(args, 'progress_interval') else 0
+                        )
+
+                    else:
+                        # B1/B2 mode with optional two-stage or multiprocess
+                        b1 = args.b1
+                        b2 = args.b2
+                        curves = args.curves if args.curves else (1 if args.two_stage else wrapper.config['programs']['gmp_ecm']['default_curves'])
+
+                        # Common parameters
+                        use_gpu, gpu_device, gpu_curves = resolve_gpu_settings(args, wrapper.config)
+                        sigma = None
+                        if hasattr(args, 'sigma') and args.sigma:
+                            sigma = args.sigma if ':' in args.sigma else int(args.sigma)
+                        param = args.param if hasattr(args, 'param') and args.param is not None else (3 if use_gpu else None)
+                        continue_after_factor = args.continue_after_factor if hasattr(args, 'continue_after_factor') else False
+
+                        if args.two_stage and args.method == 'ecm':
+                            # Two-stage mode
+                            print(f"Mode: two-stage GPU+CPU (B1={b1}, B2={b2}, curves={curves})")
+                            stage2_workers = args.stage2_workers if hasattr(args, 'stage2_workers') and args.stage2_workers != 4 else get_stage2_workers_default(wrapper.config)
+
+                            results = wrapper.run_ecm_two_stage(
+                                composite=composite,
+                                b1=b1,
+                                b2=b2,
+                                curves=curves,
+                                sigma=sigma,
+                                param=param,
+                                use_gpu=use_gpu,
+                                stage2_workers=stage2_workers,
+                                verbose=args.verbose,
+                                save_residues=None,
+                                resume_residues=None,
+                                gpu_device=gpu_device,
+                                gpu_curves=gpu_curves,
+                                continue_after_factor=continue_after_factor,
+                                progress_interval=args.progress_interval if hasattr(args, 'progress_interval') else 0,
+                                project=args.project,
+                                no_submit=False
+                            )
+
+                        elif args.multiprocess:
+                            # Multiprocess mode
+                            workers = resolve_worker_count(args)
+                            print(f"Mode: multiprocess (B1={b1}, B2={b2}, curves={curves}, workers={workers})")
+
+                            results = wrapper.run_ecm_multiprocess(
+                                composite=composite,
+                                b1=b1,
+                                b2=b2,
+                                curves=curves,
+                                workers=workers,
+                                verbose=args.verbose,
+                                continue_after_factor=continue_after_factor,
+                                method=args.method
+                            )
+
+                        else:
+                            # Standard mode
+                            print(f"Mode: standard (B1={b1}, B2={b2}, curves={curves})")
+
+                            results = wrapper.run_ecm(
+                                composite=composite,
+                                b1=b1,
+                                b2=b2,
+                                curves=curves,
+                                sigma=sigma,
+                                param=param,
+                                use_gpu=use_gpu,
+                                gpu_device=gpu_device,
+                                gpu_curves=gpu_curves,
+                                verbose=args.verbose,
+                                method=args.method,
+                                continue_after_factor=continue_after_factor
+                            )
+
+                        # Submit results for B1/B2 modes (t-level and two-stage handle submission internally)
+                        if not args.two_stage and results.get('curves_completed', 0) > 0:
+                            program_name = f'gmp-ecm-{results.get("method", "ecm")}'
+                            success = wrapper.submit_result(results, args.project, program_name)
+
+                            if not success:
+                                wrapper.logger.error("Failed to submit results, abandoning work assignment")
+                                wrapper.api_client.abandon_work(current_work_id, reason="submission_failed")
+                                current_work_id = None
+                                continue
+
+                    # Mark work as complete
+                    wrapper.api_client.complete_work(current_work_id, client_id)
+                    current_work_id = None
+                    completed_count += 1
+
+                    print()
+                    if work_count_limit:
+                        print(f"Work assignment completed successfully ({completed_count}/{work_count_limit})")
+                    else:
+                        print(f"Work assignment completed successfully (total: {completed_count})")
+                    print("=" * 60)
+                    print()
+
+                    # Check if we've reached the work count limit
+                    if work_count_limit and completed_count >= work_count_limit:
+                        print(f"Reached work count limit ({work_count_limit}), exiting...")
+                        break
+
+                except Exception as e:
+                    wrapper.logger.exception(f"Error processing work assignment: {e}")
+                    if current_work_id:
+                        wrapper.api_client.abandon_work(current_work_id, reason="execution_error")
+                        current_work_id = None
+
+        except KeyboardInterrupt:
+            print("\nShutdown requested...")
+            if current_work_id:
+                print(f"Abandoning current work assignment {current_work_id}...")
+                wrapper.api_client.abandon_work(current_work_id, reason="client_interrupted")
+
+        print(f"Auto-work mode stopped - completed {completed_count} assignment(s)")
+        sys.exit(0)
+
     # Use shared argument processing utilities
     b1_default, b2_default = get_method_defaults(wrapper.config, args.method)
     b1 = args.b1 or b1_default

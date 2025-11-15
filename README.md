@@ -47,6 +47,12 @@ python3 ecm-wrapper.py --composite "123456789012345" --multiprocess --workers 4 
 # Run ECM targeting t-level (progressive approach)
 python3 ecm-wrapper.py --composite "123456789012345" --tlevel 30
 
+# Auto-work mode - continuously get work from server
+python3 ecm-wrapper.py --auto-work                          # Use server t-levels
+python3 ecm-wrapper.py --auto-work --work-count 5           # Process 5 assignments
+python3 ecm-wrapper.py --auto-work --tlevel 35              # Override with client t-level
+python3 ecm-wrapper.py --auto-work --b1 50000 --b2 5000000  # Override with B1/B2
+
 # Run YAFU automatic factorization
 python3 yafu-wrapper.py --composite "123456789012345" --mode auto
 

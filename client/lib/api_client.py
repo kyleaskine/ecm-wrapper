@@ -260,3 +260,118 @@ class APIClient:
         except requests.exceptions.RequestException as e:
             self.logger.error(f"API health check failed: {e}")
             return False
+
+    def get_ecm_work(
+        self,
+        client_id: str,
+        min_digits: Optional[int] = None,
+        max_digits: Optional[int] = None,
+        priority: Optional[int] = None,
+        timeout_days: int = 5,
+        work_type: str = "standard"
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Request ECM work assignment from server.
+
+        Args:
+            client_id: Client identifier
+            min_digits: Minimum composite digit length (optional)
+            max_digits: Maximum composite digit length (optional)
+            priority: Minimum priority filter (optional)
+            timeout_days: Work assignment expiration in days (default: 5)
+            work_type: Work assignment strategy - "standard" (smallest first) or "progressive" (least ECM done first)
+
+        Returns:
+            Work assignment dictionary with keys:
+                - work_id: Work assignment ID
+                - composite_id: Database ID of composite
+                - composite: Number to factor
+                - digit_length: Number of digits
+                - current_t_level: Current t-level progress
+                - target_t_level: Target t-level
+                - expires_at: Expiration timestamp
+            Returns None if no work available or on error
+        """
+        url = f"{self.api_endpoint}/ecm-work"
+
+        # Build query parameters
+        params = {'client_id': client_id, 'timeout_days': timeout_days, 'work_type': work_type}
+        if min_digits is not None:
+            params['min_digits'] = min_digits
+        if max_digits is not None:
+            params['max_digits'] = max_digits
+        if priority is not None:
+            params['priority'] = priority
+
+        try:
+            response = requests.get(url, params=params, timeout=self.timeout)
+            response.raise_for_status()
+
+            data = response.json()
+
+            # Check if work was assigned
+            if data.get('work_id'):
+                self.logger.info(
+                    f"Received work assignment: composite {data['composite'][:30]}... "
+                    f"({data['digit_length']} digits, work_id={data['work_id']})"
+                )
+                return data
+            else:
+                # No work available
+                message = data.get('message', 'No work available')
+                self.logger.info(f"No work available: {message}")
+                return None
+
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Failed to request work: {e}")
+            return None
+
+    def complete_work(self, work_id: str, client_id: str) -> bool:
+        """
+        Mark work assignment as completed.
+
+        Args:
+            work_id: Work assignment ID to complete
+            client_id: Client ID completing the work
+
+        Returns:
+            True if successfully marked complete, False otherwise
+        """
+        url = f"{self.api_endpoint}/work/{work_id}/complete"
+
+        try:
+            response = requests.post(
+                url,
+                params={'client_id': client_id},
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            self.logger.info(f"Marked work {work_id} as complete")
+            return True
+
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Failed to mark work {work_id} as complete: {e}")
+            return False
+
+    def abandon_work(self, work_id: str, reason: str = "client_terminated") -> bool:
+        """
+        Abandon work assignment (release it back to the pool).
+
+        Args:
+            work_id: Work assignment ID to abandon
+            reason: Reason for abandoning (optional)
+
+        Returns:
+            True if successfully abandoned, False otherwise
+        """
+        url = f"{self.api_endpoint}/work/{work_id}"
+
+        try:
+            response = requests.delete(url, timeout=self.timeout)
+            response.raise_for_status()
+            self.logger.info(f"Abandoned work {work_id} (reason: {reason})")
+            return True
+
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Failed to abandon work {work_id}: {e}")
+            return False

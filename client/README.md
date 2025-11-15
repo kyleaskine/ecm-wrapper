@@ -28,6 +28,12 @@ Standalone Python clients for distributed integer factorization using GMP-ECM, Y
    # ECM targeting specific t-level
    python3 ecm-wrapper.py --composite "123456789012345" --tlevel 30
 
+   # Auto-work mode - continuously get work from server
+   python3 ecm-wrapper.py --auto-work                          # Use server t-levels
+   python3 ecm-wrapper.py --auto-work --work-count 5           # Process 5 assignments
+   python3 ecm-wrapper.py --auto-work --tlevel 35              # Override with client t-level
+   python3 ecm-wrapper.py --auto-work --multiprocess --workers 8  # Multiprocess mode
+
    # P-1 with GMP-ECM
    python3 ecm-wrapper.py --composite "123456789012345" --method pm1 --b1 1000000
 
@@ -65,6 +71,7 @@ Comprehensive wrapper for GMP-ECM with multiple execution modes:
 - **Two-stage**: GPU Stage 1 + multi-threaded CPU Stage 2 (optimal for large-scale ECM)
 - **Multiprocess**: Multi-core CPU parallelization
 - **T-level**: Progressive ECM targeting specific t-level (e.g., t30, t35)
+- **Auto-work**: Continuously request and process work assignments from server
 - **Stage 2 only**: Resume from existing residue files
 
 **Methods:** ECM (default), P-1 (`--method pm1`), P+1 (`--method pp1`)

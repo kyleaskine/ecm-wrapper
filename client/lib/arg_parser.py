@@ -16,7 +16,7 @@ def create_ecm_parser() -> argparse.ArgumentParser:
     parser.add_argument('--config', default='client.yaml', help='Config file path')
 
     # Core parameters
-    parser.add_argument('--composite', '-n', help='Number to factor')
+    parser.add_argument('--composite', '-n', help='Number to factor (not required in --auto-work mode)')
     parser.add_argument('--b1', type=int, help='B1 bound (overrides config)')
     parser.add_argument('--b2', type=int, help='B2 bound')
     parser.add_argument('--curves', '-c', type=int, help='Number of curves')
@@ -25,6 +25,16 @@ def create_ecm_parser() -> argparse.ArgumentParser:
     parser.add_argument('--batch-size', type=int, default=100, help='Batch size for t-level mode (default: 100)')
     parser.add_argument('--project', '-p', help='Project name')
     parser.add_argument('--no-submit', action='store_true', help='Do not submit to API')
+
+    # Auto-work mode
+    parser.add_argument('--auto-work', action='store_true',
+                       help='Continuously request and process work assignments from server (uses server t-levels unless --b1/--b2 or --tlevel specified)')
+    parser.add_argument('--work-count', type=int, help='Number of work assignments to complete before exiting (auto-work mode, default: unlimited)')
+    parser.add_argument('--min-digits', type=int, help='Minimum composite digit length (auto-work mode)')
+    parser.add_argument('--max-digits', type=int, help='Maximum composite digit length (auto-work mode)')
+    parser.add_argument('--priority', type=int, help='Minimum priority filter (auto-work mode)')
+    parser.add_argument('--work-type', choices=['standard', 'progressive'], default='standard',
+                       help='Work assignment strategy: standard (smallest first) or progressive (least ECM done first, default: standard)')
 
     # GPU options
     parser.add_argument('--gpu', action='store_true', help='Use GPU acceleration (CGBN)')
@@ -103,6 +113,48 @@ def validate_ecm_args(args: argparse.Namespace, config: Optional[Dict[str, Any]]
         Dictionary mapping argument names to error messages
     """
     errors = {}
+
+    # Auto-work mode validation (check first, before other modes)
+    if hasattr(args, 'auto_work') and args.auto_work:
+        has_b1_b2 = args.b1 is not None and args.b2 is not None
+        has_tlevel = hasattr(args, 'tlevel') and args.tlevel is not None
+
+        # Parameters are now optional - can use server's t-level data
+        # Three modes: server t-level (default), client B1/B2, or client t-level
+
+        # Two-stage only compatible with B1/B2 mode (not t-level mode)
+        if args.two_stage:
+            if has_tlevel:
+                errors['two_stage'] = "Two-stage mode not compatible with --tlevel. Use --b1/--b2 instead."
+            elif not has_b1_b2:
+                errors['two_stage'] = "Two-stage mode requires --b1 and --b2 to be specified"
+            # Warn if using two-stage with curves > 1 (GPU batches automatically)
+            if args.curves and args.curves > 1:
+                errors['curves'] = "Two-stage mode: GPU batches curves automatically. Use --curves 1 or omit."
+
+        # Multiprocess is allowed (works with t-level mode)
+        # Resume-residues and stage2-only not supported in auto-work
+        if args.resume_residues:
+            errors['resume_residues'] = "Auto-work mode not compatible with --resume-residues"
+        if args.stage2_only:
+            errors['stage2_only'] = "Auto-work mode not compatible with --stage2-only"
+
+        # Composite should not be specified in auto-work mode
+        if args.composite:
+            errors['composite'] = "Auto-work mode gets composites from server. Do not specify --composite."
+
+        # Return early to avoid conflicting validations
+        return errors
+
+    # Filter options only valid in auto-work mode
+    if hasattr(args, 'work_count') and args.work_count is not None and not args.auto_work:
+        errors['work_count'] = "--work-count only valid in --auto-work mode"
+    if hasattr(args, 'min_digits') and args.min_digits is not None and not args.auto_work:
+        errors['min_digits'] = "--min-digits only valid in --auto-work mode"
+    if hasattr(args, 'max_digits') and args.max_digits is not None and not args.auto_work:
+        errors['max_digits'] = "--max-digits only valid in --auto-work mode"
+    if hasattr(args, 'priority') and args.priority is not None and not args.auto_work:
+        errors['priority'] = "--priority only valid in --auto-work mode"
 
     # T-level mode validation
     if hasattr(args, 'tlevel') and args.tlevel:
