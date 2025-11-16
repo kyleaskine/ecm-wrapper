@@ -52,6 +52,7 @@ python3 ecm-wrapper.py --auto-work                          # Use server t-level
 python3 ecm-wrapper.py --auto-work --work-count 5           # Process 5 assignments
 python3 ecm-wrapper.py --auto-work --tlevel 35              # Override with client t-level
 python3 ecm-wrapper.py --auto-work --b1 50000 --b2 5000000  # Override with B1/B2
+python3 ecm-wrapper.py --auto-work --b1 26e7 --b2 4e11      # Scientific notation for large bounds
 
 # Run YAFU automatic factorization
 python3 yafu-wrapper.py --composite "123456789012345" --mode auto
@@ -208,7 +209,8 @@ ecm-wrapper/
 
 ## Recent Improvements
 
-### Client Enhancements (2025-10)
+### Client Enhancements (2025-10/11)
+- ✅ **Scientific notation for B1/B2**: `--b1 26e7 --b2 4e11` for easier entry of large bounds
 - ✅ **Multi-factor submission**: Properly handles multiple factors found in single ECM run with individual sigmas
 - ✅ **Two-stage ECM improvements**: Fixed exit code handling (factor in Stage 1 = success, not failure)
 - ✅ **Residue file handling**: Auto-detects GPU (single-line) vs CPU (multi-line) formats
@@ -217,12 +219,13 @@ ecm-wrapper/
 - ✅ **CADO-NFS failure detection**: Properly detects crashes, avoids submitting partial results
 - ✅ **Pipeline batch processing**: Fixed Stage 2 failure handling and timing accuracy
 
-### Server Refactoring (2025-10)
+### Server Refactoring (2025-10/11)
 - ✅ **Unified service architecture**: Dependency injection throughout (no module-level singletons)
 - ✅ **Centralized error handling**: Consistent error response patterns
 - ✅ **Calculation utilities**: Eliminated 300-400 lines of duplicate code
 - ✅ **Group order calculation**: Automatic elliptic curve group order via PARI/GP
 - ✅ **Admin dashboard improvements**: Auto-refresh, deduplicated factors, multi-factor indicators
+- ✅ **Testing status page**: Server-side pagination and filtering for 20k+ composites
 
 ### Testing Infrastructure
 - **Client tests**: 1,100+ lines covering factorization parsing, config management, API payloads

@@ -4,6 +4,22 @@
 
 {% block extra_head %}
 <script>
+    // Remove empty form fields before submission (prevents FastAPI parsing errors)
+    function cleanFormSubmit(event) {
+        const form = event.target;
+        const inputs = form.querySelectorAll('input[type="number"]');
+
+        // Disable empty inputs so they're not submitted
+        inputs.forEach(input => {
+            if (input.value === '' || input.value === null) {
+                input.disabled = true;
+            }
+        });
+
+        // Allow form to submit normally
+        return true;
+    }
+
     function sortTable(columnIndex) {
         const table = document.getElementById('composites-table');
         const tbody = table.querySelector('tbody');
@@ -210,7 +226,7 @@
 <div class="section">
     <div class="section-header">Filter Composites</div>
     <div class="section-content">
-        <form method="GET" action="/api/v1/dashboard/testing-status" style="display: flex; flex-wrap: wrap; gap: 15px; align-items: flex-end;">
+        <form method="GET" action="/api/v1/dashboard/testing-status" onsubmit="return cleanFormSubmit(event)" style="display: flex; flex-wrap: wrap; gap: 15px; align-items: flex-end;">
             <div style="flex: 1; min-width: 150px;">
                 <label for="min_t_level" style="display: block; margin-bottom: 5px; font-weight: 500; font-size: 0.9em;">Min T-Level</label>
                 <input type="number" id="min_t_level" name="min_t_level"

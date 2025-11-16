@@ -167,6 +167,7 @@ Implementation modules are organized in the `lib/` directory for clean separatio
   - Comprehensive validation (mode compatibility, required fields)
   - Default value resolution from config
   - GPU flag resolution logic
+  - Scientific notation support for B1/B2 (e.g., `--b1 26e7 --b2 4e11`)
 
 - **`lib/residue_manager.py`**: ECM residue file operations
   - Format auto-detection (GPU single-line vs CPU multi-line)
@@ -229,6 +230,7 @@ pytest tests/test_api_client.py -v        # Test API client
 - `test_api_client.py`: API payload building (262 lines)
 - `test_residue_manager.py`: Residue file parsing (130 lines)
 - `test_sigma_matching.py`: Sigma value extraction (122 lines)
+- `test_arg_parser.py`: Scientific notation parsing for B1/B2, parser integration (170 lines)
 
 ## Advanced Usage Examples
 
@@ -237,6 +239,11 @@ pytest tests/test_api_client.py -v        # Test API client
 # Stage 1 on GPU, Stage 2 on 8 CPU cores
 python3 ecm-wrapper.py --composite "123...456" \
   --two-stage --curves 10000 --b1 50000 --b2 12500000 \
+  --stage2-workers 8 --gpu-device 0
+
+# Using scientific notation for large bounds
+python3 ecm-wrapper.py --composite "123...456" \
+  --two-stage --curves 10000 --b1 26e7 --b2 4e11 \
   --stage2-workers 8 --gpu-device 0
 ```
 

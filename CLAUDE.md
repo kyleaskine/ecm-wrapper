@@ -33,6 +33,7 @@ python3 client/ecm-wrapper.py --auto-work                    # Use server's targ
 python3 client/ecm-wrapper.py --auto-work --work-count 5     # Process 5 assignments then exit
 python3 client/ecm-wrapper.py --auto-work --tlevel 35        # Override with client t-level
 python3 client/ecm-wrapper.py --auto-work --b1 50000 --b2 5000000 --curves 100  # Override with B1/B2
+python3 client/ecm-wrapper.py --auto-work --b1 26e7 --b2 4e11 --curves 100      # Scientific notation support
 python3 client/ecm-wrapper.py --auto-work --two-stage --b1 50000 --b2 5000000   # GPU two-stage mode
 python3 client/ecm-wrapper.py --auto-work --multiprocess --workers 8            # Multiprocess mode
 python3 client/ecm-wrapper.py --auto-work --min-digits 60 --max-digits 80       # Filter by size
@@ -371,6 +372,25 @@ pylint *.py
 ### Pipeline Batch Processing
 - **Failure handling**: No longer submits results when stage 2 fails (e.g., residue file split errors)
 - **No false failures**: Fixed detection logic - `None` return from stage 2 means "no factor found" (success), not failure
+
+### Scientific Notation Support (2025-11)
+- **B1/B2 parameters**: Now accept scientific notation for easier entry of large bounds
+  - Examples: `--b1 26e7` (260,000,000), `--b2 4e11` (400,000,000,000)
+  - Supports: lowercase/uppercase e (26e7, 26E7), decimals (2.6e8), explicit + sign (26e+7)
+  - Works in: `ecm-wrapper.py`, `yafu-wrapper.py`, `scripts/run_batch_pipeline.py`
+- **Unit tests**: Comprehensive test coverage in `client/tests/test_arg_parser.py` (14 tests, 170 lines)
+
+### Testing Status Page Improvements (2025-11)
+- **Server-side pagination**: Handles 20k+ composites efficiently (200 per page default)
+  - Page load: ~0.5s vs 10+ seconds previously (200 composites + 1 query vs N+1 queries)
+  - Previous/Next navigation with filter state preserved
+- **Server-side filtering**: Filter composites by:
+  - T-level range (min/max current t-level)
+  - Priority threshold (minimum priority)
+  - SNFS difficulty (exact match)
+- **Performance fix**: Eliminated N+1 query problem with aggregated method counts
+  - Single GROUP BY query instead of N separate queries per composite
+- **No auto-refresh**: Page no longer auto-refreshes (too heavy for large datasets)
 
 ### Server Dashboard Improvements
 - **Group order display**: Composite details page now shows elliptic curve group order data for factors
