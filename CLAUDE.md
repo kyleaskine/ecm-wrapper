@@ -38,6 +38,10 @@ python3 client/ecm-wrapper.py --auto-work --two-stage --b1 50000 --b2 5000000   
 python3 client/ecm-wrapper.py --auto-work --multiprocess --workers 8            # Multiprocess mode
 python3 client/ecm-wrapper.py --auto-work --min-digits 60 --max-digits 80       # Filter by size
 
+# Decoupled two-stage mode - separate GPU and CPU workers
+python3 client/ecm-wrapper.py --auto-work --stage1-only --b1 110000000 --curves 3000 --gpu  # GPU producer
+python3 client/ecm-wrapper.py --auto-work --stage2-work --b2 11000000000000 --stage2-workers 8  # CPU consumer
+
 # Run batch processing scripts
 cd client/scripts/
 ./run_batch.sh                    # ECM batch
@@ -152,6 +156,11 @@ Clients can now continuously request and process work assignments from the serve
 - `get_ecm_work()` - Request work from `/ecm-work` endpoint
 - `complete_work()` - Mark work complete via `POST /work/{work_id}/complete`
 - `abandon_work()` - Release work via `DELETE /work/{work_id}`
+- `upload_residue()` - Upload residue file to server (decoupled two-stage)
+- `get_residue_work()` - Request stage 2 work from residue pool
+- `download_residue()` - Download residue file for stage 2 processing
+- `complete_residue()` - Mark stage 2 complete, supersede stage 1
+- `abandon_residue()` - Release residue claim
 
 **Example workflows:**
 ```bash
@@ -164,6 +173,66 @@ python3 ecm-wrapper.py --auto-work --work-count 10
 # Custom params with multiprocess
 python3 ecm-wrapper.py --auto-work --tlevel 35 --multiprocess --workers 8
 ```
+
+### Decoupled Two-Stage ECM (2025-11)
+GPU and CPU workers can now run stage 1 and stage 2 **independently** for maximum resource utilization:
+
+**Architecture:**
+- **Stage 1 Producer** (GPU): Runs stage 1 only, uploads residue file to server
+- **Stage 2 Consumer** (CPU): Downloads residue, runs stage 2, reports results
+- **Automatic supersession**: Stage 2 completion supersedes Stage 1 attempt for accurate t-level accounting
+
+**Implementation:**
+- **Client flags**: `--stage1-only` and `--stage2-work` (both require `--auto-work`)
+- **Server endpoints** (`server/app/api/v1/residues.py`):
+  - `POST /residues/upload` - Upload stage 1 residue file
+  - `GET /residues/work` - Request stage 2 work
+  - `GET /residues/{id}/download` - Download residue file
+  - `POST /residues/{id}/complete` - Mark complete, supersede stage 1
+  - `DELETE /residues/{id}/claim` - Release residue claim
+- **Database**: New `ecm_residues` table, `ecm_attempts.superseded_by` column
+- **T-level accounting**: Excludes superseded attempts when calculating progress
+
+**Workflow:**
+```
+Stage 1 (GPU):
+1. Request regular ECM work → Composite + target params
+2. Run stage 1 (B2=0), submit results → Get attempt_id
+3. Upload residue file → Links to stage1_attempt_id
+4. Server credits t-level for stage 1 work
+
+Stage 2 (CPU):
+1. Request residue work → Composite + B1 + residue info
+2. Download residue file
+3. Run stage 2, submit results → Get stage2_attempt_id
+4. Complete residue → Marks stage 1 as superseded
+5. Server recalculates t-level (excludes stage 1, counts full stage 2)
+```
+
+**Usage examples:**
+```bash
+# GPU worker: Run stage 1 only, upload residues
+python3 ecm-wrapper.py --auto-work --stage1-only \
+  --b1 110000000 --curves 3000 --gpu
+
+# CPU worker: Process stage 2 from residue pool
+python3 ecm-wrapper.py --auto-work --stage2-work \
+  --b2 11000000000000 --stage2-workers 8
+
+# With work limits and filtering
+python3 ecm-wrapper.py --auto-work --stage1-only \
+  --b1 26e7 --curves 1000 --work-count 10 --min-digits 70
+
+python3 ecm-wrapper.py --auto-work --stage2-work \
+  --b2 4e11 --max-digits 90 --priority 5
+```
+
+**Benefits:**
+- GPU workers maximize throughput on stage 1 (no stage 2 bottleneck)
+- CPU workers handle memory-intensive stage 2 efficiently
+- Flexible resource allocation (different GPU/CPU ratios)
+- Residues stored on server (1.4-1.7 MB per 3000 curves)
+- Auto-cleanup after 7 days if not consumed
 
 ### Google Colab Support
 New `colab_setup.ipynb` notebook for running ECM client in Google Colab:
@@ -225,7 +294,8 @@ New `colab_setup.ipynb` notebook for running ECM client in Google Colab:
   - Auto-detected by BaseWrapper and arg_parser
   - **Important**: Always pass `client.yaml` as config path - BaseWrapper handles the merge
 - **resend_failed.py**: Inherits from BaseWrapper to reuse config loading logic
-- **server/app/config.py**: Server configuration (database URL, API settings)
+- **server/app/config.py**: Server configuration (database URL, API settings, residue storage path)
+  - `RESIDUE_STORAGE_PATH`: Directory for storing residue files (default: `data/residues`)
 - **docker-compose.yml**: Full system deployment configuration
 - **alembic.ini**: Database migration configuration
 
@@ -235,13 +305,13 @@ New `colab_setup.ipynb` notebook for running ECM client in Google Colab:
 │                   ECM Coordination API                     │
 ├─────────────────────────────────────────────────────────────┤
 │                      Core Endpoints                        │
-│   • /composites   • /results/ecm   • /work   • /admin      │
+│  /composites  /submit  /work  /residues  /admin  /stats    │
 ├─────────────────────────────────────────────────────────────┤
 │                   Minimal Services                         │
-│   • WorkAssignment   • TLevelCalculation   • Dashboard     │
+│  WorkAssignment  TLevelCalculation  ResidueManager  Dash   │
 ├─────────────────────────────────────────────────────────────┤
 │                   Simplified Models                        │
-│   • Composites   • ECMAttempts   • Factors   • Clients     │
+│  Composites  ECMAttempts  Factors  ECMResidues  Clients    │
 ├─────────────────────────────────────────────────────────────┤
 │                    PostgreSQL Database                     │
 └─────────────────────────────────────────────────────────────┘
@@ -268,6 +338,13 @@ New `colab_setup.ipynb` notebook for running ECM client in Google Colab:
 Essential tables for ECM coordination:
 - `composites`: Numbers with t-level progress (id, number, digit_length, target_t_level, current_t_level, is_prime, is_fully_factored, priority)
 - `ecm_attempts`: Individual ECM curve attempts with B1/B2 parameters and parametrization (0-3)
+  - `superseded_by`: Links stage 1 attempt to stage 2 that replaced it (for decoupled two-stage)
+- `ecm_residues`: Stage 1 residue files for decoupled two-stage ECM (NEW 2025-11)
+  - `composite_id`, `stage1_attempt_id`: Links to composite and original stage 1 attempt
+  - `b1`, `parametrization`, `curve_count`: Parsed from residue file
+  - `storage_path`, `file_size_bytes`, `checksum`: File storage metadata
+  - `status`: 'available', 'claimed', 'completed', 'expired'
+  - `claimed_by`, `claimed_at`, `expires_at`: Lifecycle tracking
 - `factors`: Discovered factors with discovery methods, sigma values, and elliptic curve group orders
   - `sigma`: Sigma value that found this factor (for reproducibility)
   - `group_order`: Calculated elliptic curve group order (via PARI/GP)
@@ -280,6 +357,8 @@ Essential tables for ECM coordination:
 - **ecm_attempts.parametrization**: ECM parametrization type (0, 1, 2, or 3) - affects t-level calculations
   - Parametrization 1: Montgomery curves (CPU default)
   - Parametrization 3: Twisted Edwards curves (GPU default)
+- **ecm_attempts.superseded_by**: When stage 2 completes, stage 1 attempt is marked as superseded
+  - T-level calculator excludes superseded attempts to avoid double-counting
 - **factors.sigma**: Sigma value that found the factor (for reproducibility)
 - **ecm_attempts.b2**: Can be NULL (use GMP-ECM default) or 0 (stage 1 only)
 
@@ -427,7 +506,7 @@ pylint *.py
 - **Database setup**: `server/app/database.py` - SQLAlchemy engine and session
 - **Models**: `server/app/models/*.py` - Database table definitions
 - **API schemas**: `server/app/schemas/*.py` - Request/response validation
-- **API routes**: `server/app/api/v1/*.py` - Core API endpoints (submit, work, stats, factors)
+- **API routes**: `server/app/api/v1/*.py` - Core API endpoints (submit, work, stats, factors, residues)
 - **Admin routes**: `server/app/api/v1/admin/*.py` - Modular admin endpoints
   - `dashboard.py` - Admin dashboard and summary stats
   - `composites.py` - Composite upload, bulk operations, CRUD
@@ -438,7 +517,8 @@ pylint *.py
   - `composite_manager.py` - Composite CRUD, bulk loading, updates
   - `composites.py` - Core composite operations
   - `factors.py` - Factor validation and management
-  - `t_level_calculator.py` - ECM t-level calculations
+  - `t_level_calculator.py` - ECM t-level calculations (excludes superseded attempts)
+  - `residue_manager.py` - Residue file storage, parsing, and lifecycle management
   - `group_order.py` - Elliptic curve group order calculation using PARI/GP
 - **Utilities**: `server/app/utils/*.py` - Shared utilities
   - `serializers.py` - Database model to API dict conversion

@@ -894,6 +894,16 @@ class CompositeService:
 
         breakdown = {}
 
+        # Prefetch all factors for these attempts to avoid N+1 queries
+        from ..models import Factor
+        attempt_ids = [a.id for a in attempts]
+        factors_by_attempt = {}
+        if attempt_ids:
+            factors_query = db.query(Factor).filter(
+                Factor.found_by_attempt_id.in_(attempt_ids)
+            ).all()
+            factors_by_attempt = {f.found_by_attempt_id: f for f in factors_query}
+
         for method in ['ecm', 'pm1', 'pp1']:
             method_attempts = [a for a in attempts if a.method == method]
 
@@ -901,9 +911,12 @@ class CompositeService:
             factors = []
             for attempt in method_attempts:
                 if attempt.factor_found:
+                    # Get sigma from prefetched Factor model
+                    factor_record = factors_by_attempt.get(attempt.id)
+
                     factors.append({
                         'factor': attempt.factor_found,
-                        'sigma': attempt.sigma,
+                        'sigma': factor_record.sigma if factor_record else None,
                         'b1': attempt.b1,
                         'b2': attempt.b2
                     })
