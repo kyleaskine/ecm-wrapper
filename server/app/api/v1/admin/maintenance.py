@@ -5,7 +5,8 @@ import logging
 import threading
 import time
 from datetime import datetime
-from typing import Dict, Any, Optional
+from pathlib import Path
+from typing import Dict, Any, Optional, List
 
 from fastapi import APIRouter, BackgroundTasks, Depends
 from sqlalchemy.orm import Session
@@ -340,4 +341,83 @@ async def recalculate_single_composite_t_level(
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=str(e)
+            ) from e
+
+
+@router.post("/residues/cleanup-orphaned")
+async def cleanup_orphaned_residues(
+    db: Session = Depends(get_db),
+    _admin: bool = Depends(verify_admin_key)
+):
+    """
+    Find and cleanup orphaned residue records (database entries without files).
+
+    This scans all residue records in the database and checks if the
+    corresponding file exists. If the file is missing, the residue is
+    marked as 'expired' and any claims are released.
+
+    Useful after deployments that may have lost residue files.
+
+    Args:
+        db: Database session
+        _admin: Admin authentication
+
+    Returns:
+        JSON with count and list of cleaned up residue IDs
+    """
+    from ....models.residues import ECMResidue
+    from fastapi import HTTPException, status
+
+    with transaction_scope(db, "cleanup_orphaned_residues"):
+        try:
+            # Get all residues
+            all_residues = db.query(ECMResidue).all()
+
+            orphaned: List[Dict[str, Any]] = []
+
+            for residue in all_residues:
+                # Check if file exists
+                file_path = Path(residue.storage_path)
+
+                if not file_path.exists():
+                    # File is missing - mark as orphaned
+                    old_status = residue.status
+
+                    # Mark as expired and release claim
+                    residue.status = 'expired'
+                    residue.claimed_by = None
+                    residue.claimed_at = None
+
+                    orphaned.append({
+                        'id': residue.id,
+                        'composite_id': residue.composite_id,
+                        'old_status': old_status,
+                        'claimed_by': residue.claimed_by if old_status == 'claimed' else None,
+                        'storage_path': str(residue.storage_path),
+                        'curves': residue.curves,
+                        'b1': residue.b1
+                    })
+
+                    logger.info(
+                        f"Marked orphaned residue {residue.id} as expired "
+                        f"(was {old_status}, file missing: {residue.storage_path})"
+                    )
+
+            if orphaned:
+                logger.info(f"Cleaned up {len(orphaned)} orphaned residues")
+            else:
+                logger.info("No orphaned residues found")
+
+            return {
+                "status": "success",
+                "cleaned_up": len(orphaned),
+                "orphaned_residues": orphaned,
+                "message": f"Cleaned up {len(orphaned)} orphaned residue(s)" if orphaned else "No orphaned residues found"
+            }
+
+        except Exception as e:
+            logger.error(f"Error cleaning up orphaned residues: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to cleanup orphaned residues: {str(e)}"
             ) from e

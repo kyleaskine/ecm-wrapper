@@ -36,6 +36,8 @@ services:
       # Security keys read from secret files
       SECRET_KEY_FILE: /run/secrets/api_secret_key
       ADMIN_API_KEY_FILE: /run/secrets/admin_api_key
+    volumes:
+      - residue_data:/app/data/residues
     depends_on:
       postgres:
         condition: service_healthy
@@ -53,6 +55,7 @@ networks:
 
 volumes:
   postgres_data:
+  residue_data:
 
 secrets:
   postgres_password:

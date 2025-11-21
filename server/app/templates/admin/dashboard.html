@@ -465,6 +465,7 @@
             <button class="btn" onclick="location.href='/docs#/admin'">API Documentation</button>
             <button class="btn" onclick="location.href='/api/v1/dashboard/'">User Dashboard</button>
             <button class="btn" onclick="cleanupExpired()">Cleanup Expired Work</button>
+            <button class="btn" onclick="cleanupOrphanedResidues()">🧹 Cleanup Orphaned Residues</button>
             <button class="btn" onclick="calculateTLevels()">Calculate T-Levels</button>
             <button class="btn" onclick="recalculateAllTLevels()" style="background: #dc3545;">Fix Random T-Levels</button>
             <button class="btn" onclick="refreshPage()">Refresh</button>
@@ -560,6 +561,35 @@
                 .then(data => {
                     alert('Cleaned up ' + data.cleaned_up + ' expired assignments');
                     refreshPage();  // Use refreshPage() to maintain auth
+                });
+        }
+    }
+
+    function cleanupOrphanedResidues() {
+        if (confirm('Scan for and cleanup orphaned residues?\n\nThis will find residue records in the database that no longer have corresponding files (typically after deployments) and mark them as expired.\n\nThis is safe and reversible.')) {
+            // Show loading indicator (change button text temporarily)
+            const btn = event.target;
+            const originalText = btn.textContent;
+            btn.textContent = '⏳ Scanning...';
+            btn.disabled = true;
+
+            fetchWithAuth('/api/v1/admin/residues/cleanup-orphaned', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => {
+                    if (data.cleaned_up > 0) {
+                        const ids = data.orphaned_residues.map(r => r.id).join(', ');
+                        alert(`Cleaned up ${data.cleaned_up} orphaned residue(s)\n\nIDs: ${ids}\n\nThese residues had database records but missing files and have been marked as expired.`);
+                    } else {
+                        alert('No orphaned residues found.\n\nAll residue records have corresponding files.');
+                    }
+                    refreshPage();
+                })
+                .catch(error => {
+                    alert('Error cleaning up orphaned residues: ' + error);
+                })
+                .finally(() => {
+                    btn.textContent = originalText;
+                    btn.disabled = false;
                 });
         }
     }

@@ -5,12 +5,11 @@
 {% block extra_head %}
 <script>
     // Check if API key exists, redirect to login if not
-    const API_KEY = sessionStorage.getItem('admin_api_key');
-    if (!API_KEY) {
+    if (!sessionStorage.getItem('admin_api_key')) {
         window.location.href = '/api/v1/admin/login';
     }
 
-    function backToDashboard() {
+    window.backToDashboard = function backToDashboard() {
         const apiKey = sessionStorage.getItem('admin_api_key');
         if (!apiKey) {
             window.location.href = '/api/v1/admin/login';
@@ -35,7 +34,7 @@
         });
     }
 
-    function deleteComposite() {
+    window.deleteComposite = function deleteComposite() {
         const apiKey = sessionStorage.getItem('admin_api_key');
         if (!apiKey) {
             window.location.href = '/api/v1/admin/login';
@@ -78,7 +77,7 @@
         });
     }
 
-    function recalculateComposite() {
+    window.recalculateComposite = function recalculateComposite() {
         const apiKey = sessionStorage.getItem('admin_api_key');
         if (!apiKey) {
             window.location.href = '/api/v1/admin/login';
