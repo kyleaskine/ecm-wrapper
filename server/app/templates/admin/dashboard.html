@@ -29,6 +29,56 @@
         sessionStorage.removeItem('admin_api_key');
         window.location.href = '/api/v1/admin/login';
     }
+
+    // Jump to composite by ID
+    function jumpToComposite() {
+        const compositeId = document.getElementById('composite-jump-id').value.trim();
+        if (!compositeId || isNaN(compositeId)) {
+            alert('Please enter a valid composite ID (number)');
+            return;
+        }
+
+        const apiKey = sessionStorage.getItem('admin_api_key');
+        if (!apiKey) {
+            window.location.href = '/api/v1/admin/login';
+            return;
+        }
+
+        // Fetch the composite details page with auth header
+        fetch(`/api/v1/admin/composites/${compositeId}/details`, {
+            headers: {
+                'X-Admin-Key': apiKey
+            }
+        })
+        .then(response => {
+            if (response.status === 404) {
+                alert(`Composite ${compositeId} not found`);
+                throw new Error('Not found');
+            }
+            if (!response.ok) {
+                throw new Error(`Failed to load composite: ${response.status}`);
+            }
+            return response.text();
+        })
+        .then(html => {
+            document.open();
+            document.write(html);
+            document.close();
+            history.pushState(null, '', `/api/v1/admin/composites/${compositeId}/details`);
+        })
+        .catch(error => {
+            if (error.message !== 'Not found') {
+                console.error('Error loading composite:', error);
+            }
+        });
+    }
+
+    // Allow Enter key in the input field
+    function handleJumpKeyPress(event) {
+        if (event.key === 'Enter') {
+            jumpToComposite();
+        }
+    }
 </script>
 {% endblock %}
 
@@ -40,6 +90,23 @@
             <p>Distributed ECM coordination middleware - work assignment and t-level progress tracking</p>
         </div>
         <button onclick="logout()" class="btn" style="background: #dc3545;">Logout</button>
+    </div>
+</div>
+
+<div class="section">
+    <div class="section-header">🔍 Quick Navigation</div>
+    <div class="section-content">
+        <div style="display: flex; gap: 10px; align-items: center; max-width: 500px;">
+            <label for="composite-jump-id" style="font-weight: 600; white-space: nowrap;">Jump to Composite ID:</label>
+            <input
+                type="text"
+                id="composite-jump-id"
+                placeholder="Enter composite ID (e.g., 14743)"
+                onkeypress="handleJumpKeyPress(event)"
+                style="flex: 1; padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;"
+            />
+            <button onclick="jumpToComposite()" class="btn btn-primary" style="white-space: nowrap;">Go →</button>
+        </div>
     </div>
 </div>
 
