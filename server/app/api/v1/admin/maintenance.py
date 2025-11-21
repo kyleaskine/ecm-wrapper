@@ -374,12 +374,23 @@ async def cleanup_orphaned_residues(
             all_residues = db.query(ECMResidue).all()
 
             orphaned: List[Dict[str, Any]] = []
+            checked: List[Dict[str, Any]] = []
 
             for residue in all_residues:
                 # Check if file exists
                 file_path = Path(residue.storage_path)
+                file_exists = file_path.exists()
 
-                if not file_path.exists():
+                # Log every check for debugging
+                checked.append({
+                    'id': residue.id,
+                    'storage_path': str(residue.storage_path),
+                    'absolute_path': str(file_path.absolute()),
+                    'exists': file_exists,
+                    'status': residue.status
+                })
+
+                if not file_exists:
                     # File is missing - mark as orphaned
                     old_status = residue.status
 
@@ -394,6 +405,7 @@ async def cleanup_orphaned_residues(
                         'old_status': old_status,
                         'claimed_by': residue.claimed_by if old_status == 'claimed' else None,
                         'storage_path': str(residue.storage_path),
+                        'absolute_path': str(file_path.absolute()),
                         'curves': residue.curves,
                         'b1': residue.b1
                     })
@@ -411,8 +423,10 @@ async def cleanup_orphaned_residues(
             return {
                 "status": "success",
                 "cleaned_up": len(orphaned),
+                "total_checked": len(checked),
                 "orphaned_residues": orphaned,
-                "message": f"Cleaned up {len(orphaned)} orphaned residue(s)" if orphaned else "No orphaned residues found"
+                "all_residues_checked": checked,
+                "message": f"Cleaned up {len(orphaned)} orphaned residue(s) out of {len(checked)} total" if orphaned else f"No orphaned residues found (checked {len(checked)} total)"
             }
 
         except Exception as e:

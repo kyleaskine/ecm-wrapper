@@ -576,11 +576,17 @@
             fetchWithAuth('/api/v1/admin/residues/cleanup-orphaned', {method: 'POST'})
                 .then(response => response.json())
                 .then(data => {
+                    console.log('Cleanup response:', data);
                     if (data.cleaned_up > 0) {
                         const ids = data.orphaned_residues.map(r => r.id).join(', ');
                         alert(`Cleaned up ${data.cleaned_up} orphaned residue(s)\n\nIDs: ${ids}\n\nThese residues had database records but missing files and have been marked as expired.`);
                     } else {
-                        alert('No orphaned residues found.\n\nAll residue records have corresponding files.');
+                        // Show debugging info
+                        const debugInfo = data.all_residues_checked.map(r =>
+                            `ID ${r.id}: ${r.exists ? '✓' : '✗'} ${r.storage_path}`
+                        ).join('\n');
+                        alert(`No orphaned residues found.\n\nChecked ${data.total_checked} residue(s).\n\nSee browser console for detailed path information.`);
+                        console.log('All residues checked:', data.all_residues_checked);
                     }
                     refreshPage();
                 })
