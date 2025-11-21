@@ -4,6 +4,12 @@
 
 {% block extra_head %}
 <script>
+    // Check if API key exists, redirect to login if not
+    const API_KEY = sessionStorage.getItem('admin_api_key');
+    if (!API_KEY) {
+        window.location.href = '/api/v1/admin/login';
+    }
+
     function backToDashboard() {
         const apiKey = sessionStorage.getItem('admin_api_key');
         if (!apiKey) {
@@ -71,6 +77,51 @@
             deleteBtn.disabled = false;
         });
     }
+
+    function recalculateComposite() {
+        const apiKey = sessionStorage.getItem('admin_api_key');
+        if (!apiKey) {
+            window.location.href = '/api/v1/admin/login';
+            return;
+        }
+
+        const compositeId = {{ composite.id }};
+
+        // Show loading state
+        const recalcBtn = document.getElementById('recalc-btn');
+        const originalText = recalcBtn.textContent;
+        recalcBtn.textContent = '⏳ Recalculating...';
+        recalcBtn.disabled = true;
+
+        fetch(`/api/v1/admin/composites/${compositeId}/recalculate-t-level`, {
+            method: 'POST',
+            headers: {
+                'X-Admin-Key': apiKey
+            }
+        })
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`Recalculation failed: ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(result => {
+            const oldCurrent = result.old_current_t_level !== null ? `t${result.old_current_t_level}` : 'N/A';
+            const newCurrent = result.new_current_t_level !== null ? `t${result.new_current_t_level}` : 'N/A';
+            const oldTarget = result.old_target_t_level !== null ? `t${result.old_target_t_level}` : 'N/A';
+            const newTarget = result.new_target_t_level !== null ? `t${result.new_target_t_level}` : 'N/A';
+
+            alert(`T-level recalculated for composite ${compositeId}\n\nCurrent: ${oldCurrent} → ${newCurrent}\nTarget: ${oldTarget} → ${newTarget}`);
+
+            // Reload page to show updated values
+            window.location.reload();
+        })
+        .catch(error => {
+            alert(`Failed to recalculate t-level: ${error.message}`);
+            recalcBtn.textContent = originalText;
+            recalcBtn.disabled = false;
+        });
+    }
 </script>
 <style>
     .btn-danger {
@@ -97,6 +148,7 @@
         <h1>Composite Details</h1>
         <div class="header-actions">
             <button onclick="backToDashboard()" class="btn btn-secondary">← Back to Dashboard</button>
+            <button id="recalc-btn" onclick="recalculateComposite()" class="btn btn-primary">🔄 Recalculate T-Level</button>
             <button id="delete-btn" onclick="deleteComposite()" class="btn btn-danger">🗑️ Delete Composite</button>
         </div>
     </div>

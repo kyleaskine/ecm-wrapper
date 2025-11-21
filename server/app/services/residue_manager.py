@@ -378,6 +378,7 @@ class ResidueManager:
             ).first()
             if stage1_attempt:
                 stage1_attempt.superseded_by = stage2_attempt_id
+                db.flush()  # Ensure supersession is visible to subsequent queries
                 logger.info(
                     f"Marked stage 1 attempt {residue.stage1_attempt_id} as superseded by {stage2_attempt_id}"
                 )

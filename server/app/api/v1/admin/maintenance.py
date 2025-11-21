@@ -11,7 +11,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends
 from sqlalchemy.orm import Session
 
 from ....database import get_db
-from ....dependencies import verify_admin_key
+from ....dependencies import verify_admin_key, get_composite_service
+from ....services.composites import CompositeService
 from ....utils.transactions import transaction_scope
 
 router = APIRouter()
@@ -260,3 +261,83 @@ async def get_recalculation_status(
         "completed": _recalculation_status["completed"],
         "result": _recalculation_status["result"]
     }
+
+
+@router.post("/composites/{composite_id}/recalculate-t-level")
+async def recalculate_single_composite_t_level(
+    composite_id: int,
+    db: Session = Depends(get_db),
+    composite_service: CompositeService = Depends(get_composite_service),
+    _admin: bool = Depends(verify_admin_key)
+):
+    """
+    Recalculate t-level for a single composite.
+
+    This recalculates both current_t_level (from ECM attempts) and target_t_level
+    (from composite size and SNFS difficulty). Useful after manual database changes
+    or to verify calculations.
+
+    Args:
+        composite_id: ID of the composite to recalculate
+        db: Database session
+        composite_service: CompositeService instance
+        _admin: Admin authentication
+
+    Returns:
+        JSON with old and new t-level values
+
+    Raises:
+        404: Composite not found
+        500: Recalculation failed
+    """
+    from ....models import Composite
+    from fastapi import HTTPException, status
+
+    with transaction_scope(db, "recalculate_single_t_level"):
+        # Get composite before recalculation
+        composite = db.query(Composite).filter(Composite.id == composite_id).first()
+        if not composite:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Composite {composite_id} not found"
+            )
+
+        old_current_t = composite.current_t_level
+        old_target_t = composite.target_t_level
+
+        # Recalculate t-levels
+        try:
+            success = composite_service.update_t_level(db, composite_id)
+            if not success:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to recalculate t-level for composite {composite_id}"
+                )
+
+            # Refresh to get updated values
+            db.refresh(composite)
+            new_current_t = composite.current_t_level
+            new_target_t = composite.target_t_level
+
+            logger.info(
+                f"Recalculated t-level for composite {composite_id}: "
+                f"current {old_current_t:.2f} → {new_current_t:.2f}, "
+                f"target {old_target_t:.2f} → {new_target_t:.2f}"
+            )
+
+            return {
+                "status": "success",
+                "composite_id": composite_id,
+                "old_current_t_level": round(old_current_t, 2) if old_current_t is not None else None,
+                "new_current_t_level": round(new_current_t, 2) if new_current_t is not None else None,
+                "old_target_t_level": round(old_target_t, 2) if old_target_t is not None else None,
+                "new_target_t_level": round(new_target_t, 2) if new_target_t is not None else None,
+                "message": f"T-level recalculated: current t{new_current_t:.2f}, target t{new_target_t:.2f}"
+            }
+
+        except ValueError as e:
+            logger.error(f"Error recalculating t-level for composite {composite_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=str(e)
+            ) from e
