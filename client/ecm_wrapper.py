@@ -14,6 +14,7 @@ Modes:
   - Stage 2 only: Load residue from local file
 """
 
+import signal
 import sys
 
 if sys.version_info < (3, 9):
@@ -60,6 +61,16 @@ def main():
 
     # Initialize wrapper (this loads and merges client.yaml + client.local.yaml)
     wrapper = ECMWrapper(args.config)
+
+    # Single-press Ctrl+C kill: subprocesses are started with start_new_session=True,
+    # so terminal SIGINT doesn't reach them. Forward it explicitly and exit.
+    def _abort_on_sigint(signum, frame):
+        sys.stderr.write("\n[Ctrl+C] Aborting...\n")
+        sys.stderr.flush()
+        wrapper._signal_subprocesses_interrupt()
+        sys.exit(130)
+
+    signal.signal(signal.SIGINT, _abort_on_sigint)
 
     # Resolve GPU settings from args + config (uses existing helper)
     use_gpu, gpu_device, gpu_curves = resolve_gpu_settings(args, wrapper.typed_config)

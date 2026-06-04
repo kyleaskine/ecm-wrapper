@@ -78,10 +78,10 @@ echo "✓ Data directory created"
 # ============================================================
 # Step 4: Download ECM Binary
 # ============================================================
-# Single universal binary: CUDA runtime is statically linked and the binary
+# Single GPU-universal binary: CUDA runtime is statically linked and the binary
 # carries GPU SASS for every arch (sm_50-sm_120). Nothing CUDA-specific needs
-# to be installed on the host - just an NVIDIA driver (CUDA 12+ class). This
-# replaces the old per-arch / per-CUDA-version (ecm86, ecm86v13, ...) matrix.
+# to be installed on the host - just an NVIDIA driver (CUDA 12+ class). The CPU
+# side still must be built for a portable x86-64 ISA.
 echo ""
 echo "⬇️  Downloading ECM binary (universal: static cudart, sm_50-sm_120)..."
 ECM_DOWNLOAD_URL="https://ecm.kyleaskine.com/downloads/ecm/ecm.gz"
@@ -95,9 +95,26 @@ else
     exit 1
 fi
 
-# Verify installation (--version doesn't touch the GPU, so this works on CPU-only hosts too)
+# Verify installation with a tiny CPU-only run.
 if [ -x "$ECM_PATH" ]; then
-    ECM_VERSION_STR=$(echo 1 | "$ECM_PATH" 1 2>&1 | head -1 || echo "unknown")
+    set +e
+    ECM_VERIFY_OUTPUT=$(printf '1\n' | "$ECM_PATH" 1 2>&1)
+    ECM_VERIFY_STATUS=$?
+    set -e
+    if [[ "$ECM_VERIFY_OUTPUT" != *"GMP-ECM"* ]]; then
+        echo "❌ ECM binary failed verification (exit $ECM_VERIFY_STATUS)"
+        printf '%s\n' "$ECM_VERIFY_OUTPUT" | head -20
+        if [ "$ECM_VERIFY_STATUS" -eq 132 ]; then
+            echo ""
+            echo "The downloaded binary contains CPU instructions unsupported by this host."
+            echo "Rebuild/publish ECM with portable CPU flags, e.g. -march=x86-64 -mtune=generic."
+            if command -v lscpu &> /dev/null; then
+                lscpu | grep -E 'Model name|Flags' || true
+            fi
+        fi
+        exit 1
+    fi
+    ECM_VERSION_STR=$(printf '%s\n' "$ECM_VERIFY_OUTPUT" | head -1)
     echo "✓ ECM binary installed: $ECM_VERSION_STR"
 else
     echo "❌ ECM binary installation failed"
