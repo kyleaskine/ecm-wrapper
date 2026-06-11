@@ -23,7 +23,7 @@ router = APIRouter()
 
 
 @router.get("/inactive-composites", response_class=HTMLResponse)
-async def inactive_composites_dashboard(
+def inactive_composites_dashboard(
     request: Request,
     db: Session = Depends(get_db),
     _admin: bool = Depends(verify_admin_key_html),
@@ -45,7 +45,7 @@ async def inactive_composites_dashboard(
 
 
 @router.get("/outstanding-work", response_class=HTMLResponse)
-async def outstanding_work_dashboard(
+def outstanding_work_dashboard(
     request: Request,
     db: Session = Depends(get_db),
     _admin: bool = Depends(verify_admin_key_html),
@@ -82,7 +82,7 @@ async def outstanding_work_dashboard(
 
 
 @router.get("/recent-composites", response_class=HTMLResponse)
-async def recent_composites_dashboard(
+def recent_composites_dashboard(
     request: Request,
     db: Session = Depends(get_db),
     _admin: bool = Depends(verify_admin_key_html),
@@ -106,7 +106,7 @@ async def recent_composites_dashboard(
 
 
 @router.get("/residue-status", response_class=HTMLResponse)
-async def residue_status_dashboard(
+def residue_status_dashboard(
     request: Request,
     db: Session = Depends(get_db),
     _admin: bool = Depends(verify_admin_key_html),

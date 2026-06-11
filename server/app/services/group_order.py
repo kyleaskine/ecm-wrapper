@@ -98,6 +98,16 @@ class GroupOrderCalculator:
             )
             parametrization = 3
 
+        # SECURITY: factor and sigma are interpolated into a GP script (which has
+        # system()), so they must be plain integers. Callers validate upstream,
+        # but enforce it here too — this is the injection boundary.
+        if not factor.isdigit() or not str(sigma_value).isdigit():
+            logger.error(
+                f"Refusing group order calculation with non-numeric input: "
+                f"factor={factor[:20]!r}... sigma={str(sigma_value)[:20]!r}"
+            )
+            return None
+
         # Build PARI/GP script to load function and call it
         if self.script_path:
             # Use external script file
@@ -157,6 +167,11 @@ class GroupOrderCalculator:
             order_expr = f"{factor} + 1"
             label = "p+1"
         else:
+            return None
+
+        # SECURITY: factor is interpolated into a GP script — must be a plain integer
+        if not factor.isdigit():
+            logger.error(f"Refusing {label} calculation with non-numeric factor: {factor[:20]!r}...")
             return None
 
         # Compute the value and factor it in one PARI/GP call

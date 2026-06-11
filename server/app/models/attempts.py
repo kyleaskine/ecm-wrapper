@@ -106,4 +106,5 @@ class ECMAttempt(Base, TimestampMixin):
         Index('ix_ecm_attempts_composite_method', 'composite_id', 'method'),
         Index('ix_ecm_attempts_client_status', 'client_id', 'status'),
         Index('ix_ecm_attempts_factor_found', 'factor_found'),
+        Index('ix_ecm_attempts_created_at', 'created_at'),  # dashboard 24h counts / recent-first ordering
     )

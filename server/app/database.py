@@ -13,7 +13,8 @@ engine = create_engine(
     settings.database_url,
     poolclass=QueuePool,
     pool_size=5,          # 5 persistent connections (handles steady-state load)
-    max_overflow=10,      # Up to 10 extra under burst (15 total max)
+    max_overflow=15,      # Up to 15 extra under burst (20 total, matching uvicorn --limit-concurrency 20
+                          # so a full request burst can't starve on connections; overflow conns close on release)
     pool_timeout=10,      # Fail fast (10s) instead of queueing for 30s — prevents cascading pileup
     pool_recycle=1800,    # Recycle connections every 30 min to prevent stale connections
     pool_pre_ping=True,   # Verify connections are alive before using

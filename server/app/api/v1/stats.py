@@ -1,7 +1,7 @@
 from typing import List, Optional, Literal, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 from sqlalchemy import and_, case, func
 
 from ...database import get_db
@@ -19,7 +19,7 @@ from ...utils.calculations import ECMCalculations
 router = APIRouter()
 
 @router.get("/stats/{composite:path}", response_model=CompositeStats)
-async def get_composite_stats(
+def get_composite_stats(
     composite: str = Path(..., description="The composite number to get stats for"),
     db: Session = Depends(get_db),
     composite_service: CompositeService = Depends(get_composite_service)
@@ -56,7 +56,8 @@ async def get_composite_stats(
         status = "composite"
 
     # Get ECM work summary (exclude superseded stage 1 attempts)
-    attempts = db.query(ECMAttempt).filter(
+    # defer raw_output: large blob, only aggregate stats are needed
+    attempts = db.query(ECMAttempt).options(defer(ECMAttempt.raw_output)).filter(
         ECMAttempt.composite_id == comp.id,
         ECMAttempt.superseded_by.is_(None)
     ).all()
@@ -108,7 +109,7 @@ async def get_composite_stats(
 
 
 @router.post("/composites/batch-status", response_model=BatchStatusResponse)
-async def get_batch_composite_status(
+def get_batch_composite_status(
     request: BatchStatusRequest,
     db: Session = Depends(get_db)
 ):
@@ -155,7 +156,7 @@ async def get_batch_composite_status(
 
 
 @router.post("/composites/top-progress", response_model=TopCompositesResponse)
-async def get_top_composites_by_progress(
+def get_top_composites_by_progress(
     request: TopCompositesRequest,
     db: Session = Depends(get_db)
 ):

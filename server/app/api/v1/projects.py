@@ -46,7 +46,7 @@ def _calculate_project_stats(db: Session, project: Project) -> ProjectStats:
 
 
 @router.get("/projects", response_model=List[ProjectResponse])
-async def list_projects(db: Session = Depends(get_db)):
+def list_projects(db: Session = Depends(get_db)):
     """
     List all projects (PUBLIC).
 
@@ -58,7 +58,7 @@ async def list_projects(db: Session = Depends(get_db)):
 
 
 @router.get("/projects/by-name/{project_name}", response_model=ProjectStats)
-async def get_project_by_name(
+def get_project_by_name(
     project_name: str,
     db: Session = Depends(get_db)
 ):
@@ -83,7 +83,7 @@ async def get_project_by_name(
 
 
 @router.get("/projects/{project_id}", response_model=ProjectStats)
-async def get_project_by_id(
+def get_project_by_id(
     project_id: int,
     db: Session = Depends(get_db)
 ):

@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 @router.post("/upload", response_model=ResidueUploadResponse)
-async def upload_residue(
+def upload_residue(
     file: UploadFile = File(..., description="ECM residue file from stage 1"),
     client_id: str = Header(..., alias="X-Client-ID", description="Client identifier"),
     stage1_attempt_id: Optional[int] = Query(None, description="ID of stage 1 ECM attempt to link"),
@@ -69,7 +69,7 @@ async def upload_residue(
     """
     with transaction_scope(db, "upload_residue"):
         # Read file content
-        content = await file.read()
+        content = file.file.read()  # sync read; route runs in threadpool
 
         if len(content) == 0:
             raise HTTPException(
@@ -131,7 +131,7 @@ async def upload_residue(
 
 
 @router.get("/work", response_model=ResidueWorkResponse)
-async def get_residue_work(
+def get_residue_work(
     client_id: str = Header(..., alias="X-Client-ID", description="Client identifier"),
     min_target_tlevel: Optional[float] = Query(None, description="Minimum target t-level"),
     max_target_tlevel: Optional[float] = Query(None, description="Maximum target t-level"),
@@ -278,7 +278,7 @@ async def download_residue(
 
 
 @router.post("/{residue_id}/complete", response_model=ResidueCompleteResponse)
-async def complete_residue(
+def complete_residue(
     residue_id: int,
     request: ResidueCompleteRequest,
     client_id: str = Header(..., alias="X-Client-ID", description="Client identifier"),
@@ -347,7 +347,7 @@ async def complete_residue(
 
 
 @router.delete("/{residue_id}/claim")
-async def abandon_residue_claim(
+def abandon_residue_claim(
     residue_id: int,
     client_id: str = Header(..., alias="X-Client-ID", description="Client identifier"),
     db: Session = Depends(get_db),
@@ -384,7 +384,7 @@ async def abandon_residue_claim(
 
 
 @router.get("/{residue_id}", response_model=ResidueInfoResponse)
-async def get_residue_info(
+def get_residue_info(
     residue_id: int,
     db: Session = Depends(get_db)
 ):
@@ -428,7 +428,7 @@ async def get_residue_info(
 
 
 @router.get("/stats/summary", response_model=ResidueStatsResponse)
-async def get_residue_stats(
+def get_residue_stats(
     db: Session = Depends(get_db),
     residue_manager: ResidueManager = Depends(get_residue_manager)
 ):

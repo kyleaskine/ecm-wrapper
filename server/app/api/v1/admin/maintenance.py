@@ -32,7 +32,7 @@ _recalculation_status: Dict[str, Any] = {
 
 
 @router.post("/composites/calculate-t-levels")
-async def calculate_t_levels_for_all_composites(
+def calculate_t_levels_for_all_composites(
     recalculate_all: bool = False,
     db: Session = Depends(get_db),
     _admin: bool = Depends(verify_admin_key)
@@ -285,7 +285,7 @@ async def get_recalculation_status(
 
 
 @router.post("/composites/{composite_id:int}/recalculate-t-level")
-async def recalculate_single_composite_t_level(
+def recalculate_single_composite_t_level(
     composite_id: int,
     db: Session = Depends(get_db),
     composite_service: CompositeService = Depends(get_composite_service),
@@ -365,7 +365,7 @@ async def recalculate_single_composite_t_level(
 
 
 @router.post("/ecm-attempts/cleanup-logs")
-async def cleanup_old_attempt_logs(
+def cleanup_old_attempt_logs(
     days: int = Query(30, ge=1, description="Clear raw_output for attempts older than this many days"),
     db: Session = Depends(get_db),
     _admin: bool = Depends(verify_admin_key)
@@ -410,7 +410,7 @@ async def cleanup_old_attempt_logs(
 
 
 @router.post("/residues/cleanup-orphaned")
-async def cleanup_orphaned_residues(
+def cleanup_orphaned_residues(
     db: Session = Depends(get_db),
     _admin: bool = Depends(verify_admin_key)
 ):

@@ -976,13 +976,13 @@ class CompositeService:
         # Get non-superseded attempts for statistics
         active_attempts = [a for a in all_attempts if a.superseded_by is None]
 
-        breakdown = {}
+        breakdown: Dict[str, Any] = {}
 
         # Prefetch all factors for these attempts to avoid N+1 queries
         from ..models import Factor
         attempt_ids = [a.id for a in all_attempts]
-        factors_by_attempt = {}
-        factor_counts_by_attempt = {}
+        factors_by_attempt: Dict[Optional[int], Factor] = {}
+        factor_counts_by_attempt: Dict[Optional[int], int] = {}
         if attempt_ids:
             factors_query = db.query(Factor).filter(
                 Factor.found_by_attempt_id.in_(attempt_ids)

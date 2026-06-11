@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional, Any, List, Dict
 
-from sqlalchemy import and_, desc, func, distinct
+from sqlalchemy import and_, desc, func, distinct, ColumnElement
 from sqlalchemy.orm import Session, defer, joinedload
 
 from ..constants import ACTIVE_WORK_STATUSES
@@ -731,7 +731,7 @@ def get_residues_filtered(
     query = db.query(ECMResidue).options(joinedload(ECMResidue.composite))
 
     # Apply filters
-    filters = []
+    filters: List[ColumnElement[bool]] = []
     if status_filter == 'available+claimed':
         filters.append(ECMResidue.status.in_(['available', 'claimed']))
     elif status_filter:

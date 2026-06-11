@@ -20,7 +20,7 @@ router = APIRouter()
 limiter = Limiter(key_func=get_real_client_ip)
 
 @router.get("/", response_class=HTMLResponse)
-async def dashboard(
+def dashboard(
     request: Request,
     db: Session = Depends(get_db),
     priority: Optional[int] = Query(None, ge=1, description="Filter by priority level"),
@@ -119,7 +119,7 @@ async def dashboard(
 
 
 @router.get("/testing-status", response_class=HTMLResponse)
-async def testing_status(
+def testing_status(
     request: Request,
     db: Session = Depends(get_db),
     composite_service: CompositeService = Depends(get_composite_service),
@@ -287,7 +287,7 @@ async def testing_status(
 
 
 @router.get("/p1-testing-status", response_class=HTMLResponse)
-async def p1_testing_status(
+def p1_testing_status(
     request: Request,
     db: Session = Depends(get_db),
     limit: int = Query(200, ge=1, le=500, description="Composites per page"),
@@ -467,7 +467,7 @@ async def p1_testing_status(
 
 
 @router.get("/residue-status", response_class=HTMLResponse)
-async def residue_status_public(
+def residue_status_public(
     request: Request,
     db: Session = Depends(get_db),
     limit: int = Query(100, ge=1, le=200, description="Items per page"),
@@ -513,7 +513,7 @@ async def residue_status_public(
 
 @router.get("/composites/{composite_id}/attempts-fragment", response_class=HTMLResponse)
 @limiter.limit("60/minute")
-async def get_attempts_fragment_public(
+def get_attempts_fragment_public(
     composite_id: int,
     request: Request,
     db: Session = Depends(get_db),
@@ -553,7 +553,7 @@ async def get_attempts_fragment_public(
 
 
 @router.get("/composites/find")
-async def find_composite_public(
+def find_composite_public(
     q: str,
     db: Session = Depends(get_db),
     composite_service: CompositeService = Depends(get_composite_service)
@@ -583,7 +583,7 @@ async def find_composite_public(
 
 @router.get("/composites/{composite_id}/details", response_class=HTMLResponse)
 @limiter.limit("30/minute")
-async def get_composite_details_public(
+def get_composite_details_public(
     composite_id: int,
     request: Request,
     db: Session = Depends(get_db),
@@ -625,7 +625,7 @@ async def get_composite_details_public(
 
 
 @router.get("/curves", response_class=HTMLResponse)
-async def recent_curves(
+def recent_curves(
     request: Request,
     db: Session = Depends(get_db),
     limit: int = Query(50, ge=1, le=200, description="Results per page"),
@@ -692,7 +692,7 @@ async def recent_curves(
 
 
 @router.get("/factors", response_class=HTMLResponse)
-async def recent_factors(
+def recent_factors(
     request: Request,
     db: Session = Depends(get_db),
     limit: int = Query(50, ge=1, le=200, description="Results per page"),
@@ -766,7 +766,7 @@ async def recent_factors(
 
 
 @router.get("/leaderboard", response_class=HTMLResponse)
-async def leaderboard(
+def leaderboard(
     request: Request,
     db: Session = Depends(get_db),
     days: int = Query(30, ge=1, le=365, description="Days to look back")

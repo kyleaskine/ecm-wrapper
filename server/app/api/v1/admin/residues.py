@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 @router.delete("/residues/{residue_id}")
-async def delete_residue(
+def delete_residue(
     residue_id: int,
     db: Session = Depends(get_db),
     _admin: bool = Depends(verify_admin_key),
@@ -75,7 +75,7 @@ async def delete_residue(
 
 
 @router.delete("/residues/{residue_id}/release")
-async def admin_release_residue_claim(
+def admin_release_residue_claim(
     residue_id: int,
     db: Session = Depends(get_db),
     _admin: bool = Depends(verify_admin_key),
@@ -135,7 +135,7 @@ async def admin_release_residue_claim(
 
 
 @router.post("/residues/cleanup")
-async def cleanup_residues(
+def cleanup_residues(
     db: Session = Depends(get_db),
     _admin: bool = Depends(verify_admin_key),
     residue_manager: ResidueManager = Depends(get_residue_manager)

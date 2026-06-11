@@ -22,7 +22,7 @@ router = APIRouter()
 
 
 @router.get("/work/assignments")
-async def get_work_assignments(
+def get_work_assignments(
     status_filter: Optional[str] = None,
     client_id: Optional[str] = None,
     limit: int = 100,
@@ -53,7 +53,7 @@ async def get_work_assignments(
 
 
 @router.delete("/work/assignments/{work_id}")
-async def cancel_work_assignment(
+def cancel_work_assignment(
     work_id: str,
     reason: str = "admin_cancel",
     db: Session = Depends(get_db),
@@ -93,7 +93,7 @@ async def cancel_work_assignment(
 
 
 @router.post("/work/cleanup")
-async def cleanup_expired_work(
+def cleanup_expired_work(
     db: Session = Depends(get_db),
     _admin: bool = Depends(verify_admin_key)
 ):
@@ -113,7 +113,7 @@ async def cleanup_expired_work(
 
 
 @router.post("/work/reserve", response_model=ManualReservationResponse)
-async def reserve_composite(
+def reserve_composite(
     request: ManualReservationRequest,
     db: Session = Depends(get_db),
     composite_service: CompositeService = Depends(get_composite_service),
@@ -186,7 +186,7 @@ async def reserve_composite(
 
 
 @router.post("/work/release/{work_id}")
-async def release_reservation(
+def release_reservation(
     work_id: str,
     reason: str = "completed",
     db: Session = Depends(get_db),

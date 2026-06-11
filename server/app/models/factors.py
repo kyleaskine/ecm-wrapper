@@ -1,5 +1,5 @@
 from typing import Optional, TYPE_CHECKING
-from sqlalchemy import String, Text, ForeignKey, Boolean, BigInteger, UniqueConstraint
+from sqlalchemy import String, Text, ForeignKey, Boolean, BigInteger, UniqueConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .base import Base, TimestampMixin
 
@@ -27,4 +27,5 @@ class Factor(Base, TimestampMixin):
     # Ensure no duplicate factors per composite
     __table_args__ = (
         UniqueConstraint('composite_id', 'factor', name='unique_composite_factor'),
+        Index('ix_factors_created_at', 'created_at'),  # dashboard 24h counts / recent-first ordering
     )

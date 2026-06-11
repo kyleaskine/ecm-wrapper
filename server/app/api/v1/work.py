@@ -13,7 +13,7 @@ router = APIRouter()
 settings = get_settings()
 
 @router.get("/work", response_model=WorkResponse)
-async def get_work(
+def get_work(
     client_id: str,
     methods: Optional[List[str]] = None,
     max_digits: Optional[int] = None,
@@ -67,7 +67,7 @@ async def get_work(
 
 
 @router.post("/work/{work_id}/claim")
-async def claim_work(
+def claim_work(
     work_id: str,
     client_id: str,
     db: Session = Depends(get_db),
@@ -99,7 +99,7 @@ async def claim_work(
 
 
 @router.post("/work/{work_id}/start")
-async def start_work(
+def start_work(
     work_id: str,
     client_id: str,
     db: Session = Depends(get_db),
@@ -131,7 +131,7 @@ async def start_work(
 
 
 @router.put("/work/{work_id}/progress")
-async def update_progress(
+def update_progress(
     work_id: str,
     client_id: str,
     curves_completed: int,
@@ -174,7 +174,7 @@ async def update_progress(
 
 
 @router.post("/work/{work_id}/complete")
-async def complete_work(
+def complete_work(
     work_id: str,
     client_id: str,
     db: Session = Depends(get_db),
@@ -207,7 +207,7 @@ async def complete_work(
 
 
 @router.delete("/work/{work_id}")
-async def abandon_work(
+def abandon_work(
     work_id: str,
     client_id: str,
     reason: Optional[str] = "client_request",
@@ -246,7 +246,7 @@ async def abandon_work(
 
 
 @router.get("/work/status/{client_id}")
-async def get_client_work_status(
+def get_client_work_status(
     client_id: str,
     db: Session = Depends(get_db)
 ):

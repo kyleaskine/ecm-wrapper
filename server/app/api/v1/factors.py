@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 @router.get("/factors", response_model=FactorsListResponse)
-async def get_latest_factors(
+def get_latest_factors(
     limit: int = Query(100, ge=1, le=1000, description="Number of factors to return"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
     since: Optional[str] = Query(None, description="ISO timestamp - only return factors created after this time"),
@@ -93,7 +93,7 @@ async def get_latest_factors(
     )
 
 @router.get("/factors/{factor_id}", response_model=FactorResponse)
-async def get_factor(
+def get_factor(
     factor_id: int,
     db: Session = Depends(get_db)
 ):

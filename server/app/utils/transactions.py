@@ -12,7 +12,7 @@ Key concepts:
 
 import logging
 from contextlib import contextmanager
-from typing import Callable, TypeVar, Any, Optional
+from typing import Awaitable, Callable, TypeVar, Any, Optional, cast
 from functools import wraps
 
 from sqlalchemy.orm import Session
@@ -192,7 +192,8 @@ def transactional(func: Callable[..., T]) -> Callable[..., T]:
             )
 
         try:
-            result = await func(*args, **kwargs)
+            # func is a coroutine function here (checked via iscoroutinefunction below)
+            result = await cast(Awaitable[Any], func(*args, **kwargs))
             db.commit()
             logger.debug(f"Transaction committed for {func.__name__}")
             return result

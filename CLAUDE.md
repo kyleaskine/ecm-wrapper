@@ -218,9 +218,21 @@ Both `mypy` and `pyright` are installed via pipx (`~/.local/bin/`). They overlap
 - **mypy** is quieter and focused on argument/assignment type mismatches.
 - **pyright** adds stricter flow-narrowing analysis (catches more `Optional` leaks) and flags duck-typed mocks in tests. More noise, also more coverage.
 
-Typical invocations (from `client/` or `server/`):
+Typical invocations from `client/`:
 ```bash
 mypy --ignore-missing-imports .                 # Quieter, focused checks
 pyright                                          # Stricter, more findings
 ```
-Pyright auto-discovers source roots; mypy needs `--ignore-missing-imports` until a `mypy.ini` / `pyproject.toml` config is added.
+
+For `server/`, both checkers must resolve imports (and mypy's pydantic plugin) from the
+server venv — the pipx-installed binaries fail without it:
+```bash
+cd server/
+venv/bin/python -m mypy app/                     # mypy is installed in the venv
+pyright --pythonpath venv/bin/python app/        # point pipx pyright at the venv
+```
+Server schemas use `Field(default=None, ...)` (keyword form) — pyright does not
+recognize the positional `Field(None, ...)` form as a default and will emit false
+"Argument missing" errors if positional defaults are reintroduced.
+
+Pyright auto-discovers source roots; mypy needs `--ignore-missing-imports` until a `mypy.ini` / `pyproject.toml` config is added (server/ has `mypy.ini`).

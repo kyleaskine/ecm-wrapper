@@ -19,7 +19,7 @@ router = APIRouter()
 
 
 @router.get("/composites/{composite_id}/attempts-fragment", response_class=HTMLResponse)
-async def get_attempts_fragment(
+def get_attempts_fragment(
     composite_id: int,
     db: Session = Depends(get_db),
     _admin: bool = Depends(verify_admin_key),
@@ -60,7 +60,7 @@ async def get_attempts_fragment(
 
 
 @router.delete("/attempts/{attempt_id}")
-async def delete_attempt(
+def delete_attempt(
     attempt_id: int,
     composite_id: int = Query(..., description="Composite ID for t-level recalculation"),
     db: Session = Depends(get_db),

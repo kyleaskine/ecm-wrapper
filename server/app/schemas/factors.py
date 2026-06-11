@@ -9,9 +9,9 @@ class FactorResponse(BaseModel):
     id: int
     composite_id: int
     factor: str = Field(..., description="The factor value")
-    is_prime: Optional[bool] = Field(None, description="Whether factor is prime (if tested)")
-    found_by_attempt_id: Optional[int] = Field(None, description="ECM attempt that found this factor")
-    sigma: Optional[int] = Field(None, description="Sigma value that found this factor (ECM only)")
+    is_prime: Optional[bool] = Field(default=None, description="Whether factor is prime (if tested)")
+    found_by_attempt_id: Optional[int] = Field(default=None, description="ECM attempt that found this factor")
+    sigma: Optional[int] = Field(default=None, description="Sigma value that found this factor (ECM only)")
     created_at: datetime = Field(..., description="When factor was discovered")
 
 class FactorWithComposite(BaseModel):
@@ -23,12 +23,12 @@ class FactorWithComposite(BaseModel):
     number: str = Field(..., description="Original number or mathematical form (e.g., '2^1223-1')")
     composite_number: str = Field(..., description="The composite number that was factored")
     factor: str = Field(..., description="The factor value")
-    is_prime: Optional[bool] = Field(None, description="Whether factor is prime (if tested)")
-    found_by_attempt_id: Optional[int] = Field(None, description="ECM attempt that found this factor")
-    sigma: Optional[int] = Field(None, description="Sigma value that found this factor (ECM only)")
+    is_prime: Optional[bool] = Field(default=None, description="Whether factor is prime (if tested)")
+    found_by_attempt_id: Optional[int] = Field(default=None, description="ECM attempt that found this factor")
+    sigma: Optional[int] = Field(default=None, description="Sigma value that found this factor (ECM only)")
     created_at: datetime = Field(..., description="When factor was discovered")
-    client_id: Optional[str] = Field(None, description="Client that found the factor")
-    method: Optional[str] = Field(None, description="Method used to find factor (ecm, pm1, etc)")
+    client_id: Optional[str] = Field(default=None, description="Client that found the factor")
+    method: Optional[str] = Field(default=None, description="Method used to find factor (ecm, pm1, etc)")
 
 class FactorsListResponse(BaseModel):
     """Schema for paginated factors list"""

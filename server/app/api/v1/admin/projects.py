@@ -14,7 +14,7 @@ router = APIRouter()
 
 
 @router.post("/projects", response_model=ProjectResponse)
-async def create_project(
+def create_project(
     project: ProjectCreate,
     db: Session = Depends(get_db),
     _admin: bool = Depends(verify_admin_key)
@@ -25,7 +25,7 @@ async def create_project(
 
 
 @router.delete("/projects/by-name/{project_name}")
-async def delete_project_by_name(
+def delete_project_by_name(
     project_name: str,
     db: Session = Depends(get_db),
     _admin: bool = Depends(verify_admin_key)
@@ -36,7 +36,7 @@ async def delete_project_by_name(
 
 
 @router.delete("/projects/{project_id}")
-async def delete_project_by_id(
+def delete_project_by_id(
     project_id: int,
     db: Session = Depends(get_db),
     _admin: bool = Depends(verify_admin_key)

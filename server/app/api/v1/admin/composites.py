@@ -33,7 +33,7 @@ MAX_UPLOAD_SIZE = 10 * 1024 * 1024
 
 
 @router.post("/composites/upload")
-async def upload_composites(
+def upload_composites(
     file: UploadFile = File(...),
     source_type: str = Form("auto"),
     default_priority: int = Form(0),
@@ -50,7 +50,7 @@ async def upload_composites(
     CSV column mapping functionality.
     """
     try:
-        content = await file.read()
+        content = file.file.read()  # sync read; route runs in threadpool
 
         # Security: Check file size limit
         if len(content) > MAX_UPLOAD_SIZE:
@@ -101,7 +101,7 @@ async def upload_composites(
 
 
 @router.post("/composites/bulk")
-async def bulk_add_composites(
+def bulk_add_composites(
     numbers: List[str],
     default_priority: int = 0,
     project_name: Optional[str] = None,
@@ -126,7 +126,7 @@ async def bulk_add_composites(
 
 
 @router.post("/composites/bulk-structured")
-async def bulk_add_composites_structured(
+def bulk_add_composites_structured(
     request: BulkCompositeRequest,
     db: Session = Depends(get_db),
     composite_service: CompositeService = Depends(get_composite_service),
@@ -168,7 +168,7 @@ async def bulk_add_composites_structured(
 
 
 @router.get("/composites/status")
-async def get_queue_status(
+def get_queue_status(
     db: Session = Depends(get_db),
     composite_service: CompositeService = Depends(get_composite_service),
     _admin: bool = Depends(verify_admin_key)
@@ -185,7 +185,7 @@ async def get_queue_status(
 
 
 @router.get("/composites/find")
-async def find_composite(
+def find_composite(
     q: str,
     db: Session = Depends(get_db),
     composite_service: CompositeService = Depends(get_composite_service),
@@ -216,7 +216,7 @@ async def find_composite(
 
 
 @router.get("/composites/{composite_id:int}")
-async def get_composite_details(
+def get_composite_details(
     composite_id: int,
     db: Session = Depends(get_db),
     composite_service: CompositeService = Depends(get_composite_service),
@@ -231,7 +231,7 @@ async def get_composite_details(
 
 
 @router.get("/composites/{composite_id:int}/details", response_class=HTMLResponse)
-async def get_composite_details_page(
+def get_composite_details_page(
     composite_id: int,
     request: Request,
     db: Session = Depends(get_db),
@@ -262,7 +262,7 @@ async def get_composite_details_page(
 
 
 @router.put("/composites/{composite_id:int}/priority")
-async def set_composite_priority(
+def set_composite_priority(
     composite_id: int,
     priority: int,
     db: Session = Depends(get_db),
@@ -285,7 +285,7 @@ async def set_composite_priority(
 
 
 @router.post("/composites/{composite_id:int}/complete")
-async def mark_composite_complete(
+def mark_composite_complete(
     composite_id: int,
     reason: str = "manual",
     db: Session = Depends(get_db),
@@ -308,7 +308,7 @@ async def mark_composite_complete(
 
 
 @router.put("/composites/{composite_id:int}/activate")
-async def activate_composite(
+def activate_composite(
     composite_id: int,
     db: Session = Depends(get_db),
     composite_service: CompositeService = Depends(get_composite_service),
@@ -330,7 +330,7 @@ async def activate_composite(
 
 
 @router.put("/composites/{composite_id:int}/deactivate")
-async def deactivate_composite(
+def deactivate_composite(
     composite_id: int,
     db: Session = Depends(get_db),
     composite_service: CompositeService = Depends(get_composite_service),
@@ -352,7 +352,7 @@ async def deactivate_composite(
 
 
 @router.post("/composites/bulk-activate")
-async def bulk_activate_composites(
+def bulk_activate_composites(
     composite_ids: List[int],
     db: Session = Depends(get_db),
     composite_service: CompositeService = Depends(get_composite_service),
@@ -388,7 +388,7 @@ async def bulk_activate_composites(
 
 
 @router.delete("/composites/{composite_id:int}")
-async def remove_composite(
+def remove_composite(
     composite_id: int,
     reason: str = "admin_removal",
     db: Session = Depends(get_db),

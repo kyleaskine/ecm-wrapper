@@ -439,8 +439,11 @@ class TLevelCalculator:
         from ..models.attempts import ECMAttempt
         from ..models.residues import ECMResidue
 
+        from sqlalchemy.orm import defer
+
         # Get all ECM attempts for this composite, excluding superseded ones
-        attempts = db.query(ECMAttempt).filter(
+        # (defer raw_output: it can be ~1MB per row and is never read here)
+        attempts = db.query(ECMAttempt).options(defer(ECMAttempt.raw_output)).filter(
             ECMAttempt.composite_id == composite.id,
             ECMAttempt.superseded_by.is_(None)  # Exclude superseded attempts
         ).all()
@@ -459,7 +462,7 @@ class TLevelCalculator:
         # Find partial supersession cases from ATTEMPTS directly
         # This handles cases where stage 2 completed fewer curves than stage 1,
         # regardless of whether residue records exist
-        superseded_attempts = db.query(ECMAttempt).filter(
+        superseded_attempts = db.query(ECMAttempt).options(defer(ECMAttempt.raw_output)).filter(
             ECMAttempt.composite_id == composite.id,
             ECMAttempt.superseded_by.isnot(None),  # Has been superseded
             ECMAttempt.method == 'ecm'

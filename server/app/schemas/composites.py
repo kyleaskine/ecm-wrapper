@@ -23,14 +23,14 @@ class CompositeStats(BaseModel):
         ..., description="Whether number has SNFS polynomial form"
     )
     snfs_difficulty: Optional[int] = Field(
-        None, description="GNFS-equivalent digit count for SNFS numbers"
+        default=None, description="GNFS-equivalent digit count for SNFS numbers"
     )
     target_t_level: Optional[float] = Field(..., description="Target t-level")
     current_t_level: Optional[float] = Field(
         ..., description="Current t-level achieved (includes prior_t_level if set)"
     )
     prior_t_level: Optional[float] = Field(
-        None, description="T-level from work done before import"
+        default=None, description="T-level from work done before import"
     )
     priority: int = Field(..., description="Priority level")
     is_active: bool = Field(..., description="Whether composite is available for work assignment")
@@ -68,27 +68,27 @@ class CompositeInput(BaseModel):
         ..., description="Original number or mathematical form (e.g., '2^1223-1')"
     )
     current_composite: Optional[str] = Field(
-        None,
+        default=None,
         description="Current composite being factored (if different from number)"
     )
     has_snfs_form: bool = Field(
-        False, description="Whether number has SNFS polynomial form"
+        default=False, description="Whether number has SNFS polynomial form"
     )
     snfs_difficulty: Optional[int] = Field(
-        None, description="GNFS-equivalent digit count for SNFS numbers"
+        default=None, description="GNFS-equivalent digit count for SNFS numbers"
     )
-    priority: int = Field(0, description="Priority level for work assignment")
+    priority: int = Field(default=0, description="Priority level for work assignment")
     is_complete: Optional[bool] = Field(
-        None, description="Whether the composite is sufficiently complete for OPN purposes"
+        default=None, description="Whether the composite is sufficiently complete for OPN purposes"
     )
     is_fully_factored: Optional[bool] = Field(
-        None, description="Whether the composite is fully factored"
+        default=None, description="Whether the composite is fully factored"
     )
     is_active: Optional[bool] = Field(
-        None, description="Whether composite is available for work assignment (None = preserve existing, defaults to False for new composites)"
+        default=None, description="Whether composite is available for work assignment (None = preserve existing, defaults to False for new composites)"
     )
     prior_t_level: Optional[float] = Field(
-        None, description="T-level from work done before import (e.g., from factordb or previous campaigns)"
+        default=None, description="T-level from work done before import (e.g., from factordb or previous campaigns)"
     )
 
 class BulkCompositeRequest(BaseModel):
@@ -97,16 +97,16 @@ class BulkCompositeRequest(BaseModel):
         ..., description="List of composites to add"
     )
     default_priority: int = Field(
-        0, description="Default priority for composites without specified priority"
+        default=0, description="Default priority for composites without specified priority"
     )
     project_name: Optional[str] = Field(
-        None, description="Optional project name to associate composites with"
+        default=None, description="Optional project name to associate composites with"
     )
 
 class ProjectCreate(BaseModel):
     """Schema for creating a project"""
     name: str = Field(..., description="Unique project name")
-    description: Optional[str] = Field(None, description="Project description")
+    description: Optional[str] = Field(default=None, description="Project description")
 
 class ProjectResponse(BaseModel):
     """Schema for project response"""
@@ -132,12 +132,12 @@ class BatchStatusRequest(BaseModel):
 class CompositeBatchStatus(BaseModel):
     """Schema for individual composite status in batch response"""
     number: str = Field(..., description="The composite number")
-    target_t_level: Optional[float] = Field(None, description="Target t-level")
-    current_t_level: Optional[float] = Field(None, description="Current t-level achieved (includes prior_t_level)")
-    prior_t_level: Optional[float] = Field(None, description="T-level from work done before import")
-    digit_length: Optional[int] = Field(None, description="Decimal digit length")
-    has_snfs_form: Optional[bool] = Field(None, description="Whether number has SNFS form")
-    snfs_difficulty: Optional[int] = Field(None, description="GNFS-equivalent digit count for SNFS")
+    target_t_level: Optional[float] = Field(default=None, description="Target t-level")
+    current_t_level: Optional[float] = Field(default=None, description="Current t-level achieved (includes prior_t_level)")
+    prior_t_level: Optional[float] = Field(default=None, description="T-level from work done before import")
+    digit_length: Optional[int] = Field(default=None, description="Decimal digit length")
+    has_snfs_form: Optional[bool] = Field(default=None, description="Whether number has SNFS form")
+    snfs_difficulty: Optional[int] = Field(default=None, description="GNFS-equivalent digit count for SNFS")
     found: bool = Field(..., description="Whether the composite exists in database")
 
 class BatchStatusResponse(BaseModel):
@@ -152,11 +152,11 @@ class CompositeProgressItem(BaseModel):
     digit_length: int = Field(..., description="Decimal digit length")
     has_snfs_form: bool = Field(..., description="Whether number has SNFS form")
     snfs_difficulty: Optional[int] = Field(
-        None, description="GNFS-equivalent digit count for SNFS"
+        default=None, description="GNFS-equivalent digit count for SNFS"
     )
-    target_t_level: Optional[float] = Field(None, description="Target t-level")
-    current_t_level: Optional[float] = Field(None, description="Current t-level achieved (includes prior_t_level)")
-    prior_t_level: Optional[float] = Field(None, description="T-level from work done before import")
+    target_t_level: Optional[float] = Field(default=None, description="Target t-level")
+    current_t_level: Optional[float] = Field(default=None, description="Current t-level achieved (includes prior_t_level)")
+    prior_t_level: Optional[float] = Field(default=None, description="T-level from work done before import")
     completion_pct: float = Field(
         ..., description="ECM completion percentage (current / target * 100)"
     )
@@ -169,13 +169,13 @@ class CompositeProgressItem(BaseModel):
 
 class TopCompositesRequest(BaseModel):
     """Schema for top composites by progress request"""
-    limit: int = Field(50, ge=1, le=1000, description="Maximum number of composites to return")
-    project_name: Optional[str] = Field(None, description="Filter by project name")
-    min_priority: Optional[int] = Field(None, description="Minimum priority level")
-    include_factored: bool = Field(False, description="Include fully factored composites")
-    formulas: Optional[List[str]] = Field(None, description="Filter to only these composite formulas")
-    min_difficulty: Optional[float] = Field(None, description="Minimum effective difficulty (min of digit_length and snfs_difficulty)")
-    max_difficulty: Optional[float] = Field(None, description="Maximum effective difficulty (min of digit_length and snfs_difficulty)")
+    limit: int = Field(default=50, ge=1, le=1000, description="Maximum number of composites to return")
+    project_name: Optional[str] = Field(default=None, description="Filter by project name")
+    min_priority: Optional[int] = Field(default=None, description="Minimum priority level")
+    include_factored: bool = Field(default=False, description="Include fully factored composites")
+    formulas: Optional[List[str]] = Field(default=None, description="Filter to only these composite formulas")
+    min_difficulty: Optional[float] = Field(default=None, description="Minimum effective difficulty (min of digit_length and snfs_difficulty)")
+    max_difficulty: Optional[float] = Field(default=None, description="Maximum effective difficulty (min of digit_length and snfs_difficulty)")
 
 class TopCompositesResponse(BaseModel):
     """Schema for top composites by progress response"""

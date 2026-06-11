@@ -24,7 +24,7 @@ router = APIRouter()
 
 
 @router.get("/stats/summary")
-async def get_admin_summary(
+def get_admin_summary(
     db: Session = Depends(get_db),
     _admin: bool = Depends(verify_admin_key)
 ):
@@ -112,7 +112,7 @@ async def admin_login_page(request: Request):
 
 
 @router.get("/dashboard", response_class=HTMLResponse)
-async def admin_dashboard(
+def admin_dashboard(
     request: Request,
     db: Session = Depends(get_db),
     _admin: bool = Depends(verify_admin_key_html)
@@ -123,7 +123,7 @@ async def admin_dashboard(
     """
 
     # Get summary statistics
-    summary_stats = await get_admin_summary(db)
+    summary_stats = get_admin_summary(db)
 
     # Use shared query helpers
     recent_work = get_recent_work_assignments(db, limit=20)

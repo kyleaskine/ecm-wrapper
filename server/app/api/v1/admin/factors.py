@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 @router.delete("/factors/{factor_id}")
-async def delete_factor(
+def delete_factor(
     factor_id: int,
     db: Session = Depends(get_db),
     _: bool = Depends(verify_admin_key)

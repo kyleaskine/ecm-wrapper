@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
-from typing import Tuple, Literal
+from typing import Literal
 import logging
 from slowapi import Limiter
 
@@ -8,7 +8,7 @@ from ...rate_limit import get_real_client_ip
 from ...database import get_db
 from ...dependencies import get_composite_service
 from ...schemas.submit import SubmitResultRequest, SubmitResultResponse
-from ...models import Composite, ECMAttempt, Factor
+from ...models import Composite, ECMAttempt
 from ...models.residues import ECMResidue
 from ...services.composites import CompositeService
 from ...services.factors import FactorService
@@ -45,11 +45,11 @@ def submit_result(
     Note: Only composites already registered in the database can receive submissions.
     Use --no-submit flag for local testing.
     """
+    # Resolve real client IP (proxy-aware) up front so except blocks can log it
+    client_ip = get_real_client_ip(request)
+
     with transaction_scope(db, "submit_result"):
         try:
-            # Get client IP address for logging
-            client_ip = request.client.host if request.client else "unknown"
-
             # SECURITY: Only accept submissions for composites already in the database
             # This prevents accidental pollution from local testing when users forget --no-submit
             composite = db.query(Composite).filter(
@@ -170,7 +170,6 @@ def submit_result(
             if factors_to_process:
                 new_factors_count = 0
                 known_factors_count = 0
-                all_factors_valid = True
 
                 # Validate and add all factors BEFORE updating composite
                 # First pass: calculate running cofactor to identify final prime
@@ -234,7 +233,7 @@ def submit_result(
                     # Add factor to database (with parametrization for group order calculation)
                     # Convert sigma to string for storage (supports large param 0 values)
                     sigma_for_storage = str(parsed_sigma) if parsed_sigma is not None else None
-                    factor, factor_created = FactorService.add_factor(
+                    _, factor_created = FactorService.add_factor(
                         db, composite.id, factor_str, attempt.id, sigma_for_storage, parametrization,
                         method=result_request.method
                     )
@@ -290,7 +289,7 @@ def submit_result(
             raise
         except ValueError as e:
             # Client-side validation errors (safe to expose)
-            logger.warning(f"Validation error from {client_ip if 'client_ip' in locals() else 'unknown'}: {e}")
+            logger.warning(f"Validation error from {client_ip}: {e}")
             raise HTTPException(status_code=400, detail=str(e))
         except (TypeError, AttributeError) as e:
             # Data structure errors (potentially from malformed requests)

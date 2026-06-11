@@ -1,4 +1,4 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 from sqlalchemy import and_, or_, func, desc
 from typing import Optional, Dict, Any, List, Tuple, Sequence, Literal, cast
 from datetime import datetime, timedelta
@@ -8,7 +8,6 @@ import logging
 from ..models.composites import Composite
 from ..models.attempts import ECMAttempt
 from ..models.work_assignments import WorkAssignment
-from ..models.clients import Client
 from ..schemas.work import WorkRequest, WorkResponse
 from .t_level_calculator import TLevelCalculator
 from ..constants import ECM_BOUNDS, ACTIVE_WORK_STATUSES
@@ -197,7 +196,8 @@ class WorkAssignmentService:
             return WorkResponse(message="No suitable work available")
 
         # Get previous attempts for this composite
-        previous_attempts = db.query(ECMAttempt).filter(
+        # defer raw_output: large blob, not needed for parameter selection
+        previous_attempts = db.query(ECMAttempt).options(defer(ECMAttempt.raw_output)).filter(
             ECMAttempt.composite_id == composite.id
         ).all()
 
