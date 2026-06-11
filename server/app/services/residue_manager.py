@@ -432,28 +432,194 @@ class ResidueManager:
         logger.info(f"Residue {residue_id} released by {client_id}")
         return residue
 
+    def completion_rejection_reason(
+        self,
+        residue: ECMResidue,
+        stage2_attempt: ECMAttempt
+    ) -> Optional[str]:
+        """
+        Check whether a stage 2 attempt qualifies to complete a residue.
+
+        Valid means: found a factor, or completed at least 75% of the assigned
+        curves with a sufficient B2 (NULL/-1 = GMP-ECM default is accepted, an
+        explicit B2 must be at least 100*B1 to be worth consuming the file).
+
+        Returns:
+            None if the completion is valid, otherwise a human-readable reason.
+        """
+        if stage2_attempt.factor_found is not None:
+            return None
+
+        min_curves_required = int(0.75 * residue.curve_count)
+        if stage2_attempt.curves_completed < min_curves_required:
+            return (
+                f"no factor found and only {stage2_attempt.curves_completed} curves "
+                f"completed out of {residue.curve_count} assigned "
+                f"(minimum required: {min_curves_required}, 75%)"
+            )
+
+        stage2_b2 = stage2_attempt.b2
+        if stage2_b2 is not None and stage2_b2 != -1:
+            min_b2 = residue.b1 * 100
+            if stage2_b2 < min_b2:
+                return (
+                    f"B2={stage2_b2} is less than the minimum "
+                    f"required {min_b2} (100 * B1={residue.b1})"
+                )
+
+        return None
+
+    def find_completing_attempt(
+        self,
+        db: Session,
+        residue: ECMResidue
+    ) -> Optional[ECMAttempt]:
+        """
+        Find an existing stage 2 attempt that already qualifies to complete
+        this residue.
+
+        Used to finalize residues whose completion call was lost (the result
+        submission was accepted but the residue was never closed out) instead
+        of re-serving curves that were already run.
+
+        Returns:
+            The best qualifying attempt (factor found preferred, then most
+            curves completed, then oldest), or None.
+        """
+        candidates = db.query(ECMAttempt).filter(
+            ECMAttempt.residue_checksum == residue.checksum,
+            ECMAttempt.composite_id == residue.composite_id,
+            ECMAttempt.superseded_by.is_(None),
+            # Exclude stage 1-only attempts (b2=0); NULL b2 means GMP-ECM default
+            or_(ECMAttempt.b2.is_(None), ECMAttempt.b2 != 0),
+        ).order_by(
+            ECMAttempt.factor_found.isnot(None).desc(),
+            ECMAttempt.curves_completed.desc(),
+            ECMAttempt.id.asc()
+        ).all()
+
+        for attempt in candidates:
+            if self.completion_rejection_reason(residue, attempt) is None:
+                return attempt
+        return None
+
+    def _resolve_terminal_attempt(
+        self,
+        db: Session,
+        attempt_id: int,
+        max_hops: int = 10
+    ) -> Optional[int]:
+        """
+        Follow the superseded_by chain to the terminal (unsuperseded) attempt.
+
+        The stage-1-designated winner may itself have been superseded later
+        (e.g. by reconciliation), so callers must not point new duplicates at
+        it directly - that's how supersession cycles form.
+
+        Returns:
+            The terminal attempt ID, or None if the chain is broken, cyclic,
+            or too long (logged; callers should bail out rather than extend
+            a bad chain).
+        """
+        seen = set()
+        current_id = attempt_id
+        for _ in range(max_hops):
+            if current_id in seen:
+                logger.warning(
+                    f"Supersession cycle detected at attempt {current_id} "
+                    f"(started from {attempt_id})"
+                )
+                return None
+            seen.add(current_id)
+            attempt = db.query(ECMAttempt).filter(ECMAttempt.id == current_id).first()
+            if attempt is None:
+                logger.warning(
+                    f"Supersession chain from attempt {attempt_id} references "
+                    f"missing attempt {current_id}"
+                )
+                return None
+            if attempt.superseded_by is None:
+                return current_id
+            current_id = attempt.superseded_by
+
+        logger.warning(
+            f"Supersession chain from attempt {attempt_id} exceeded {max_hops} hops"
+        )
+        return None
+
+    def _handle_already_completed(
+        self,
+        db: Session,
+        residue: ECMResidue,
+        stage2_attempt: ECMAttempt,
+        recalculate_t_level: bool
+    ) -> Tuple[ECMResidue, Optional[float]]:
+        """
+        Handle a completion request for a residue that is already completed.
+
+        Happens when a client retries after a lost response, or when an older
+        client calls /residues/{id}/complete after /submit_result already
+        auto-completed the residue. If the retry carries a different
+        (duplicate) attempt, supersede it by the original winner so the same
+        curves aren't counted twice in the t-level.
+        """
+        winner_id = None
+        if residue.stage1_attempt_id:
+            stage1 = db.query(ECMAttempt).filter(
+                ECMAttempt.id == residue.stage1_attempt_id
+            ).first()
+            if stage1 and stage1.superseded_by is not None:
+                # Resolve to the terminal winner - the designated winner may
+                # itself have been superseded since the residue completed
+                winner_id = self._resolve_terminal_attempt(db, stage1.superseded_by)
+
+        new_t_level = None
+        if (winner_id is not None and winner_id != stage2_attempt.id
+                and stage2_attempt.superseded_by is None):
+            stage2_attempt.superseded_by = winner_id
+            db.flush()
+            logger.info(
+                f"Residue {residue.id} already completed by attempt {winner_id}; "
+                f"superseded duplicate attempt {stage2_attempt.id}"
+            )
+            if recalculate_t_level:
+                new_t_level = self._recalculate_composite_t_level(db, residue.composite_id)
+        else:
+            logger.info(
+                f"Residue {residue.id} already completed - treating completion "
+                f"of attempt {stage2_attempt.id} as idempotent retry"
+            )
+
+        return residue, new_t_level
+
     def complete_residue(
         self,
         db: Session,
         residue_id: int,
-        stage2_attempt_id: int
+        stage2_attempt_id: int,
+        recalculate_t_level: bool = True
     ) -> Tuple[ECMResidue, Optional[float]]:
         """
         Mark residue as completed after stage 2 finishes.
 
         This supersedes the stage 1 attempt and deletes the residue file.
+        Calling it again for an already-completed residue is an idempotent
+        no-op (a duplicate attempt from a retry is superseded by the winner).
 
         Args:
             db: Database session
             residue_id: ID of the completed residue
             stage2_attempt_id: ID of the stage 2 ECM attempt
+            recalculate_t_level: If False, skip the t-level recalculation;
+                for callers that recalculate themselves in the same
+                transaction (e.g. /submit_result auto-completion)
 
         Returns:
             Tuple of (residue, new_t_level)
             - new_t_level: Updated t-level after supersession (if applicable)
 
         Raises:
-            ValueError: If residue or attempt not found
+            ValueError: If residue or attempt not found, or completion invalid
         """
         residue = db.query(ECMResidue).filter(ECMResidue.id == residue_id).first()
         if not residue:
@@ -464,13 +630,17 @@ class ResidueManager:
         if not stage2_attempt:
             raise ValueError(f"Stage 2 attempt {stage2_attempt_id} not found")
 
-        # Validate that this is a legitimate stage 2 completion:
-        # Must either find a factor OR complete at least 75% of the assigned curves
-        has_factor = stage2_attempt.factor_found is not None
-        min_curves_required = int(0.75 * residue.curve_count)
-        curves_completed = stage2_attempt.curves_completed
+        # Idempotent retry: don't redo supersession/file deletion, and never
+        # reject (releasing a completed residue would re-serve finished work)
+        if residue.status == 'completed':
+            return self._handle_already_completed(
+                db, residue, stage2_attempt, recalculate_t_level
+            )
 
-        if not has_factor and curves_completed < min_curves_required:
+        # Validate that this is a legitimate stage 2 completion:
+        # must find a factor OR complete >= 75% of assigned curves with sane B2
+        rejection = self.completion_rejection_reason(residue, stage2_attempt)
+        if rejection:
             # Reject this completion and release the residue back to available
             residue.status = 'available'
             residue.claimed_at = None
@@ -480,37 +650,12 @@ class ResidueManager:
 
             logger.warning(
                 f"Rejected residue {residue_id} completion: stage2_attempt {stage2_attempt_id} "
-                f"has no factor and curves_completed={curves_completed} < {min_curves_required} "
-                f"(75% of {residue.curve_count}). Residue released back to pool."
+                f"{rejection}. Residue released back to pool."
             )
             raise ValueError(
-                f"Invalid stage 2 completion: no factor found and only {curves_completed} curves "
-                f"completed out of {residue.curve_count} assigned (minimum required: {min_curves_required}, 75%). "
+                f"Invalid stage 2 completion: {rejection}. "
                 f"Residue {residue_id} has been released back to the available pool."
             )
-
-        # Validate B2 is sufficient: NULL/-1 (GMP-ECM default) is accepted, but an
-        # explicit B2 must be at least 100*B1 to be worth consuming the residue file
-        stage2_b2 = stage2_attempt.b2
-        if not has_factor and stage2_b2 is not None and stage2_b2 != -1:
-            min_b2 = residue.b1 * 100
-            if stage2_b2 < min_b2:
-                residue.status = 'available'
-                residue.claimed_at = None
-                residue.claimed_by = None
-                residue.expires_at = None
-                db.flush()
-
-                logger.warning(
-                    f"Rejected residue {residue_id} completion: stage2_attempt {stage2_attempt_id} "
-                    f"used B2={stage2_b2} < minimum {min_b2} (100 * B1={residue.b1}). "
-                    f"Residue released back to pool."
-                )
-                raise ValueError(
-                    f"Invalid stage 2 completion: B2={stage2_b2} is less than the minimum "
-                    f"required {min_b2} (100 * B1={residue.b1}). "
-                    f"Residue {residue_id} has been released back to the available pool."
-                )
 
         # Mark stage 1 attempt as superseded (if linked)
         if residue.stage1_attempt_id:
@@ -560,7 +705,9 @@ class ResidueManager:
             db.flush()  # Ensure supersession is visible to t-level calculation
 
         # Recalculate t-level for composite (excluding superseded attempts)
-        new_t_level = self._recalculate_composite_t_level(db, residue.composite_id)
+        new_t_level = None
+        if recalculate_t_level:
+            new_t_level = self._recalculate_composite_t_level(db, residue.composite_id)
 
         logger.info(
             f"Completed residue {residue_id}: stage2_attempt={stage2_attempt_id}, "

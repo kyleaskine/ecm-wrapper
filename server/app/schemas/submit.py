@@ -1,6 +1,5 @@
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional, Dict, Any, Literal, List
-from datetime import datetime
+from typing import Optional, Literal, List
 
 # Length caps below protect against unbounded payloads. Values are
 # generous ceilings, not validation — they should never reject legitimate
@@ -63,5 +62,14 @@ class SubmitResultResponse(BaseModel):
     message: str = Field(..., description="Status message")
     factor_status: Optional[Literal["new_factor", "known_factor", "no_factor", "duplicate"]] = Field(
         default=None, description="Factor discovery status"
+    )
+    residue_completed: bool = Field(
+        default=False,
+        description="True if the linked residue was completed server-side in this call "
+                    "(client may skip the separate /residues/{id}/complete call)"
+    )
+    new_t_level: Optional[float] = Field(
+        default=None,
+        description="Composite's current t-level after this submission (set when a residue was completed)"
     )
     errors: Optional[List[ErrorDetail]] = Field(default=None, description="Detailed error information")

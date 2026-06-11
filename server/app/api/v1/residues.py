@@ -16,6 +16,7 @@ import logging
 
 from ...database import get_db, SessionLocal
 from ...dependencies import get_residue_manager
+from ...models.attempts import ECMAttempt
 from ...models.residues import ECMResidue
 from ...models.composites import Composite
 from ...models.projects import Project, ProjectComposite
@@ -163,17 +164,37 @@ def get_residue_work(
         Residue details and download URL, or message if none available
     """
     with transaction_scope(db, "get_residue_work"):
-        # Find available residue
-        residue = residue_manager.get_available_work(
-            db=db,
-            client_id=client_id,
-            min_target_tlevel=min_target_tlevel,
-            max_target_tlevel=max_target_tlevel,
-            min_priority=min_priority,
-            min_b1=min_b1,
-            max_b1=max_b1,
-            project=project
-        )
+        # Find available residue. If a candidate already has a qualifying
+        # stage 2 attempt (its completion call was lost), finalize it instead
+        # of re-serving curves that were already run, and look for another.
+        # Bounded so one request doesn't drain a large backlog of stale
+        # residues; subsequent requests pick up where this one left off.
+        residue = None
+        for _ in range(5):
+            candidate = residue_manager.get_available_work(
+                db=db,
+                client_id=client_id,
+                min_target_tlevel=min_target_tlevel,
+                max_target_tlevel=max_target_tlevel,
+                min_priority=min_priority,
+                min_b1=min_b1,
+                max_b1=max_b1,
+                project=project
+            )
+
+            if not candidate:
+                break
+
+            stale_attempt = residue_manager.find_completing_attempt(db, candidate)
+            if stale_attempt is None:
+                residue = candidate
+                break
+
+            logger.info(
+                f"Residue {candidate.id} already has qualifying stage 2 attempt "
+                f"{stale_attempt.id}; auto-completing instead of re-serving"
+            )
+            residue_manager.complete_residue(db, candidate.id, stale_attempt.id)
 
         if not residue:
             return ResidueWorkResponse(
@@ -310,12 +331,30 @@ def complete_residue(
             str(residue_id)
         )
 
-        # Verify client has claimed this residue
+        # Authorization: the claim holder may complete. If the claim lapsed
+        # (released by expiry cleanup) or the residue was finalized by another
+        # path (submit-time auto-complete, reconcile), accept a client whose
+        # own attempt provably consumed this residue file - the checksum and
+        # composite must match and the attempt must belong to this client.
         if residue.claimed_by != client_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Residue {residue_id} is not claimed by client {client_id}"
+            attempt = db.query(ECMAttempt).filter(
+                ECMAttempt.id == request.stage2_attempt_id
+            ).first()
+            attempt_authorizes = (
+                attempt is not None
+                and attempt.client_id == client_id
+                and attempt.residue_checksum == residue.checksum
+                and attempt.composite_id == residue.composite_id
             )
+            if not attempt_authorizes:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=(
+                        f"Residue {residue_id} is not claimed by client {client_id} "
+                        f"and attempt {request.stage2_attempt_id} does not match "
+                        f"this residue and client"
+                    )
+                )
 
         try:
             completed_residue, new_t_level = residue_manager.complete_residue(

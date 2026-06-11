@@ -352,6 +352,14 @@ class AdaptiveCPUMode(WorkMode):
             self._cleanup_s2_residue()
             return
 
+        # Server bundled residue completion into the submission - nothing left to do
+        if self._residue_completed_in_submit:
+            if self._submit_new_t_level is not None:
+                print(f"T-level updated to {self._submit_new_t_level:.2f}")
+            print("Residue completed with submission.")
+            self._cleanup_s2_residue()
+            return
+
         # Check completion ratio
         completion_ratio = self._s2_curves_completed / self._s2_expected_curves if self._s2_expected_curves > 0 else 0
 

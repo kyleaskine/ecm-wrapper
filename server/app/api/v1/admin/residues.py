@@ -5,11 +5,15 @@ Provides functionality to delete residues and trigger cleanup of expired entries
 import logging
 import os
 from fastapi import APIRouter, Depends, Header
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from ....database import get_db
-from ....dependencies import verify_admin_key, get_residue_manager
+from ....dependencies import verify_admin_key, get_residue_manager, get_composite_service
+from ....models.attempts import ECMAttempt
+from ....models.composites import Composite
 from ....models.residues import ECMResidue
+from ....services.composites import CompositeService
 from ....services.residue_manager import ResidueManager
 from ....utils.errors import get_or_404
 from ....utils.transactions import transaction_scope
@@ -174,4 +178,147 @@ def cleanup_residues(
         "claims_released": claims_released,
         "factored_composites_cleaned": factored_cleaned,
         "total_cleaned": total_cleaned
+    }
+
+
+@router.post("/residues/reconcile")
+def reconcile_residues(
+    db: Session = Depends(get_db),
+    _admin: bool = Depends(verify_admin_key),
+    residue_manager: ResidueManager = Depends(get_residue_manager),
+    composite_service: CompositeService = Depends(get_composite_service)
+):
+    """
+    One-time/periodic repair for residues whose completion call was lost.
+
+    Two passes:
+    1. Available/claimed residues that already have a qualifying stage 2
+       attempt (factor found, or >=75% curves with sane B2) are completed
+       with that attempt - superseding stage 1 and any duplicate attempts.
+    2. Leftover unsuperseded stage 2 attempts sharing a residue_checksum
+       (e.g. on residues completed before orphan handling existed) are
+       superseded by the best attempt in the group.
+
+    T-levels are recalculated ONLY for the composites actually touched -
+    never the recalc-all path, which takes hours on this server.
+
+    Returns:
+        Report of residues completed, attempts superseded, and per-composite
+        t-level changes
+    """
+    completed_residues = []
+    superseded_attempts = []
+    affected_composite_ids = set()
+
+    with transaction_scope(db, "reconcile_residues"):
+        # Pass 1: finalize stuck residues that already earned completion
+        has_linked_attempt = (
+            db.query(ECMAttempt.id)
+            .filter(ECMAttempt.residue_checksum == ECMResidue.checksum)
+            .exists()
+        )
+        stuck_residues = db.query(ECMResidue).filter(
+            ECMResidue.status.in_(['available', 'claimed']),
+            has_linked_attempt
+        ).all()
+
+        for residue in stuck_residues:
+            attempt = residue_manager.find_completing_attempt(db, residue)
+            if attempt is None:
+                continue
+            residue_manager.complete_residue(
+                db, residue.id, attempt.id, recalculate_t_level=False
+            )
+            completed_residues.append({
+                "residue_id": residue.id,
+                "attempt_id": attempt.id,
+                "composite_id": residue.composite_id,
+                "factor_found": attempt.factor_found is not None
+            })
+            affected_composite_ids.add(residue.composite_id)
+
+        # Pass 2: supersede leftover duplicate attempts sharing a checksum.
+        # Pass 1's completions already superseded their checksum-mates, so
+        # the superseded_by IS NULL filter only picks up older leftovers.
+        stage2_only = or_(ECMAttempt.b2.is_(None), ECMAttempt.b2 != 0)
+        dup_checksums = (
+            db.query(ECMAttempt.residue_checksum)
+            .filter(
+                ECMAttempt.residue_checksum.isnot(None),
+                ECMAttempt.superseded_by.is_(None),
+                stage2_only
+            )
+            .group_by(ECMAttempt.residue_checksum)
+            .having(func.count(ECMAttempt.id) > 1)
+            .all()
+        )
+
+        for (checksum,) in dup_checksums:
+            attempts = db.query(ECMAttempt).filter(
+                ECMAttempt.residue_checksum == checksum,
+                ECMAttempt.superseded_by.is_(None),
+                stage2_only
+            ).order_by(
+                ECMAttempt.factor_found.isnot(None).desc(),
+                ECMAttempt.curves_completed.desc(),
+                ECMAttempt.id.asc()
+            ).all()
+
+            # The completion path resolves the winner via stage1.superseded_by,
+            # so the attempt stage 1 points at must stay unsuperseded - dethroning
+            # it here would let a delayed old-client completion call create a
+            # supersession cycle that excludes both attempts from the t-level.
+            designated = (
+                db.query(ECMAttempt.superseded_by)
+                .join(ECMResidue, ECMResidue.stage1_attempt_id == ECMAttempt.id)
+                .filter(
+                    ECMResidue.checksum == checksum,
+                    ECMAttempt.superseded_by.isnot(None)
+                )
+                .first()
+            )
+            designated_id = designated[0] if designated else None
+            winner = next((a for a in attempts if a.id == designated_id), attempts[0])
+
+            for loser in attempts:
+                if loser.id == winner.id:
+                    continue
+                loser.superseded_by = winner.id
+                superseded_attempts.append({
+                    "attempt_id": loser.id,
+                    "superseded_by": winner.id,
+                    "composite_id": loser.composite_id
+                })
+                affected_composite_ids.add(loser.composite_id)
+
+        db.flush()
+
+        # Targeted recalculation: only the composites touched above
+        composites_recalculated = []
+        if affected_composite_ids:
+            composites = db.query(Composite).filter(
+                Composite.id.in_(affected_composite_ids)
+            ).all()
+            t_levels_before = {c.id: c.current_t_level for c in composites}
+            for composite in composites:
+                composite_service.update_t_level(db, composite.id)
+            composites_recalculated = [
+                {
+                    "composite_id": c.id,
+                    "t_level_before": t_levels_before[c.id],
+                    "t_level_after": c.current_t_level
+                }
+                for c in composites
+            ]
+
+    return {
+        "success": True,
+        "message": (
+            f"Completed {len(completed_residues)} stale residue(s), "
+            f"superseded {len(superseded_attempts)} duplicate attempt(s), "
+            f"recalculated {len(composites_recalculated)} composite t-level(s)"
+        ),
+        "residues_completed": completed_residues,
+        "attempts_superseded": superseded_attempts,
+        "composites_recalculated": composites_recalculated
     }

@@ -221,6 +221,14 @@ class Stage2ConsumerMode(WorkMode):
             self.api_client.abandon_residue(self.ctx.client_id, self.current_residue_id)
             return
 
+        # Server bundled residue completion into the submission - nothing left to do
+        if self._residue_completed_in_submit:
+            if self._submit_new_t_level is not None:
+                print(f"T-level updated to {self._submit_new_t_level:.2f}")
+            print("Residue completed with submission.")
+            self._cleanup_local_residue()
+            return
+
         # Server requires 75% completion if no factor found
         # If we didn't complete enough curves (e.g., graceful shutdown), abandon instead
         completion_ratio = self._curves_completed / self._expected_curves if self._expected_curves > 0 else 0

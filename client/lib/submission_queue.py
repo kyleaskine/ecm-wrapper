@@ -497,6 +497,13 @@ class SubmissionQueue:
             )
             return
 
+        if response.get("residue_completed"):
+            self.logger.info(
+                f"Residue {residue_id} completed server-side with the queued "
+                "submission; chained completion not needed"
+            )
+            return
+
         try:
             complete_result = api_client.complete_residue(
                 client_id=client_id,

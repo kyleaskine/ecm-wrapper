@@ -6,12 +6,13 @@ from slowapi import Limiter
 
 from ...rate_limit import get_real_client_ip
 from ...database import get_db
-from ...dependencies import get_composite_service
+from ...dependencies import get_composite_service, get_residue_manager
 from ...schemas.submit import SubmitResultRequest, SubmitResultResponse
 from ...models import Composite, ECMAttempt
 from ...models.residues import ECMResidue
 from ...services.composites import CompositeService
 from ...services.factors import FactorService
+from ...services.residue_manager import ResidueManager
 from ...utils.number_utils import is_trivial_factor, verify_factor_divides, parse_sigma_with_parametrization
 from ...utils.transactions import transaction_scope
 
@@ -29,7 +30,8 @@ def submit_result(
     result_request: SubmitResultRequest,
     request: Request,
     db: Session = Depends(get_db),
-    composite_service: CompositeService = Depends(get_composite_service)
+    composite_service: CompositeService = Depends(get_composite_service),
+    residue_manager: ResidueManager = Depends(get_residue_manager)
 ):
     """
     Submit factorization attempt result.
@@ -112,12 +114,13 @@ def submit_result(
             # Validate residue_checksum if provided (for stage 2 work from residue pool)
             # This verifies the client actually had the residue file
             residue_checksum = result_request.residue_checksum
+            linked_residue = None
             if residue_checksum:
-                residue = db.query(ECMResidue).filter(
+                linked_residue = db.query(ECMResidue).filter(
                     ECMResidue.checksum == residue_checksum,
                     ECMResidue.composite_id == composite.id
                 ).first()
-                if not residue:
+                if not linked_residue:
                     logger.warning(
                         f"Invalid residue_checksum {residue_checksum[:16]}... from {client_ip} "
                         f"for composite {composite.id} - not linking to residue"
@@ -267,7 +270,47 @@ def submit_result(
                     if FactorService.verify_factorization(db, composite.id):
                         composite_service.mark_fully_factored(db, composite.id)
 
-            # Update t-level if this was an ECM attempt
+            # If this submission consumed a claimed residue, complete the residue
+            # in the same transaction (supersedes stage 1 + any orphaned duplicate
+            # attempts). This closes the window where the result was accepted but
+            # the separate completion call never arrived. Old clients still call
+            # /residues/{id}/complete afterwards; that's now an idempotent retry.
+            residue_completed = False
+            if linked_residue is not None:
+                try:
+                    # 'available' is completable too: a lapsed claim (released
+                    # by expiry cleanup) shouldn't force the work to be redone,
+                    # and the checksum match proves this client had the file.
+                    # A residue claimed by a DIFFERENT client is left alone.
+                    claim_ok = (
+                        linked_residue.status == 'available'
+                        or (linked_residue.status == 'claimed'
+                            and linked_residue.claimed_by == result_request.client_id)
+                    )
+                    if (claim_ok
+                            and residue_manager.completion_rejection_reason(linked_residue, attempt) is None):
+                        residue_manager.complete_residue(
+                            db, linked_residue.id, attempt.id, recalculate_t_level=False
+                        )
+                        residue_completed = True
+                        logger.info(
+                            f"Auto-completed residue {linked_residue.id} with attempt "
+                            f"{attempt.id} for client {result_request.client_id}"
+                        )
+                    elif linked_residue.status == 'completed':
+                        # Resubmission after a lost response: supersedes this
+                        # duplicate attempt so the curves aren't counted twice
+                        residue_manager.complete_residue(
+                            db, linked_residue.id, attempt.id, recalculate_t_level=False
+                        )
+                        residue_completed = True
+                except Exception as e:
+                    # The submission is still valid even if completion fails;
+                    # the client's separate completion call remains the fallback
+                    logger.warning(f"Failed to auto-complete residue {linked_residue.id}: {e}")
+
+            # Update t-level if this was an ECM attempt. Runs after residue
+            # completion so the single recalculation excludes superseded attempts.
             if result_request.method == 'ecm':
                 try:
                     composite_service.update_t_level(db, composite.id)
@@ -281,7 +324,9 @@ def submit_result(
                 attempt_id=attempt.id,
                 composite_id=composite.id,
                 message="Result logged successfully",
-                factor_status=factor_status
+                factor_status=factor_status,
+                residue_completed=residue_completed,
+                new_t_level=composite.current_t_level if residue_completed else None
             )
 
         except HTTPException:

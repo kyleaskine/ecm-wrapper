@@ -88,6 +88,11 @@ class WorkMode(ABC):
         self.completed_count: int = 0
         self.consecutive_failures: int = 0
 
+        # Set by _submit_stage2_results when the server bundled residue
+        # completion into the submission (residue_completed in response)
+        self._residue_completed_in_submit: bool = False
+        self._submit_new_t_level: Optional[float] = None
+
         # Graceful shutdown state (3-level)
         self._first_interrupt_received: bool = False
         self._second_interrupt_received: bool = False
@@ -273,6 +278,10 @@ class WorkMode(ABC):
             self.logger.error(result.error_message or "Stage 2 execution failed")
             return False, None, False
 
+        # Reset bundled-completion state for this work item
+        self._residue_completed_in_submit = False
+        self._submit_new_t_level = None
+
         results = {
             'composite': work['composite'],
             'b1': work['b1'],
@@ -315,6 +324,10 @@ class WorkMode(ABC):
                 self.logger.error("No attempt_id returned from primary endpoint")
                 return False, None, False
             print(f"Stage 2 attempt ID: {stage2_attempt_id}")
+            # Newer servers complete the residue inside /submit_result;
+            # complete_work uses this to skip the redundant completion call
+            self._residue_completed_in_submit = bool(primary.get('residue_completed'))
+            self._submit_new_t_level = primary.get('new_t_level')
             return True, stage2_attempt_id, False
         else:
             self.logger.warning("Primary endpoint submission failed (other endpoints may have succeeded)")
