@@ -277,7 +277,10 @@ class APIClient:
                 'execution_time': results.get('execution_time', 0)
             },
             'raw_output': results.get('raw_output', ''),
-            'residue_checksum': residue_checksum  # For stage 2 work from residue pool
+            'residue_checksum': residue_checksum,  # For stage 2 work from residue pool
+            # Pins the submission to its work assignment so the server can
+            # resolve the composite by identity instead of string matching
+            'work_id': results.get('work_id')
         }
 
         # Debug logging for multi-factor submissions

@@ -32,7 +32,8 @@ def test_build_submission_payload():
         'factor_found': '3',
         'parametrization': 3,
         'sigma': '3:12345',
-        'raw_output': 'GMP-ECM output here...'
+        'raw_output': 'GMP-ECM output here...',
+        'work_id': 'wa-test-1234'
     }
 
     payload = api_client.build_submission_payload(
@@ -59,6 +60,9 @@ def test_build_submission_payload():
     assert payload['results']['factor_found'] == '3'
     assert payload['results']['curves_completed'] == 100
     assert payload['results']['execution_time'] == 45.2
+    # work_id must reach the payload so the server can resolve the
+    # composite by assignment identity instead of string matching
+    assert payload['work_id'] == 'wa-test-1234'
 
     print("✓ test_build_submission_payload passed")
     pass  # Test passed

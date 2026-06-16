@@ -164,12 +164,22 @@ def get_residue_work(
         Residue details and download URL, or message if none available
     """
     with transaction_scope(db, "get_residue_work"):
-        # Find available residue. If a candidate already has a qualifying
-        # stage 2 attempt (its completion call was lost), finalize it instead
-        # of re-serving curves that were already run, and look for another.
-        # Bounded so one request doesn't drain a large backlog of stale
-        # residues; subsequent requests pick up where this one left off.
+        # Find and claim an available residue. If a candidate already has a
+        # qualifying stage 2 attempt (its completion call was lost), finalize
+        # it instead of re-serving curves that were already run, and look for
+        # another. The candidate is selected without a lock; claim_residue
+        # locks composite -> residue and revalidates, so losing a claim race
+        # to another client just moves on to the next candidate.
+        #
+        # tried_ids accumulates every candidate this request handled (claimed
+        # by someone else, or auto-completed) and is fed back into
+        # get_available_work so the next iteration selects a DISTINCT row.
+        # Without it, concurrent consumers all see the same top-priority
+        # residue and a loser would re-pick it every iteration, burning the
+        # whole budget on one contended row. Bounded so one request doesn't
+        # drain a large backlog; subsequent requests pick up the rest.
         residue = None
+        tried_ids: set = set()
         for _ in range(5):
             candidate = residue_manager.get_available_work(
                 db=db,
@@ -179,40 +189,58 @@ def get_residue_work(
                 min_priority=min_priority,
                 min_b1=min_b1,
                 max_b1=max_b1,
-                project=project
+                project=project,
+                exclude_ids=tried_ids
             )
 
             if not candidate:
                 break
+            tried_ids.add(candidate.id)
 
             stale_attempt = residue_manager.find_completing_attempt(db, candidate)
-            if stale_attempt is None:
-                residue = candidate
-                break
+            if stale_attempt is not None:
+                logger.info(
+                    f"Residue {candidate.id} already has qualifying stage 2 attempt "
+                    f"{stale_attempt.id}; auto-completing instead of re-serving"
+                )
+                # find_completing_attempt read the attempt unlocked, so a
+                # concurrent completion/supersession can make this raise.
+                # Swallow it (the residue is excluded above) and move on, so
+                # a mere work request never 500s on someone else's race.
+                # recalculate_t_level=False keeps this serving path light and
+                # drops the recalc's DB work (the main non-ValueError source);
+                # the t-level is refreshed by the next real submission. The
+                # broad except (matching submit.py's recalc guard) covers any
+                # remaining non-ValueError from the supersession flushes.
+                try:
+                    residue_manager.complete_residue(
+                        db, candidate.id, stale_attempt.id,
+                        recalculate_t_level=False
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Stale completion of residue {candidate.id} failed "
+                        f"({e}); trying next candidate"
+                    )
+                continue
 
-            logger.info(
-                f"Residue {candidate.id} already has qualifying stage 2 attempt "
-                f"{stale_attempt.id}; auto-completing instead of re-serving"
-            )
-            residue_manager.complete_residue(db, candidate.id, stale_attempt.id)
+            try:
+                residue = residue_manager.claim_residue(
+                    db=db,
+                    residue_id=candidate.id,
+                    client_id=client_id,
+                    claim_timeout_hours=claim_timeout_hours
+                )
+                break
+            except ValueError as e:
+                logger.info(
+                    f"Lost claim race on residue {candidate.id} ({e}); "
+                    f"trying next candidate"
+                )
 
         if not residue:
             return ResidueWorkResponse(
                 message="No residues available for stage 2 processing"
-            )
-
-        # Claim the residue
-        try:
-            residue = residue_manager.claim_residue(
-                db=db,
-                residue_id=residue.id,
-                client_id=client_id,
-                claim_timeout_hours=claim_timeout_hours
-            )
-        except ValueError as e:
-            logger.warning(f"Failed to claim residue {residue.id}: {e}")
-            return ResidueWorkResponse(
-                message=f"Failed to claim residue: {str(e)}"
             )
 
         # Get composite details
@@ -325,8 +353,11 @@ def complete_residue(
         Completion confirmation with updated t-level
     """
     with transaction_scope(db, "complete_residue"):
+        # Lock composite -> residue (the global order) BEFORE the
+        # authorization check, so the claim state it reads can't change under
+        # us before complete_residue acts on it.
         residue = get_or_404(
-            db.query(ECMResidue).filter(ECMResidue.id == residue_id).first(),
+            residue_manager.lock_residue(db, residue_id),
             "Residue",
             str(residue_id)
         )

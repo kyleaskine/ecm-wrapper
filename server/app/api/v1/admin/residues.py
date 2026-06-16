@@ -3,7 +3,6 @@ Admin-specific residue management endpoints.
 Provides functionality to delete residues and trigger cleanup of expired entries.
 """
 import logging
-import os
 from fastapi import APIRouter, Depends, Header
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -16,6 +15,7 @@ from ....models.residues import ECMResidue
 from ....services.composites import CompositeService
 from ....services.residue_manager import ResidueManager
 from ....utils.errors import get_or_404
+from ....utils.file_cleanup import stage_residue_file_deletion
 from ....utils.transactions import transaction_scope
 
 router = APIRouter()
@@ -54,19 +54,18 @@ def delete_residue(
         str(residue_id)
     )
 
-    # Delete file if exists
-    if residue.storage_path and os.path.exists(residue.storage_path):
-        try:
-            os.remove(residue.storage_path)
-        except Exception as e:
-            logger.warning(f"Failed to delete residue file {residue.storage_path}: {e}")
-
     # Store info for response
     composite_id = residue.composite_id
     status = residue.status
+    storage_path = residue.storage_path
 
     # Delete database record within transaction
     with transaction_scope(db, "delete_residue"):
+        # Stage the file deletion so it runs only after the row delete
+        # commits; an inline remove before commit would orphan the file if
+        # the delete rolls back (consistent with complete_residue/cleanup_*).
+        if storage_path:
+            stage_residue_file_deletion(db, storage_path)
         db.delete(residue)
 
     return {
@@ -103,25 +102,26 @@ def admin_release_residue_claim(
     Raises:
         HTTPException: If residue not found or not claimed
     """
-    residue = get_or_404(
-        db.query(ECMResidue).filter(ECMResidue.id == residue_id).first(),
-        "Residue",
-        str(residue_id)
-    )
-
-    if residue.status != 'claimed':
-        return {
-            "success": False,
-            "message": f"Residue {residue_id} is not claimed (status: {residue.status})",
-            "residue_id": residue_id,
-            "status": residue.status
-        }
-
-    # Store info for response
-    previous_claimer = residue.claimed_by
-
-    # Release the claim
     with transaction_scope(db, "admin_release_residue_claim"):
+        # Lock composite -> residue (the global order) and refresh before
+        # the status check: a stale 'claimed' read could otherwise overwrite
+        # a concurrent completion, recreating an available residue whose file
+        # is already gone and whose stage 1 is already superseded.
+        residue = get_or_404(
+            residue_manager.lock_residue(db, residue_id),
+            "Residue",
+            str(residue_id)
+        )
+
+        if residue.status != 'claimed':
+            return {
+                "success": False,
+                "message": f"Residue {residue_id} is not claimed (status: {residue.status})",
+                "residue_id": residue_id,
+                "status": residue.status
+            }
+
+        previous_claimer = residue.claimed_by
         residue.status = 'available'
         residue.claimed_by = None
         residue.claimed_at = None

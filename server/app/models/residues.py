@@ -40,7 +40,11 @@ class ECMResidue(Base, TimestampMixin):
     # File storage info
     storage_path: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)  # Filesystem path
     file_size_bytes: Mapped[int] = mapped_column(nullable=False)
-    checksum: Mapped[str] = mapped_column(String(64), nullable=False)  # SHA-256 of file content
+    # SHA-256 of file content. Unique: the checksum is an authoritative
+    # identity for submission resolution and completion authorization, so
+    # two rows must never share one (concurrent identical uploads race past
+    # the pre-insert check; the constraint catches the loser).
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
 
     # Lifecycle status
     # available: ready for stage 2 work

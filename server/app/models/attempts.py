@@ -59,7 +59,9 @@ class ECMAttempt(Base, TimestampMixin):
 
     @classmethod
     def generate_work_hash(cls, composite: str, method: str, b1: int, b2: Optional[int] = None,
-                          parametrization: Optional[int] = None, sigma: Optional[int] = None, curves: Optional[int] = None) -> str:
+                          parametrization: Optional[int] = None, sigma: Optional[int] = None, curves: Optional[int] = None,
+                          composite_id: Optional[int] = None, residue_checksum: Optional[str] = None,
+                          work_id: Optional[str] = None) -> str:
         """Generate a hash to detect duplicate work.
 
         Only considers work duplicate if parametrization and sigma values are explicitly the same.
@@ -68,9 +70,19 @@ class ECMAttempt(Base, TimestampMixin):
         Args:
             parametrization: ECM parametrization type (1, 2, or 3)
             sigma: The actual sigma value used
+            composite_id: Canonical composite identity. The submitted string
+                alone is ambiguous (the same value can be a state of two
+                composites), and a hash that omits identity lets a duplicate
+                lookup return another composite's attempt.
+            residue_checksum: Pins stage 2 work to its residue file.
+            work_id: Pins the submission to its work assignment.
         """
         # Include key parameters that define the work
-        hash_input = f"{composite}:{method}:{b1}:{b2 or 0}"
+        hash_input = f"{composite_id or ''}:{composite}:{method}:{b1}:{b2 or 0}"
+        if residue_checksum:
+            hash_input += f":residue:{residue_checksum}"
+        if work_id:
+            hash_input += f":work:{work_id}"
 
         # Add method-specific parameters - ONLY if sigma is present
         # Missing sigma means different random seeds, so should be unique

@@ -431,6 +431,7 @@ def cleanup_orphaned_residues(
         JSON with count and list of cleaned up residue IDs
     """
     from ....models.residues import ECMResidue
+    from ....services.residue_manager import transition_residue_status
     from fastapi import HTTPException, status
 
     with transaction_scope(db, "cleanup_orphaned_residues"):
@@ -448,13 +449,16 @@ def cleanup_orphaned_residues(
                 file_path = Path(residue.storage_path)
 
                 if not file_path.exists():
-                    # File is missing - mark as orphaned
+                    # File is missing - mark as orphaned. The conditional
+                    # transition re-checks status at write time, so a residue
+                    # completed between the scan above and now (status ->
+                    # completed, file deleted by that completion) is skipped
+                    # rather than overwritten back to 'expired'.
                     old_status = residue.status
-
-                    # Mark as expired and release claim
-                    residue.status = 'expired'
-                    residue.claimed_by = None
-                    residue.claimed_at = None
+                    if not transition_residue_status(
+                            db, residue.id, ['available', 'claimed'],
+                            'expired', clear_claim=True):
+                        continue
 
                     orphaned.append({
                         'id': residue.id,

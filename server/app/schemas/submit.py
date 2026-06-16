@@ -40,6 +40,7 @@ class SubmitResultRequest(BaseModel):
     results: ResultsSchema
     raw_output: Optional[str] = Field(default=None, description="Full program output (truncated server-side at MAX_RAW_OUTPUT_LEN)")
     residue_checksum: Optional[str] = Field(default=None, max_length=MAX_CHECKSUM_LEN, description="SHA-256 checksum of residue file (for stage 2 work from residue pool)")
+    work_id: Optional[str] = Field(default=None, max_length=MAX_ID_LEN, description="Work assignment ID this result fulfills (pins the composite without string matching)")
 
     @field_validator("raw_output")
     @classmethod

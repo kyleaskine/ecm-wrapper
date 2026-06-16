@@ -60,6 +60,23 @@ def get_test_engine():
 
 
 @pytest.fixture(scope="function", autouse=True)
+def reset_rate_limiters():
+    """Reset rate limiter state before each test.
+
+    The limiters are process-global and key on the shared 'testclient' IP,
+    so without a reset the suite's cumulative submissions trip the
+    30/minute limit on /submit_result partway through a run.
+    """
+    from app.api.v1 import submit as submit_module
+    from app.api.v1 import web as web_module
+    from app.main import limiter as app_limiter
+
+    for limiter in (submit_module.limiter, web_module.limiter, app_limiter):
+        limiter.reset()
+    yield
+
+
+@pytest.fixture(scope="function", autouse=True)
 def setup_database():
     """Reset database before each test."""
     engine, _ = get_test_engine()
@@ -123,6 +140,33 @@ def client():
         yield test_client
 
     app.dependency_overrides.clear()
+
+
+def create_work_assignment(composite_id: int, client_id: str,
+                           method: str = "ecm",
+                           work_id: str = "wa-test-0001",
+                           b1: int = 50000, b2: int = 5000000,
+                           curves: int = 100) -> str:
+    """Helper to create a work assignment in the test database."""
+    from datetime import datetime, timedelta
+    _, TestingSessionLocal = get_test_engine()
+    db = TestingSessionLocal()
+    try:
+        assignment = WorkAssignment(
+            id=work_id,
+            composite_id=composite_id,
+            client_id=client_id,
+            method=method,
+            b1=b1,
+            b2=b2,
+            curves_requested=curves,
+            expires_at=datetime.utcnow() + timedelta(days=1),
+        )
+        db.add(assignment)
+        db.commit()
+        return work_id
+    finally:
+        db.close()
 
 
 def create_composite(number: str, **kwargs) -> dict:

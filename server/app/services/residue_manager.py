@@ -19,15 +19,46 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, func
+from sqlalchemy.exc import IntegrityError
 
 from ..models.residues import ECMResidue
 from ..models.composites import Composite
 from ..models.attempts import ECMAttempt
 from ..models.projects import Project, ProjectComposite
 from ..config import get_settings
+from ..utils.file_cleanup import stage_residue_file_deletion
+from ..utils.transactions import is_unique_violation
 from .t_level_calculator import TLevelCalculator
 
 logger = logging.getLogger(__name__)
+
+
+def transition_residue_status(
+    db: Session,
+    residue_id: int,
+    from_statuses: list,
+    to_status: str,
+    clear_claim: bool = False,
+) -> bool:
+    """
+    Conditionally transition one residue's status, re-checking from_statuses
+    at write time.
+
+    Cleanup sweeps SELECT candidates and then mutate them one by one; a
+    completion can land in between (status -> completed, file deleted). The
+    WHERE re-checks status on the current row version, so a row that left the
+    cleanable set is skipped instead of being overwritten. Returns True iff
+    this statement won the transition, so the caller runs its side effect
+    (file deletion, bookkeeping) exactly once.
+    """
+    values: dict = {ECMResidue.status: to_status}
+    if clear_claim:
+        values[ECMResidue.claimed_by] = None
+        values[ECMResidue.claimed_at] = None
+    return db.query(ECMResidue).filter(
+        ECMResidue.id == residue_id,
+        ECMResidue.status.in_(from_statuses),
+    ).update(values, synchronize_session=False) > 0
 
 
 class ResidueManager:
@@ -191,6 +222,13 @@ class ResidueManager:
         """Calculate SHA-256 checksum of file content."""
         return hashlib.sha256(file_content).hexdigest()
 
+    def _find_duplicate_residue(self, db: Session, checksum: str) -> Optional[ECMResidue]:
+        """Pre-insert duplicate lookup (separate method so tests can simulate
+        the concurrent-upload race that slips past it)."""
+        return db.query(ECMResidue).filter(
+            ECMResidue.checksum == checksum
+        ).first()
+
     def store_residue_file(
         self,
         db: Session,
@@ -247,10 +285,10 @@ class ResidueManager:
         # Calculate checksum
         checksum = self.calculate_checksum(file_content)
 
-        # Check for duplicate by checksum
-        existing = db.query(ECMResidue).filter(
-            ECMResidue.checksum == checksum
-        ).first()
+        # Check for duplicate by checksum. Fast path with a friendly error;
+        # concurrent identical uploads can both pass it, so the unique
+        # constraint on checksum is the authoritative guard below.
+        existing = self._find_duplicate_residue(db, checksum)
         if existing:
             raise ValueError(f"Duplicate residue file (checksum matches residue ID {existing.id})")
 
@@ -276,7 +314,31 @@ class ResidueManager:
         )
 
         db.add(residue)
-        db.flush()  # Get the ID
+        try:
+            db.flush()  # Get the ID
+        except IntegrityError as e:
+            # The insert failed; remove the file written for it (the
+            # caller's rollback discards the row)
+            try:
+                file_path.unlink(missing_ok=True)
+            except OSError as cleanup_err:
+                logger.error(
+                    f"Failed to remove residue file for failed insert "
+                    f"{file_path}: {cleanup_err}"
+                )
+            # Only the checksum constraint means a concurrent duplicate
+            # upload; anything else (FK violation, storage-path collision)
+            # must surface as what it is, not be misreported as a duplicate.
+            if is_unique_violation(
+                    e, 'uq_ecm_residues_checksum', 'ecm_residues.checksum'):
+                logger.info(
+                    f"Concurrent duplicate residue upload from {client_id} "
+                    f"(checksum {checksum[:16]}...) - rejecting the loser"
+                )
+                raise ValueError(
+                    "Duplicate residue file (uploaded concurrently by another request)"
+                ) from e
+            raise
 
         logger.info(
             f"Created residue record ID {residue.id}: "
@@ -295,7 +357,8 @@ class ResidueManager:
         min_priority: Optional[int] = None,
         min_b1: Optional[int] = None,
         max_b1: Optional[int] = None,
-        project: Optional[str] = None
+        project: Optional[str] = None,
+        exclude_ids: Optional[set] = None
     ) -> Optional[ECMResidue]:
         """
         Find an available residue for stage 2 processing.
@@ -309,6 +372,13 @@ class ResidueManager:
             min_b1: Minimum B1 bound of residue
             max_b1: Maximum B1 bound of residue
             project: Optional project name filter (if not set, all projects)
+            exclude_ids: Residue IDs to skip - the candidates this request
+                already tried and lost (claimed by another consumer, or
+                auto-completed). Without this, the selection is unlocked and
+                returns the same top-priority row to every concurrent
+                consumer, so the caller's retry loop would re-pick the
+                contended row and exhaust its budget on it - returning a
+                false "no work available" while other residues sit free.
 
         Returns:
             ECMResidue if found, None otherwise
@@ -321,6 +391,8 @@ class ResidueManager:
             ECMResidue.status == 'available',
             Composite.is_fully_factored == False  # noqa: E712
         )
+        if exclude_ids:
+            query = query.filter(ECMResidue.id.notin_(exclude_ids))
 
         # Apply filters
         if min_target_tlevel is not None:
@@ -348,9 +420,11 @@ class ResidueManager:
             ECMResidue.created_at.asc()
         )
 
-        # Lock the residue row until claim_residue() updates status='claimed'
-        # in the same transaction, preventing two clients from grabbing it.
-        residue = query.with_for_update(skip_locked=True, of=ECMResidue).first()
+        # Unlocked read: claiming locks composite -> residue (the global
+        # lock order) and revalidates the status. Locking the residue here
+        # and the composite later (stale-attempt completion, t-level recalc)
+        # would reverse the order and deadlock against submissions.
+        residue = query.first()
         if residue:
             logger.info(f"Found available residue ID {residue.id} for client {client_id}")
         else:
@@ -378,15 +452,32 @@ class ResidueManager:
             Updated ECMResidue record
 
         Raises:
-            ValueError: If residue not found or not available
+            ValueError: If residue not found, not available, or its composite
+                was fully factored after selection. Callers treat the
+                ValueError as "lost the race, try the next candidate".
         """
-        residue = db.query(ECMResidue).filter(ECMResidue.id == residue_id).first()
-
+        # Lock composite -> residue (global order) and refresh before the
+        # availability check - the candidate was selected without a lock, so
+        # another client may have claimed it, or a submission may have fully
+        # factored its composite, in the meantime.
+        residue = self.lock_residue(db, residue_id)
         if not residue:
             raise ValueError(f"Residue {residue_id} not found")
 
         if residue.status != 'available':
             raise ValueError(f"Residue {residue_id} is not available (status: {residue.status})")
+
+        # Revalidate the composite under lock too: get_available_work filtered
+        # out factored composites with an UNLOCKED read, so a concurrent
+        # submission could have finished the composite since. Serving its
+        # residue would re-run already-dead stage 2 work.
+        # db.get() reads the identity map - lock_residue already locked and
+        # refreshed this composite row, so no extra query is issued.
+        composite = db.get(Composite, residue.composite_id)
+        if composite is None or composite.is_fully_factored:
+            raise ValueError(
+                f"Residue {residue_id}'s composite is fully factored or gone"
+            )
 
         residue.status = 'claimed'
         residue.claimed_at = datetime.utcnow()
@@ -412,7 +503,14 @@ class ResidueManager:
         Raises:
             ValueError: If residue not found, not claimed, or wrong client
         """
-        residue = db.query(ECMResidue).filter(ECMResidue.id == residue_id).first()
+        # Lock composite -> residue (global order) and refresh before the
+        # status check: releasing based on a stale 'claimed' read would
+        # overwrite a concurrent completion, recreating an available residue
+        # whose file is gone and whose stage 1 is already superseded (the
+        # poison-loop state). Ordered via lock_residue so this stays
+        # deadlock-safe against submit/complete if it ever grows to touch the
+        # composite (e.g. a t-level recalc on release).
+        residue = self.lock_residue(db, residue_id)
 
         if not residue:
             raise ValueError(f"Residue {residue_id} not found")
@@ -431,6 +529,39 @@ class ResidueManager:
 
         logger.info(f"Residue {residue_id} released by {client_id}")
         return residue
+
+    def lock_residue(self, db: Session, residue_id: int) -> Optional[ECMResidue]:
+        """
+        Lock a residue's rows for update in the global lock order and return
+        the refreshed residue (or None if it - or its composite - no longer
+        exists).
+
+        Lock order is composite -> residue EVERYWHERE that mutates residue
+        status or supersession, so concurrent submissions and completions
+        can't deadlock by grabbing the pair in opposite orders.
+
+        populate_existing() is load-bearing: with_for_update() acquires the
+        row lock but does NOT overwrite attributes already loaded in this
+        session, so a status/claim check made after waiting on the lock would
+        otherwise still read the pre-lock value.
+
+        Uses .first() (not .one()): a composite/residue deleted concurrently
+        (admin delete) returns None for the caller to handle as "lost the
+        race", rather than raising NoResultFound -> 500.
+        """
+        row = db.query(ECMResidue.composite_id).filter(
+            ECMResidue.id == residue_id
+        ).first()
+        if row is None:
+            return None
+        composite = db.query(Composite).filter(
+            Composite.id == row[0]
+        ).populate_existing().with_for_update().first()
+        if composite is None:
+            return None
+        return db.query(ECMResidue).filter(
+            ECMResidue.id == residue_id
+        ).populate_existing().with_for_update().first()
 
     def completion_rejection_reason(
         self,
@@ -621,7 +752,12 @@ class ResidueManager:
         Raises:
             ValueError: If residue or attempt not found, or completion invalid
         """
-        residue = db.query(ECMResidue).filter(ECMResidue.id == residue_id).first()
+        # Serialize completions of this residue under the global lock order
+        # (composite -> residue). Without this, two concurrent completions
+        # can interleave the status check and the supersession updates,
+        # forming A->B, B->A supersession cycles that exclude both attempts
+        # from the t-level.
+        residue = self.lock_residue(db, residue_id)
         if not residue:
             raise ValueError(f"Residue {residue_id} not found")
 
@@ -629,6 +765,26 @@ class ResidueManager:
         stage2_attempt = db.query(ECMAttempt).filter(ECMAttempt.id == stage2_attempt_id).first()
         if not stage2_attempt:
             raise ValueError(f"Stage 2 attempt {stage2_attempt_id} not found")
+
+        # An attempt for a different composite must never complete this
+        # residue - superseding stage 1 with it corrupts both composites'
+        # t-levels. Caller error: raise without releasing the residue.
+        if stage2_attempt.composite_id != residue.composite_id:
+            raise ValueError(
+                f"Stage 2 attempt {stage2_attempt_id} belongs to composite "
+                f"{stage2_attempt.composite_id}, not composite "
+                f"{residue.composite_id} of residue {residue_id}"
+            )
+
+        # ...and it must be THIS residue's stage 2: a composite can have
+        # several residues, and an attempt that consumed a sibling residue
+        # must not supersede this one's stage 1 (each residue's curves are
+        # distinct work). Same rule: raise without releasing the residue.
+        if stage2_attempt.residue_checksum != residue.checksum:
+            raise ValueError(
+                f"Stage 2 attempt {stage2_attempt_id} does not carry the "
+                f"checksum of residue {residue_id}; it cannot complete it"
+            )
 
         # Idempotent retry: don't redo supersession/file deletion, and never
         # reject (releasing a completed residue would re-serve finished work)
@@ -641,21 +797,17 @@ class ResidueManager:
         # must find a factor OR complete >= 75% of assigned curves with sane B2
         rejection = self.completion_rejection_reason(residue, stage2_attempt)
         if rejection:
-            # Reject this completion and release the residue back to available
-            residue.status = 'available'
-            residue.claimed_at = None
-            residue.claimed_by = None
-            residue.expires_at = None
-            db.flush()
-
+            # Raise WITHOUT mutating the residue. The caller's transaction
+            # rolls back on this ValueError, so any status change here would
+            # be undone anyway - earlier code set status='available' and then
+            # claimed it was released, but the rollback reverted it, leaving
+            # the residue claimed while the response said "released". The
+            # claim simply stays put and expires via cleanup_expired_claims.
             logger.warning(
                 f"Rejected residue {residue_id} completion: stage2_attempt {stage2_attempt_id} "
-                f"{rejection}. Residue released back to pool."
+                f"{rejection}. Claim left in place (will expire if not retried)."
             )
-            raise ValueError(
-                f"Invalid stage 2 completion: {rejection}. "
-                f"Residue {residue_id} has been released back to the available pool."
-            )
+            raise ValueError(f"Invalid stage 2 completion: {rejection}")
 
         # Mark stage 1 attempt as superseded (if linked)
         if residue.stage1_attempt_id:
@@ -674,22 +826,19 @@ class ResidueManager:
         residue.completed_at = datetime.utcnow()
         residue.expires_at = None
 
-        # Delete the residue file
-        try:
-            file_path = Path(residue.storage_path)
-            if file_path.exists():
-                file_path.unlink()
-                logger.info(f"Deleted residue file: {file_path}")
-            else:
-                logger.warning(f"Residue file not found for deletion: {file_path}")
-        except Exception as e:
-            logger.error(f"Error deleting residue file {residue.storage_path}: {e}")
+        # Delete the residue file only AFTER this transaction commits: an
+        # inline unlink would leave the file gone if the transaction later
+        # rolls back (reverting status to 'claimed' with no file behind it).
+        stage_residue_file_deletion(db, residue.storage_path)
 
         # Mark orphaned attempts from the same residue as superseded
         # These are partial attempts that were submitted but failed to complete the residue
         # (e.g., client interrupted, then another client completed the same residue)
         orphaned_attempts = db.query(ECMAttempt).filter(
             ECMAttempt.residue_checksum == residue.checksum,
+            # Same composite only: the checksum alone could match another
+            # composite's attempts if the same number is registered twice
+            ECMAttempt.composite_id == residue.composite_id,
             ECMAttempt.id != stage2_attempt_id,
             ECMAttempt.superseded_by.is_(None)  # Not already superseded
         ).all()
@@ -803,24 +952,23 @@ class ResidueManager:
         Returns:
             Number of claims released
         """
-        expired_claims = db.query(ECMResidue).filter(
+        # Single conditional UPDATE: the status predicate is re-evaluated on
+        # the current row version at write time, so a residue completed
+        # between any earlier read and this statement is simply skipped. A
+        # read-then-write here could overwrite 'completed' with 'available'
+        # after the file was deleted and stage 1 superseded.
+        count = db.query(ECMResidue).filter(
             ECMResidue.status == 'claimed',
             ECMResidue.expires_at < datetime.utcnow()
-        ).all()
-
-        count = 0
-        for residue in expired_claims:
-            try:
-                # Release the claim back to available (don't delete file)
-                old_claimer = residue.claimed_by
-                residue.status = 'available'
-                residue.claimed_at = None
-                residue.claimed_by = None
-                residue.expires_at = None
-                count += 1
-                logger.info(f"Released expired claim on residue {residue.id} (was claimed by {old_claimer})")
-            except Exception as e:
-                logger.error(f"Error releasing claim on residue {residue.id}: {e}")
+        ).update(
+            {
+                ECMResidue.status: 'available',
+                ECMResidue.claimed_at: None,
+                ECMResidue.claimed_by: None,
+                ECMResidue.expires_at: None,
+            },
+            synchronize_session=False
+        )
 
         if count > 0:
             logger.info(f"Released {count} expired claims")
@@ -853,12 +1001,14 @@ class ResidueManager:
         count = 0
         for residue in residues_to_cleanup:
             try:
-                file_path = Path(residue.storage_path)
-                if file_path.exists():
-                    file_path.unlink()
-                    logger.info(f"Deleted residue file for factored composite: {file_path}")
+                if not transition_residue_status(
+                        db, residue.id, ['available', 'claimed'], 'expired'):
+                    continue
 
-                residue.status = 'expired'  # Mark as cleaned up
+                # Defer deletion to after commit (consistent with
+                # complete_residue): if this transaction rolls back, the
+                # status reverts to available/claimed and the file must stay.
+                stage_residue_file_deletion(db, residue.storage_path)
                 count += 1
             except Exception as e:
                 logger.error(f"Error cleaning up residue {residue.id}: {e}")

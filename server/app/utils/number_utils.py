@@ -71,12 +71,6 @@ def calculate_digit_length(number_str: str) -> int:
 
     return len(number_str)
 
-def gcd(a: int, b: int) -> int:
-    """Calculate greatest common divisor using Euclidean algorithm."""
-    while b:
-        a, b = b, a % b
-    return a
-
 def is_trivial_factor(factor: str, composite: str) -> bool:
     """Check if factor is trivial (1 or the number itself)."""
     return factor == "1" or factor == composite
@@ -134,6 +128,51 @@ def verify_complete_factorization(composite: str, factors: list[str]) -> bool:
         return str(product) == composite
     except (ValueError, OverflowError):
         return False
+
+
+def is_stale_ancestor_state(submitted: str, current: str, known_factors: list) -> bool:
+    """
+    Verify that `submitted` is a genuine earlier state of a composite whose
+    current cofactor is `current`.
+
+    A genuine ancestor state equals current * (product of factors already
+    recorded for the composite). Requiring the quotient to decompose entirely
+    into recorded factors prevents a client from fabricating a "stale" state
+    (current * X) to launder an unrelated X through factor validation.
+
+    Each recorded factor row authenticates exactly ONE division: factor rows
+    are unique per value and do not prove repeated multiplicity, so
+    current * P^2 must not validate off a single recorded P. (Composites with
+    a numeric original number get an exact divisibility check upstream and
+    never rely on this decomposition.)
+
+    Args:
+        submitted: The composite string the client submitted
+        current: The composite's current cofactor
+        known_factors: Factor value strings already recorded for the composite
+
+    Returns:
+        True if submitted is the current state or a verifiable ancestor
+    """
+    if not validate_integer(submitted) or not validate_integer(current):
+        return False
+
+    submitted_int = int(submitted)
+    current_int = int(current)
+    if current_int <= 0 or submitted_int <= 0 or submitted_int % current_int != 0:
+        return False
+
+    quotient = submitted_int // current_int
+    for factor_str in known_factors:
+        if quotient == 1:
+            break
+        if not validate_integer(factor_str):
+            continue
+        factor_int = int(factor_str)
+        if factor_int > 1 and quotient % factor_int == 0:
+            quotient //= factor_int
+
+    return quotient == 1
 
 
 def divide_factor(composite: str, factor: str) -> str:

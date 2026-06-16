@@ -74,12 +74,10 @@ python3 resend_failed.py            # Submit and mark as completed
 ```bash
 cd server/
 
-# Start PostgreSQL (uses existing data volume)
-docker-compose -f docker-compose.dev.yml up -d postgres
-
-# Start API server
+# PostgreSQL runs natively on the default port 5432 (DATABASE_URL is set
+# in server/.env). Start the API server:
 source venv/bin/activate
-export DATABASE_URL="postgresql://ecm_user:ecm_password@localhost:5434/ecm_distributed"
+export DATABASE_URL="postgresql://ecm_user:ecm_password@localhost:5432/ecm_distributed"
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
@@ -95,14 +93,12 @@ alembic upgrade head                               # Apply migrations
 alembic downgrade -1                              # Rollback one migration
 ```
 
-**Alternative Setup (Local PostgreSQL)**
+**Alternative Setup (Docker PostgreSQL)**
 ```bash
-# Set up local database on default port 5432
-createdb ecm_distributed
-createuser ecm_user -P  # password: ecm_password
+# Start the containerized PostgreSQL (exposed on host port 5434)
+docker-compose -f docker-compose.dev.yml up -d postgres
 
-# Start with local PostgreSQL
-export DATABASE_URL="postgresql://ecm_user:ecm_password@localhost:5432/ecm_distributed"
+export DATABASE_URL="postgresql://ecm_user:ecm_password@localhost:5434/ecm_distributed"
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
@@ -207,8 +203,8 @@ Flags: `--pm1`, `--pp1`, `--p1`. Uses `/p1-work` endpoint. B1 calculated one ste
 All factors from a single ECM run are submitted in one API call via `factors_found` list. Server processes all factors before updating composite state.
 
 ### Database Connection
-- **Default URL**: `postgresql://ecm_user:ecm_password@localhost:5432/ecm_distributed`
-- **Docker port**: PostgreSQL exposed on port 5434 (host) → 5432 (container)
+- **Default URL**: `postgresql://ecm_user:ecm_password@localhost:5432/ecm_distributed` (native PostgreSQL on the default port; also set in `server/.env`)
+- **Docker alternative**: containerized PostgreSQL exposed on port 5434 (host) → 5432 (container)
 - **Environment**: Set `DATABASE_URL` to override default connection string
 
 ### Code Quality Checks

@@ -26,6 +26,11 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 # Create Base class for models
 Base = declarative_base()
 
+# Register the after_commit / after_rollback listeners that defer residue
+# file deletion until the owning transaction commits. Imported here so the
+# listeners attach to the Session class as soon as the DB layer loads.
+from .utils import file_cleanup  # noqa: E402,F401
+
 # Dependency to get database session
 def get_db():
     db = SessionLocal()

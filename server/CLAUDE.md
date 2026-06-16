@@ -153,7 +153,10 @@ Discovered factors with discovery methods:
 ### Server-Side Residue Validation (2026-01)
 - Factor found: Always accepted
 - No factor: Must complete at least 75% of assigned curves
-- Invalid completions: Residue released back to available pool
+- Invalid completions: rejected (400) with the claim left in place; it
+  expires via `cleanup_expired_claims` rather than being released in the same
+  transaction (the rejection rolls that transaction back, so an in-band
+  release would be undone while the response claimed success)
 - Implementation: `app/services/residue_manager.py:complete_residue()`
 
 ### Testing Status Page Improvements

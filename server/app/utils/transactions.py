@@ -16,11 +16,26 @@ from typing import Awaitable, Callable, TypeVar, Any, Optional, cast
 from functools import wraps
 
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar('T')
+
+
+def is_unique_violation(error: IntegrityError, *markers: str) -> bool:
+    """
+    True if `error` is a unique-constraint violation matching any marker.
+
+    SQLAlchemy doesn't expose the violated constraint portably, so this matches
+    the driver's message text. Pass the PostgreSQL constraint name AND, where
+    they differ, the SQLite '<table>.<column>' message form; both backends'
+    messages are covered by substring match. Keep markers specific - a bare
+    column name could match an unrelated constraint mentioning that column.
+    """
+    text = str(getattr(error, "orig", None) or error)
+    return any(marker in text for marker in markers)
 
 
 @contextmanager
