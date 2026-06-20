@@ -16,7 +16,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from .api_client import ResourceNotFoundError
+from .api_client import ResourceNotFoundError, PermanentUploadError
 
 if TYPE_CHECKING:
     from .api_client import APIClient
@@ -607,6 +607,12 @@ class SubmissionQueue:
                 f"Discarding {item_type} from queue: resource no longer exists on server "
                 f"(likely expired or already completed)"
             )
+            return True  # Treat as success to remove from queue
+
+        except PermanentUploadError as e:
+            # 4xx residue upload rejection: composite factored, stage-1 attempt
+            # gone, invalid file, etc. Retrying can never succeed, so discard.
+            self.logger.warning(f"Discarding {item_type} from queue: {e}")
             return True  # Treat as success to remove from queue
 
         except Exception as e:

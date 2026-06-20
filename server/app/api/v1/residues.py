@@ -11,6 +11,7 @@ Provides endpoints for:
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Header, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from typing import Optional
 import logging
 
@@ -122,6 +123,18 @@ def upload_residue(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(e)
+            )
+        except IntegrityError as e:
+            # A referenced row (e.g. the stage-1 attempt or composite) was
+            # deleted between validation and insert - typically because the
+            # composite was factored/cleaned up concurrently. This is a permanent
+            # condition for this payload, so return a 4xx (not a retryable 500)
+            # with a clear reason so the client discards it.
+            logger.warning(f"Integrity error storing residue from {client_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Residue references data that no longer exists "
+                       "(composite likely factored or cleaned up)"
             )
         except Exception as e:
             logger.error(f"Error uploading residue from {client_id}: {e}")

@@ -265,6 +265,16 @@ Supports: lowercase/uppercase e, decimals (2.6e8), explicit + sign (26e+7)
 
 ## Recent Client Bug Fixes
 
+### Residue Upload Permanent-Failure Handling (2026-06)
+- `lib/api_client.py`: `upload_residue()` raises `PermanentUploadError` on any
+  non-duplicate **4xx** (composite factored, stage-1 attempt gone, invalid file).
+  **5xx** still returns `None` (transient → retry). Duplicate-400 returns the
+  `{"already_uploaded": True}` success dict.
+- `lib/submission_queue.py`: `_retry_item()` discards queue items on
+  `PermanentUploadError` instead of retrying to the 200-attempt cap.
+- `lib/ecm_executor.py`: direct stage-1 upload path skips queueing on a permanent
+  rejection. See server-side fix in `server/CLAUDE.md`.
+
 ### Two-Stage ECM Improvements
 - Exit code 8 (factor found) treated as success in stage 1
 - Factor found in stage 1 correctly submits with `b2=0`

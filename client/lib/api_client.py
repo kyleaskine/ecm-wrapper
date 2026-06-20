@@ -24,6 +24,16 @@ class ResourceNotFoundError(Exception):
     pass
 
 
+class PermanentUploadError(Exception):
+    """Raised when a residue upload is rejected with a 4xx (client) error.
+
+    The payload will never succeed on retry (e.g. the composite was factored,
+    the stage-1 attempt no longer exists, or the file is invalid), so callers
+    should discard it rather than re-queueing it indefinitely.
+    """
+    pass
+
+
 class APIClient:
     """
     Handle API communication with retry logic and failure persistence.
@@ -626,21 +636,31 @@ class APIClient:
             self.logger.error(f"Residue file not found: {residue_file_path}")
             return None
         except requests.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code == 400:
+            status_code = e.response.status_code if e.response is not None else None
+            detail = ""
+            if e.response is not None:
                 try:
                     detail = e.response.json().get("detail", "")
                 except (ValueError, AttributeError):
-                    detail = e.response.text
-                if "Duplicate residue" in detail or "checksum matches" in detail:
-                    self.logger.info(f"Residue already uploaded (server confirmed duplicate): {detail}")
-                    return {"already_uploaded": True, "detail": detail}
-            error_details = ""
-            if hasattr(e, 'response') and e.response is not None:
-                try:
-                    error_details = f" - Response: {e.response.text}"
-                except (AttributeError, ValueError, UnicodeDecodeError):
-                    pass
-            self.logger.error(f"Failed to upload residue: {e}{error_details}")
+                    detail = e.response.text or ""
+
+            # Duplicate = the server already has this residue; treat as success.
+            if status_code == 400 and ("Duplicate residue" in detail or "checksum matches" in detail):
+                self.logger.info(f"Residue already uploaded (server confirmed duplicate): {detail}")
+                return {"already_uploaded": True, "detail": detail}
+
+            # Any other 4xx is a permanent, client-side rejection: the composite
+            # was factored, the stage-1 attempt is gone, the file is invalid, etc.
+            # Retrying the same payload can never succeed, so raise so the caller
+            # discards it instead of looping forever.
+            if status_code is not None and 400 <= status_code < 500:
+                msg = f"Residue upload rejected (HTTP {status_code}): {detail or e}"
+                self.logger.error(msg)
+                raise PermanentUploadError(msg)
+
+            # 5xx / unknown: potentially transient (server restart, overload),
+            # so report failure and let the caller retry later.
+            self.logger.error(f"Failed to upload residue: {e} - Response: {detail}")
             return None
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Failed to upload residue: {e}")

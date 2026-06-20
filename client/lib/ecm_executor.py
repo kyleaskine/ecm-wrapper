@@ -13,6 +13,7 @@ from lib.ecm_command import build_ecm_command
 from lib.ecm_math import (
     trial_division, is_probably_prime, OPTIMAL_B1_TABLE
 )
+from lib.api_client import PermanentUploadError
 
 class ECMWrapper(BaseWrapper):
     """
@@ -884,12 +885,19 @@ class ECMWrapper(BaseWrapper):
             # No factor found and we have attempt ID - upload residue for potential stage 2
             print(f"Uploading residue file ({residue_file.stat().st_size} bytes)...")
             api_client = self._get_api_client()
-            upload_result = api_client.upload_residue(
-                client_id=client_id,
-                residue_file_path=str(residue_file),
-                stage1_attempt_id=stage1_attempt_id,
-                expiry_days=7
-            )
+            try:
+                upload_result = api_client.upload_residue(
+                    client_id=client_id,
+                    residue_file_path=str(residue_file),
+                    stage1_attempt_id=stage1_attempt_id,
+                    expiry_days=7
+                )
+            except PermanentUploadError as e:
+                # Server permanently rejected the upload (composite factored,
+                # stage-1 attempt gone, etc.). Don't queue it - it can't succeed.
+                self.logger.error(f"Residue upload permanently rejected, not queuing: {e}")
+                print("Residue upload rejected by server - skipping (will not retry)")
+                return None
 
             if upload_result:
                 print(f"Residue uploaded: ID {upload_result['residue_id']}, "

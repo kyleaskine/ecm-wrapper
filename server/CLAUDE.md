@@ -150,6 +150,21 @@ Discovered factors with discovery methods:
 
 ## Recent Server Bug Fixes
 
+### Residue Upload for Stale Composites (2026-06)
+- **Problem**: Uploading a residue whose `stage1_attempt_id` had been deleted
+  (composite factored/cleaned up) violated the FK at `flush()`. The `IntegrityError`
+  fell into the generic `except Exception` and surfaced as an opaque, retryable
+  **500 "Failed to store residue file"** — clients retried it endlessly.
+- **Fix** (`app/services/residue_manager.py:store_residue_file()`): reject up front
+  with `ValueError` (→ 400) when the composite is already fully factored, or when
+  the referenced `stage1_attempt_id` no longer exists.
+- **Safety net** (`app/api/v1/residues.py:upload_residue()`): explicit
+  `IntegrityError` handler returns **409** for the validate→insert race, instead of
+  a 500. The generic 500 now only fires for genuinely unexpected errors.
+- **Client side**: 4xx upload rejections now raise `PermanentUploadError` and are
+  discarded from the submission queue rather than retried (5xx stays transient).
+  See `client/CLAUDE.md`.
+
 ### Server-Side Residue Validation (2026-01)
 - Factor found: Always accepted
 - No factor: Must complete at least 75% of assigned curves

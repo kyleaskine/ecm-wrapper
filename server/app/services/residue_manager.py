@@ -275,6 +275,30 @@ class ResidueManager:
         if not composite:
             raise ValueError(f"Composite {composite_number[:50]}... not found in database")
 
+        # Reject residues for composites that are already fully factored - there
+        # is no stage 2 work to do, so the residue is useless and the client
+        # should stop retrying.
+        if composite.is_fully_factored:
+            raise ValueError(
+                f"Composite {composite.id} is already fully factored; residue not needed"
+            )
+
+        # If a stage-1 attempt was referenced, make sure it still exists. When a
+        # composite is factored or cleaned up its ECM attempts are removed,
+        # leaving the client holding a residue whose stage1_attempt_id now
+        # dangles. Inserting it would violate the foreign key and surface as an
+        # opaque 500; reject cleanly so the client discards instead of retrying
+        # forever.
+        if stage1_attempt_id is not None:
+            attempt_exists = db.query(ECMAttempt.id).filter(
+                ECMAttempt.id == stage1_attempt_id
+            ).first()
+            if not attempt_exists:
+                raise ValueError(
+                    f"Stage 1 attempt {stage1_attempt_id} no longer exists "
+                    "(composite likely factored or cleaned up); residue cannot be stored"
+                )
+
         # Generate unique filename
         import uuid
         file_uuid = str(uuid.uuid4())
