@@ -36,13 +36,25 @@ def _delete_staged_files(session: Session) -> None:
     if not paths:
         return
     for path in paths:
+        p = Path(path)
         try:
-            Path(path).unlink(missing_ok=True)
+            p.unlink(missing_ok=True)
             logger.info(f"Deleted residue file after commit: {path}")
         except OSError as e:
             # Idempotent fallback: cleanup_orphaned / cleanup_factored sweeps
             # remove anything left behind, so a failed unlink is not fatal.
             logger.error(f"Failed to delete residue file {path} after commit: {e}")
+
+        # Best-effort: drop the composite's residue dir once its last file is
+        # gone. rmdir removes an EMPTY dir only, so if another residue for the
+        # same composite still has a file here it raises and we leave the dir
+        # alone - we can never delete a live residue this way. A later upload
+        # recreates the dir via mkdir(parents=True, exist_ok=True).
+        try:
+            p.parent.rmdir()
+            logger.info(f"Removed empty residue dir after commit: {p.parent}")
+        except OSError:
+            pass
 
 
 @event.listens_for(Session, "after_rollback")
