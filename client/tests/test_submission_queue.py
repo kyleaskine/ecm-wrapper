@@ -313,3 +313,150 @@ class TestChainedResidueCompletion:
         success, fail = queue.drain(mock_api_client)
         assert success == 1
         mock_api_client.complete_residue.assert_not_called()
+
+
+class TestChainedResidueUpload:
+    """Stage-1 residue-upload chain: a queued result carries the residue so a
+    long GPU batch is not lost when the server is down at submit time."""
+
+    def _make_residue(self, queue_dir) -> Path:
+        residue = Path(queue_dir) / "stage1_batch.txt"
+        residue.write_text("METHOD=ECM; SIGMA=3:123; B1=110000000; N=99\n")
+        return residue
+
+    def test_enqueue_preserves_residue_and_rewrites_path(self, queue, queue_dir):
+        residue = self._make_residue(queue_dir)
+        chain = {
+            "action": "residue_upload",
+            "residue_file": str(residue),
+            "client_id": "gpu-1",
+            "expiry_days": 7,
+        }
+        filepath = queue.enqueue_result({"composite": "99"}, completion_chain=chain)
+
+        data = json.loads(filepath.read_text())
+        preserved = Path(data["completion_chain"]["residue_file"])
+        # Path was rewritten into the queue's residues dir and the copy exists,
+        # so deleting the original local residue afterward is safe.
+        assert preserved != residue
+        assert preserved.parent == queue.residues_dir
+        assert preserved.exists()
+        residue.unlink()
+        assert preserved.exists()
+
+    def test_drain_uploads_residue_with_returned_attempt_id(self, queue, queue_dir, mock_api_client):
+        mock_api_client.submit_result.return_value = {"status": "ok", "attempt_id": 777}
+        residue = self._make_residue(queue_dir)
+        queue.enqueue_result(
+            {"composite": "99"},
+            completion_chain={
+                "action": "residue_upload",
+                "residue_file": str(residue),
+                "client_id": "gpu-1",
+                "expiry_days": 7,
+            },
+        )
+
+        success, fail = queue.drain(mock_api_client)
+        assert success == 1
+        assert fail == 0
+        call_kwargs = mock_api_client.upload_residue.call_args[1]
+        assert call_kwargs["stage1_attempt_id"] == 777
+        assert call_kwargs["client_id"] == "gpu-1"
+        # Preserved copy cleaned up after a successful upload.
+        assert not list(queue.residues_dir.glob("residue_*"))
+        assert queue.count() == 0
+
+    def test_transient_upload_failure_requeues_standalone(self, queue, queue_dir, mock_api_client):
+        mock_api_client.submit_result.return_value = {"status": "ok", "attempt_id": 777}
+        mock_api_client.upload_residue.return_value = None  # 5xx / network
+        residue = self._make_residue(queue_dir)
+        queue.enqueue_result(
+            {"composite": "99"},
+            completion_chain={
+                "action": "residue_upload",
+                "residue_file": str(residue),
+                "client_id": "gpu-1",
+                "expiry_days": 7,
+            },
+        )
+
+        success, fail = queue.drain(mock_api_client)
+        # Result submitted; chained upload failed and was re-queued standalone.
+        assert success == 1
+        assert queue.count() == 1
+        files = list(queue.residues_dir.glob("residue_upload_*.json"))
+        assert len(files) == 1
+        data = json.loads(files[0].read_text())
+        assert data["type"] == "residue_upload"
+        assert data["payload"]["stage1_attempt_id"] == 777
+
+    def test_unexpected_upload_error_does_not_resubmit_result(self, queue, queue_dir, mock_api_client):
+        # An accepted result must not be re-POSTed forever if the chained upload
+        # throws an unexpected error. The exception must be swallowed, the result
+        # file removed, and the preserved residue kept for recovery.
+        mock_api_client.submit_result.return_value = {"status": "ok", "attempt_id": 777}
+        mock_api_client.upload_residue.side_effect = OSError("disk gone")
+        residue = self._make_residue(queue_dir)
+        queue.enqueue_result(
+            {"composite": "99"},
+            completion_chain={
+                "action": "residue_upload",
+                "residue_file": str(residue),
+                "client_id": "gpu-1",
+                "expiry_days": 7,
+            },
+        )
+
+        queue.drain(mock_api_client)
+        queue.drain(mock_api_client)  # second cycle would re-POST if not removed
+        # Result submitted exactly once across both drains (no runaway re-submit).
+        assert mock_api_client.submit_result.call_count == 1
+        assert queue.count() == 0
+        # Preserved residue kept (data not lost).
+        assert list(queue.residues_dir.glob("residue_*"))
+
+    def test_requeue_failure_keeps_preserved_residue(self, queue, queue_dir, mock_api_client):
+        # If the transient re-queue itself fails, the preserved copy is the only
+        # remaining copy and must not be deleted.
+        mock_api_client.submit_result.return_value = {"status": "ok", "attempt_id": 777}
+        mock_api_client.upload_residue.return_value = None  # transient
+        residue = self._make_residue(queue_dir)
+        queue.enqueue_result(
+            {"composite": "99"},
+            completion_chain={
+                "action": "residue_upload",
+                "residue_file": str(residue),
+                "client_id": "gpu-1",
+                "expiry_days": 7,
+            },
+        )
+        preserved_before = {p.name for p in queue.residues_dir.glob("residue_*")}
+
+        with patch.object(queue, "enqueue_residue_upload", return_value=None):
+            queue.drain(mock_api_client)
+
+        # No new queue item created, but the preserved copy is still on disk.
+        preserved_after = {p.name for p in queue.residues_dir.glob("residue_*")}
+        assert preserved_before <= preserved_after
+        assert preserved_before  # sanity: something was preserved
+
+    def test_permanent_upload_rejection_is_dropped(self, queue, queue_dir, mock_api_client):
+        from lib.api_client import PermanentUploadError
+        mock_api_client.submit_result.return_value = {"status": "ok", "attempt_id": 777}
+        mock_api_client.upload_residue.side_effect = PermanentUploadError("composite factored")
+        residue = self._make_residue(queue_dir)
+        queue.enqueue_result(
+            {"composite": "99"},
+            completion_chain={
+                "action": "residue_upload",
+                "residue_file": str(residue),
+                "client_id": "gpu-1",
+                "expiry_days": 7,
+            },
+        )
+
+        success, fail = queue.drain(mock_api_client)
+        assert success == 1
+        assert queue.count() == 0  # Nothing left to retry
+        assert not list(queue.residues_dir.glob("residue_*"))

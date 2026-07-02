@@ -265,6 +265,24 @@ Supports: lowercase/uppercase e, decimals (2.6e8), explicit + sign (26e+7)
 
 ## Recent Client Bug Fixes
 
+### Stage-1 Residue Preserved on Result-Submission Failure (2026-07)
+- **Problem**: If the `/submit_result` call for a stage-1 batch failed transiently
+  (server down/deploy), `submit_stage1_complete_workflow()` **deleted the residue
+  file** even though the result was queued for retry. The queued result then had
+  no residue to link, and the server re-handed the same composite → a multi-hour
+  GPU batch was redone from scratch.
+- **Fix** (`lib/stage1_helpers.py`): on a no-factor stage-1 submit, attach a
+  `{"action": "residue_upload", ...}` completion chain to `submit_result()`. When
+  the queued result is retried and returns its `attempt_id`, the preserved residue
+  is uploaded and linked. The redundant `abandon_work(submission_failed)` was
+  removed — the work loop's `cleanup_on_failure` already releases the assignment.
+- **Fix** (`lib/submission_queue.py`): `enqueue_result()` copies the residue into
+  the queue (`_preserve_chain_residue`) so it survives local cleanup; a successful
+  result drain runs the chain via `_run_completion_chain` → `_chain_residue_upload`
+  (upload with the returned `attempt_id`; transient failure re-queues a standalone
+  `residue_upload`; 4xx drops it). Stage-2's existing `residue_complete` chain is
+  the default branch, unchanged.
+
 ### Residue Upload Permanent-Failure Handling (2026-06)
 - `lib/api_client.py`: `upload_residue()` raises `PermanentUploadError` on any
   non-duplicate **4xx** (composite factored, stage-1 attempt gone, invalid file).

@@ -55,18 +55,36 @@ def submit_stage1_complete_workflow(
     print("Submitting stage 1 results...")
     program_name = 'gmp-ecm-ecm'
 
+    # If the result submission fails (e.g. a deploy/outage), the residue is the
+    # valuable product of a long GPU batch and must not be thrown away. Attach a
+    # residue-upload completion chain: when the queued result is retried and
+    # returns its attempt_id, the preserved residue is uploaded and linked. The
+    # residue is only needed when there's no factor and the caller wants it
+    # uploaded; enqueue_result() copies the file into the queue at failure time.
+    completion_chain = None
+    if upload_residue and not factor_found and residue_file.exists():
+        completion_chain = {
+            "action": "residue_upload",
+            "residue_file": str(residue_file),
+            "client_id": client_id,
+            "expiry_days": 7,
+        }
+
     # Submit stage1 results to API
-    submit_response = wrapper.submit_result(results, project, program_name)
+    submit_response = wrapper.submit_result(
+        results, project, program_name, completion_chain=completion_chain
+    )
 
     if not submit_response:
-        # Submission failed
-        wrapper.logger.error("Failed to submit stage 1 results")
+        # Transient failure: submit_result queued the result for automatic retry,
+        # and (via the chain) preserved the residue alongside it. Do NOT abandon
+        # the work here - in auto-work mode the work loop's cleanup_on_failure
+        # releases the assignment; in manual mode there is no assignment. Removing
+        # the local residue is safe because enqueue_result copied it into the queue.
+        wrapper.logger.error(
+            "Failed to submit stage 1 results - result and residue queued for retry"
+        )
 
-        # Abandon work assignment if this was auto-work
-        if work_id:
-            wrapper.abandon_work(work_id, reason="submission_failed")
-
-        # Clean up residue file on failure
         if cleanup_residue and residue_file.exists():
             residue_file.unlink()
 

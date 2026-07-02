@@ -81,14 +81,26 @@ class SubmissionQueue:
             payload: The API submission payload (ready to POST)
             results_context: Optional original results dict for debugging
             completion_chain: Optional follow-up call to make after a successful
-                resubmit. For stage 2 results, this carries {residue_id, client_id}
-                so the queue can call complete_residue with the attempt_id returned
-                by the resubmitted result, finalizing the work without re-execution.
+                resubmit. Two shapes are supported:
+                - Stage 2: {residue_id, client_id} -> complete_residue with the
+                  attempt_id returned by the resubmitted result.
+                - Stage 1: {action: "residue_upload", residue_file, client_id,
+                  expiry_days} -> upload the preserved residue with the returned
+                  attempt_id. The residue file is copied into the queue here so a
+                  long GPU batch's output survives even if the caller cleans up
+                  the original.
 
         Returns:
             Path to the queued item file, or None on error
         """
         self._ensure_dirs()
+
+        # A stage-1 residue-upload chain references a residue file that the
+        # caller is about to delete. Preserve it now (at failure time) so the
+        # chained upload can run once the result finally submits.
+        if completion_chain and completion_chain.get("action") == "residue_upload":
+            completion_chain = self._preserve_chain_residue(completion_chain)
+
         item: Dict[str, Any] = {
             "type": "result",
             "created_at": datetime.datetime.now().isoformat(),
@@ -179,6 +191,40 @@ class SubmissionQueue:
             if preserved_path.exists():
                 preserved_path.unlink()
             return None
+
+    def _preserve_chain_residue(
+        self,
+        completion_chain: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Copy a residue-upload chain's residue file into the queue directory.
+
+        Returns a new chain dict whose ``residue_file`` points at the preserved
+        copy. If the source file is missing or the copy fails, returns None so
+        the result is still queued (just without the residue-upload follow-up).
+        """
+        residue_path = completion_chain.get("residue_file")
+        src = Path(residue_path) if residue_path else None
+        if not src or not src.exists():
+            self.logger.error(
+                f"Cannot preserve residue for chained upload: file not found: {residue_path}"
+            )
+            return None
+
+        preserved_name = (
+            f"residue_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{src.name}"
+        )
+        preserved_path = self.residues_dir / preserved_name
+        try:
+            shutil.copy2(src, preserved_path)
+            self.logger.info(f"Preserved residue for chained upload: {preserved_path}")
+        except Exception as e:
+            self.logger.error(f"Failed to preserve residue for chained upload: {e}")
+            return None
+
+        new_chain = dict(completion_chain)
+        new_chain["residue_file"] = str(preserved_path)
+        return new_chain
 
     def enqueue_work_completion(
         self,
@@ -468,6 +514,122 @@ class SubmissionQueue:
 
         return (success_count, fail_count)
 
+    def _run_completion_chain(
+        self,
+        api_client: 'APIClient',
+        item: Dict[str, Any],
+        response: Dict[str, Any],
+    ) -> None:
+        """
+        Dispatch a queued result's completion chain after a successful resubmit.
+
+        - ``action == "residue_upload"`` (stage 1): upload the preserved residue,
+          linked to the attempt_id the resubmitted result returned.
+        - otherwise (stage 2): complete the residue with that attempt_id.
+        """
+        chain = item.get("completion_chain") or {}
+        if not chain:
+            return
+        if chain.get("action") == "residue_upload":
+            self._chain_residue_upload(api_client, item, response)
+        else:
+            self._chain_residue_complete(api_client, item, response)
+
+    def _chain_residue_upload(
+        self,
+        api_client: 'APIClient',
+        item: Dict[str, Any],
+        response: Dict[str, Any],
+    ) -> None:
+        """
+        After a queued stage-1 result re-submits successfully, upload the
+        preserved residue file linked to the attempt_id from the response.
+
+        The residue upload needs the stage-1 attempt_id, which only exists once
+        the result is accepted server-side - hence it is chained here rather than
+        queued independently. On a transient upload failure the residue is handed
+        off to a standalone ``residue_upload`` queue item (now carrying the
+        attempt_id) for later retry; a 4xx rejection drops it.
+        """
+        chain = item.get("completion_chain") or {}
+        residue_path = chain.get("residue_file")
+        client_id = chain.get("client_id")
+        expiry_days = chain.get("expiry_days", 7)
+        preserved = Path(residue_path) if residue_path else None
+
+        if not preserved or not preserved.exists():
+            self.logger.warning(
+                f"Chained residue upload skipped: preserved file missing ({residue_path})"
+            )
+            return
+
+        if not client_id:
+            self.logger.warning("Chained residue upload skipped: missing client_id")
+            preserved.unlink(missing_ok=True)
+            return
+
+        attempt_id = response.get("attempt_id")
+        if not attempt_id:
+            self.logger.warning(
+                "Queued stage-1 result returned no attempt_id; cannot link residue "
+                "upload. Dropping preserved residue."
+            )
+            preserved.unlink(missing_ok=True)
+            return
+
+        # This runs as a best-effort follow-up *after* the result already
+        # submitted successfully. Nothing here may propagate: an escaping
+        # exception would leave the accepted result in the queue, and every
+        # future drain would re-POST it (duplicate stage-1 attempts) since
+        # _retry_item never gets to return True. Mirror the stage-2 sibling and
+        # swallow everything. The preserved copy is only removed once its data
+        # is safely elsewhere (uploaded, re-queued, or permanently rejected).
+        try:
+            result = api_client.upload_residue(
+                client_id=client_id,
+                residue_file_path=str(preserved),
+                stage1_attempt_id=attempt_id,
+                expiry_days=expiry_days,
+            )
+            if result is not None:
+                self.logger.info(
+                    f"Chained residue upload succeeded (stage1 attempt {attempt_id})"
+                )
+                preserved.unlink(missing_ok=True)
+                return
+
+            # Transient failure: re-queue as a standalone upload now that we know
+            # the attempt_id. enqueue_residue_upload makes its own copy, so only
+            # drop this preserved copy once that copy exists.
+            self.logger.warning(
+                "Chained residue upload failed transiently; re-queuing for retry"
+            )
+            if self.enqueue_residue_upload(
+                residue_file=preserved,
+                client_id=client_id,
+                stage1_attempt_id=attempt_id,
+                expiry_days=expiry_days,
+            ):
+                preserved.unlink(missing_ok=True)
+            else:
+                self.logger.error(
+                    "Failed to re-queue chained residue upload; keeping preserved "
+                    f"copy for manual recovery: {preserved}"
+                )
+        except PermanentUploadError as e:
+            self.logger.warning(
+                f"Chained residue upload permanently rejected, dropping: {e}"
+            )
+            preserved.unlink(missing_ok=True)
+        except Exception as e:
+            # Unexpected error (I/O, malformed response, ...). Keep the preserved
+            # copy so the GPU batch isn't lost, and do NOT re-raise - the result
+            # is already accepted server-side.
+            self.logger.error(
+                f"Chained residue upload errored unexpectedly, keeping preserved "
+                f"copy for manual recovery ({preserved}): {e}"
+            )
+
     def _chain_residue_complete(
         self,
         api_client: 'APIClient',
@@ -555,7 +717,7 @@ class SubmissionQueue:
                 )
                 if response is None:
                     return False
-                self._chain_residue_complete(api_client, item, response)
+                self._run_completion_chain(api_client, item, response)
                 return True
 
             elif item_type == "residue_upload":
