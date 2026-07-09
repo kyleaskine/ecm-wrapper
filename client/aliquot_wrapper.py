@@ -20,6 +20,7 @@ from lib.base_wrapper import BaseWrapper
 from lib.ecm_math import trial_division, is_probably_prime, calculate_target_tlevel
 from lib.ecm_config import TLevelConfig
 from lib.ecm_executor import ECMWrapper
+from lib.tracker_client import AliquotTrackerClient, TrackerSequence
 from cado_wrapper import CADOWrapper
 from yafu_wrapper import YAFUWrapper
 
@@ -73,7 +74,8 @@ class AliquotWrapper(BaseWrapper):
     def __init__(self, config_path: str, factorizer: str = 'cado', hybrid_threshold: int = 100,
                  siqs_threshold: int = 100, ecm_program: str = 'gmp-ecm', threads: Optional[int] = None,
                  verbose: bool = False, use_two_stage: bool = False, max_batch_curves: Optional[int] = None,
-                 progress_interval: int = 0):
+                 progress_interval: int = 0, use_tracker: bool = False,
+                 tracker_start: Optional[int] = None):
         """Initialize aliquot wrapper with specified factorization engine.
 
         Args:
@@ -87,6 +89,10 @@ class AliquotWrapper(BaseWrapper):
             use_two_stage: Use GPU two-stage mode for ECM (GPU stage 1 + CPU stage 2, default: False)
             max_batch_curves: Max curves per GPU batch in two-stage t-level mode (default: None = use config)
             progress_interval: Show progress every N completed curves (0 = disabled)
+            use_tracker: Submit factors via the aliquot tracker (which forwards to
+                FactorDB) and upload ECM t-level progress to the ECM server
+            tracker_start: Start number of the sequence on the tracker (required
+                when use_tracker is True)
         """
         super().__init__(config_path)
         self.config_path = config_path  # Store for lazy initialization of sub-wrappers
@@ -99,6 +105,27 @@ class AliquotWrapper(BaseWrapper):
         self.use_two_stage = use_two_stage
         self.max_batch_curves = max_batch_curves
         self.progress_interval = progress_interval
+
+        self.use_tracker = use_tracker
+        self.tracker_start = tracker_start
+        # ECM t-level upload rides tracker mode (kept as a separate switch so
+        # the two concerns stay independently controllable)
+        self.submit_ecm_results = use_tracker
+        self.tracker: Optional[AliquotTrackerClient] = None
+        if use_tracker:
+            tracker_config = self.typed_config.aliquot_tracker
+            if not tracker_config.url:
+                raise ValueError(
+                    "--tracker requires aliquot_tracker.url to be set in "
+                    "client.yaml or client.local.yaml")
+            self.tracker = AliquotTrackerClient(
+                base_url=tracker_config.url,
+                api_key=tracker_config.api_key,
+                submitter=tracker_config.submitter or self.typed_config.client.username,
+                timeout=self.typed_config.api.timeout,
+                retry_attempts=self.typed_config.api.retry_attempts,
+                logger=self.logger,
+            )
 
         # Lazy initialization of factorizers (created on first access)
         self._cado = None
@@ -322,6 +349,14 @@ class AliquotWrapper(BaseWrapper):
 
                 self.logger.info(f"Running progressive GMP-ECM to t{target_t_level:.1f} on C{cofactor_digits}")
 
+                # In tracker mode, push factors found so far (trial division,
+                # earlier ECM passes) to the tracker BEFORE running ECM. The
+                # tracker forwards them to FactorDB and re-registers the ECM
+                # server's composite with the reduced cofactor, so the t-level
+                # submissions below match a registered composite.
+                if self.use_tracker:
+                    self._sync_tracker_factors(all_factors)
+
                 # Determine max_batch_curves: CLI arg > config value > None
                 max_batch = self.max_batch_curves
                 if max_batch is None:
@@ -337,7 +372,11 @@ class AliquotWrapper(BaseWrapper):
                     use_two_stage=self.use_two_stage,  # GPU two-stage mode if enabled
                     max_batch_curves=max_batch,  # Enable batching for pipelined GPU/CPU execution
                     progress_interval=self.progress_interval,
-                    no_submit=True  # Aliquot handles its own submissions
+                    project='Aliquot' if self.submit_ecm_results else None,
+                    # Tracker mode uploads t-level progress to the ECM server
+                    # (composites are registered there as aliquot:{start}:i{index});
+                    # otherwise aliquot handles its own submissions
+                    no_submit=not self.submit_ecm_results
                 )
                 ecm_result = self.ecm.run_tlevel_v2(config)
 
@@ -463,10 +502,7 @@ class AliquotWrapper(BaseWrapper):
         self.logger.info(f"Final factorization: {self.format_factorization(factorization)}")
 
         # Verify factorization
-        product = 1
-        for factor_str in all_factors:
-            product *= int(factor_str)
-
+        product = self._factorization_product(factorization)
         if product != n:
             self.logger.error(f"Factorization verification failed: {product} != {n}")
             return False, {}, final_results
@@ -485,14 +521,15 @@ class AliquotWrapper(BaseWrapper):
         return " × ".join(parts)
 
     def compute_sequence(self, start: int, max_iterations: int = 100,
-                        submit_to_factordb: bool = False) -> AliquotSequence:
+                        submit: bool = False) -> AliquotSequence:
         """
         Compute aliquot sequence starting from given number.
 
         Args:
             start: Starting number
             max_iterations: Maximum number of iterations
-            submit_to_factordb: Whether to submit to FactorDB
+            submit: Whether to submit factorizations (via the tracker when
+                --tracker is set, otherwise directly to FactorDB)
 
         Returns:
             AliquotSequence object with full sequence data
@@ -539,9 +576,9 @@ class AliquotWrapper(BaseWrapper):
                 seq.add_term(next_term, {})
                 break
 
-            # Submit to FactorDB if requested
-            if submit_to_factordb and factorization:
-                self.submit_to_factordb(next_term, factorization)
+            # Submit factorization if requested
+            if submit and factorization:
+                self.submit_factors(next_term, factorization)
 
             # Add to sequence
             seq.add_term(next_term, factorization)
@@ -607,7 +644,7 @@ class AliquotWrapper(BaseWrapper):
             self.logger.info(f"Fetching full number from FactorDB API (ID: {composite_id})...")
 
             # Use cookie for authenticated requests (may help with rate limiting)
-            cookies = {"fdbuser": "49842c2d25d13890591f62931240e7ba"}
+            cookies = self._factordb_cookies()
             api_response = requests.get(api_url, cookies=cookies, timeout=30)
             api_response.raise_for_status()
 
@@ -658,6 +695,188 @@ class AliquotWrapper(BaseWrapper):
             self.logger.error(f"Error parsing FactorDB response: {e}")
             return None
 
+    @staticmethod
+    def _factorization_product(factorization: Dict[int, int]) -> int:
+        """Reconstruct n from a {prime: exponent} factorization."""
+        product = 1
+        for prime, exp in factorization.items():
+            product *= prime ** exp
+        return product
+
+    def _tracker_current_composite(self, state: 'TrackerSequence') -> Optional[int]:
+        """The tracker's current composite as a positive int, or None when the
+        payload is missing/malformed (never let a bad tracker response abort a
+        multi-hour run - the caller falls back to direct FactorDB)."""
+        if not state.current_composite:
+            return None
+        try:
+            current = int(state.current_composite)
+        except ValueError:
+            self.logger.warning(
+                f"Tracker returned a non-numeric composite for sequence "
+                f"{self.tracker_start}: {state.current_composite[:40]!r}")
+            return None
+        if current <= 1:
+            self.logger.warning(
+                f"Tracker returned an invalid composite ({current}) for "
+                f"sequence {self.tracker_start}")
+            return None
+        return current
+
+    def submit_factors(self, n: int, factorization: Dict[int, int]) -> bool:
+        """
+        Submit a term's factorization to the configured destination.
+
+        Tracker mode: submit via the aliquot tracker (which forwards to
+        FactorDB and auto-advances the sequence), falling back to direct
+        FactorDB submission if the tracker can't take the work. Otherwise:
+        direct FactorDB submission.
+        """
+        if self.use_tracker:
+            if self.submit_via_tracker(n, factorization):
+                return True
+            self.logger.warning("Tracker submission incomplete - falling back to direct FactorDB")
+            print("  Tracker submission failed - falling back to direct FactorDB")
+        return self.submit_to_factordb(n, factorization)
+
+    def submit_via_tracker(self, n: int, factorization: Dict[int, int]) -> bool:
+        """
+        Submit the factorization of term n via the aliquot tracker.
+
+        The tracker only accepts factors of ITS current composite, so factors
+        are submitted one at a time, re-reading the tracker's state from each
+        response (the current composite shrinks as FactorDB divides factors
+        out). The final prime cofactor is never submitted - FactorDB derives
+        it, flips the term to fully-factored, and the tracker auto-advances.
+
+        Returns:
+            True if the tracker handled the submission (advanced, or nothing
+            new to submit); False if the caller should fall back to direct
+            FactorDB submission.
+        """
+        if self.tracker is None or self.tracker_start is None:
+            return False
+
+        # Verify factorization before submitting anywhere
+        product = self._factorization_product(factorization)
+        if product != n:
+            self.logger.error(f"Factor verification failed: {product} != {n}")
+            return False
+
+        state = self.tracker.get_sequence(self.tracker_start)
+        if state is None:
+            return False
+        current = self._tracker_current_composite(state)
+        if state.status != 'active' or current is None:
+            self.logger.info(
+                f"Tracker sequence {self.tracker_start} has no active composite "
+                f"(status={state.status}) - nothing to submit via tracker")
+            return False
+        if n % current != 0:
+            self.logger.warning(
+                f"Tracker is on a different term (its C{len(str(current))} "
+                f"at index {state.current_index} does not divide our term)")
+            return False
+
+        primes = [p for p, e in sorted(factorization.items()) for _ in range(e)]
+        submitted, final_state = self._tracker_submit_new_factors(primes, state)
+        if submitted is None:
+            return False
+
+        if final_state is not None and final_state.current_index > state.current_index:
+            print(f"  Tracker: submitted {submitted} factor(s), sequence advanced "
+                  f"to index {final_state.current_index}")
+        else:
+            print(f"  Tracker: submitted {submitted} factor(s)")
+        return True
+
+    def _tracker_submit_new_factors(
+            self, primes: List[int],
+            state: Optional['TrackerSequence'] = None
+    ) -> Tuple[Optional[int], Optional['TrackerSequence']]:
+        """
+        Submit whichever of `primes` divide the tracker's current composite.
+
+        One factor per request, smallest first, refreshing state between
+        submissions. A prime equal to the current composite is never sent
+        (the tracker rejects factor == composite; FactorDB resolves the final
+        cofactor itself).
+
+        Returns:
+            (submitted_count, final_state) on success - success includes
+            "nothing left to submit". (None, last_state) when the tracker
+            was unreachable or rejected a factor.
+        """
+        assert self.tracker is not None and self.tracker_start is not None
+        if state is None:
+            state = self.tracker.get_sequence(self.tracker_start)
+            if state is None:
+                return None, None
+
+        remaining = sorted(primes)
+        submitted = 0
+        while True:
+            if state.status != 'active':
+                return submitted, state
+            current = self._tracker_current_composite(state)
+            if current is None:
+                return submitted, state
+            candidate = next(
+                (p for p in remaining if p != current and current % p == 0), None)
+            if candidate is None:
+                return submitted, state
+
+            result = self.tracker.submit_factor(state.id, str(candidate))
+            if not result.accepted:
+                if result.permanent:
+                    # The tracker validated the factor and said no (or our
+                    # credentials were rejected) - retrying won't change it
+                    self.logger.error(
+                        f"Tracker rejected factor {candidate}: {result.error}")
+                else:
+                    self.logger.warning(
+                        f"Tracker unavailable while submitting factor "
+                        f"{candidate}: {result.error}")
+                return None, state
+            submitted += 1
+            remaining.remove(candidate)
+            self.logger.info(
+                f"Tracker accepted factor {candidate} for sequence {self.tracker_start}")
+
+            if result.auto_advanced:
+                self.logger.info(
+                    f"Tracker auto-advanced sequence {self.tracker_start}")
+                return submitted, result.sequence
+
+            if result.sequence is not None:
+                state = result.sequence
+            else:
+                # Degraded response (tracker's FactorDB refresh failed after
+                # accepting the factor) - re-fetch to see the updated state
+                state = self.tracker.get_sequence(self.tracker_start)
+                if state is None:
+                    return None, None
+
+    def _sync_tracker_factors(self, factors: List[str]) -> None:
+        """Best-effort mid-run push of already-found factors to the tracker.
+
+        Keeps FactorDB and the ECM server's composite registration in step
+        with our working cofactor while long ECM runs are still in progress.
+        Failures are ignored - the term-end submit_factors() is the safety net.
+        """
+        if self.tracker is None or self.tracker_start is None or not factors:
+            return
+        try:
+            self._tracker_submit_new_factors([int(f) for f in factors])
+        except Exception as e:
+            # Never let a progress push kill a multi-hour factorization
+            self.logger.warning(f"Tracker mid-run factor sync failed: {e}")
+
+    def _factordb_cookies(self) -> Dict[str, str]:
+        """FactorDB auth cookie from config (factordb.cookie), if set."""
+        cookie = self.typed_config.factordb.cookie
+        return {"fdbuser": cookie} if cookie else {}
+
     def submit_to_factordb(self, n: int, factorization: Dict[int, int]) -> bool:
         """
         Submit factorization to FactorDB using the reportfactor.php API.
@@ -675,17 +894,14 @@ class AliquotWrapper(BaseWrapper):
         import requests
 
         # Reconstruct number from factors to verify
-        product = 1
-        for prime, exp in factorization.items():
-            product *= prime ** exp
-
+        product = self._factorization_product(factorization)
         if product != n:
             self.logger.error(f"Factor verification failed: {product} != {n}")
             return False
 
         try:
             # Use cookie for authenticated requests
-            cookies = {"fdbuser": "49842c2d25d13890591f62931240e7ba"}
+            cookies = self._factordb_cookies()
 
             # Step 1: Query FactorDB to see what factors they already have
             query_url = f"https://factordb.com/api?query={n}"
@@ -905,6 +1121,10 @@ Examples:
   # Submit results to FactorDB
   python3 aliquot_wrapper.py --start 138 --factordb
 
+  # Submit results via the aliquot tracker (forwards to FactorDB, advances the
+  # tracked sequence, and uploads ECM t-level progress to the ECM server)
+  python3 aliquot_wrapper.py --start 138 --tracker --resume-factordb
+
   # Quiet mode (no factor spam)
   python3 aliquot_wrapper.py --start 276 --quiet-factors
 
@@ -940,8 +1160,14 @@ Common test sequences:
                        help='Maximum number of iterations (default: 100)')
     parser.add_argument('--config', type=str, default='client.yaml',
                        help='Configuration file path (default: client.yaml)')
-    parser.add_argument('--factordb', action='store_true',
-                       help='Submit factorizations to FactorDB')
+    submit_group = parser.add_mutually_exclusive_group()
+    submit_group.add_argument('--factordb', action='store_true',
+                       help='Submit factorizations directly to FactorDB')
+    submit_group.add_argument('--tracker', action='store_true',
+                       help='Submit factorizations via the aliquot tracker (forwards to '
+                            'FactorDB, auto-advances the sequence) and upload ECM t-level '
+                            'progress to the ECM server. Requires aliquot_tracker.url in config. '
+                            'Falls back to direct FactorDB submission if the tracker is unavailable.')
     parser.add_argument('--output', type=str,
                        help='Output JSON file for sequence data')
     parser.add_argument('--no-save', action='store_true',
@@ -982,10 +1208,30 @@ Common test sequences:
         args.two_stage = True
 
     # Initialize wrapper with selected factorizer
-    wrapper = AliquotWrapper(args.config, factorizer=args.factorizer, hybrid_threshold=args.hybrid_threshold,
-                            siqs_threshold=args.siqs_threshold, ecm_program=args.ecm_program,
-                            threads=args.workers, verbose=args.verbose, use_two_stage=args.two_stage,
-                            max_batch_curves=args.max_batch, progress_interval=args.progress_interval)
+    try:
+        wrapper = AliquotWrapper(args.config, factorizer=args.factorizer, hybrid_threshold=args.hybrid_threshold,
+                                siqs_threshold=args.siqs_threshold, ecm_program=args.ecm_program,
+                                threads=args.workers, verbose=args.verbose, use_two_stage=args.two_stage,
+                                max_batch_curves=args.max_batch, progress_interval=args.progress_interval,
+                                use_tracker=args.tracker, tracker_start=args.start)
+    except ValueError as config_error:
+        print(f"Error: {config_error}")
+        sys.exit(1)
+
+    # Any submission destination enabled?
+    submit_enabled = args.factordb or args.tracker
+
+    # In tracker mode, show the tracker's view of the sequence up front so a
+    # misconfigured URL or untracked sequence is visible before hours of work
+    if args.tracker and wrapper.tracker is not None:
+        tracker_state = wrapper.tracker.get_sequence(args.start)
+        if tracker_state is None:
+            print(f"Warning: tracker unreachable or sequence {args.start} not tracked.")
+            print(f"         Factor submissions will fall back to direct FactorDB.")
+        else:
+            print(f"Tracker: sequence {args.start} at index {tracker_state.current_index} "
+                  f"(status={tracker_state.status}, "
+                  f"C{len(tracker_state.current_composite) if tracker_state.current_composite else '?'})")
 
     # Override factor logging config if requested
     if args.quiet_factors:
@@ -1087,10 +1333,10 @@ Common test sequences:
             if success:
                 seq.factorizations[resume_composite] = factorization
 
-                # Submit the resume composite factorization to FactorDB first
+                # Submit the resume composite factorization first
                 # This allows FactorDB to calculate the next term and maintain sequence linkage
-                if args.factordb and factorization:
-                    wrapper.submit_to_factordb(resume_composite, factorization)
+                if submit_enabled and factorization:
+                    wrapper.submit_factors(resume_composite, factorization)
 
                 # Continue from this point
                 current = resume_composite
@@ -1116,9 +1362,9 @@ Common test sequences:
                         seq.add_term(next_term, {})
                         break
 
-                    # Submit to FactorDB
-                    if args.factordb and factorization:
-                        wrapper.submit_to_factordb(next_term, factorization)
+                    # Submit factorization
+                    if submit_enabled and factorization:
+                        wrapper.submit_factors(next_term, factorization)
 
                     seq.add_term(next_term, factorization)
 
@@ -1138,7 +1384,7 @@ Common test sequences:
             seq = wrapper.compute_sequence(
                 start=args.start,
                 max_iterations=args.max_iterations,
-                submit_to_factordb=args.factordb
+                submit=submit_enabled
             )
 
     except KeyboardInterrupt:

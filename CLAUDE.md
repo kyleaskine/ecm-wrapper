@@ -66,6 +66,10 @@ cd client/scripts/
 # Resend failed submissions
 python3 resend_failed.py --dry-run  # Test without marking files
 python3 resend_failed.py            # Submit and mark as completed
+
+# Aliquot sequences (see client/CLAUDE.md for tracker integration)
+python3 client/aliquot_wrapper.py --start 276 --resume-factordb --factordb  # direct FactorDB
+python3 client/aliquot_wrapper.py --start 276 --resume-factordb --tracker   # via aliquot tracker
 ```
 
 ### Server Development
@@ -198,6 +202,16 @@ GPU and CPU workers run stage 1 and stage 2 independently. Stage 1 produces resi
 
 ### P-1/P+1 Sweep Mode (2026-02)
 Flags: `--pm1`, `--pp1`, `--p1`. Uses `/p1-work` endpoint. B1 calculated one step above target t-level. See `client/CLAUDE.md` for client details and `server/CLAUDE.md` for server endpoint.
+
+### Aliquot Tracker Integration (2026-07)
+`aliquot_wrapper.py --tracker` (mutually exclusive with `--factordb`) submits factors
+via the aliquot tracker (`../aliquot-tracker`), which forwards them to FactorDB
+(rejecting if FactorDB is down), records attribution, auto-advances the sequence, and
+re-registers the new composite with this ECM server. Tracker mode also uploads ECM
+t-level progress to the ECM server (aliquot composites are registered as
+`aliquot:{start}:i{index}` with decimal `current_composite`, which submissions match).
+Falls back to direct FactorDB submission when the tracker is unavailable.
+Config: `aliquot_tracker` section in client.yaml. See `client/CLAUDE.md` for details.
 
 ### Multi-Factor Batch Submission
 All factors from a single ECM run are submitted in one API call via `factors_found` list. Server processes all factors before updating composite state.

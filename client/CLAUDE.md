@@ -236,6 +236,57 @@ results = results_for_stage1('123', b1=50000, curves=100, param=1).build()
 
 **Migration note**: `BaseWrapper.create_base_results()` is deprecated - use ResultsBuilder for new code.
 
+## Aliquot Tracker Integration (2026-07)
+
+`aliquot_wrapper.py --tracker` (mutually exclusive with `--factordb`) routes factor
+submissions through the aliquot tracker (`../aliquot-tracker`) instead of hitting
+FactorDB directly. The tracker submits to FactorDB first (rejecting if FactorDB is
+down), records attribution, auto-advances the sequence when fully factored, and
+re-registers the next composite with the ECM server.
+
+**Client pieces:**
+- `lib/tracker_client.py` — `AliquotTrackerClient`: `get_sequence(start)` via
+  `GET /api/sequences/{start}` (accepts the start number directly),
+  `submit_factor(sequence_id, factor)` via `POST /api/submit-factor`.
+  Auth: `X-Api-Key` header when `aliquot_tracker.api_key` is set (verified
+  attribution), otherwise anonymous with `submitterHandle` (defaults to
+  `client.username`). Retries transient failures (network/5xx/429 honoring
+  Retry-After); 4xx rejections are permanent — the tracker's per-IP rate limiter
+  counts failed attempts, so they are never retried.
+- `AliquotWrapper.submit_via_tracker()` — the tracker only accepts factors of
+  ITS current composite, so factors are submitted **one at a time**, re-reading
+  tracker state from each response (multiplicities can differ between the full
+  term and the remaining cofactor). The final prime cofactor is never sent:
+  FactorDB derives it, the term flips to FF, and the tracker auto-advances.
+- `AliquotWrapper._sync_tracker_factors()` — before each progressive-ECM pass,
+  factors found so far (trial division, earlier ECM) are pushed to the tracker
+  so FactorDB and the ECM server's composite registration stay in lockstep with
+  the working cofactor. Best-effort; failures never interrupt factorization.
+- **Fallback**: any tracker failure falls back to the direct FactorDB path
+  (`submit_to_factordb`), which self-dedupes against FactorDB; the tracker's
+  nightly sync catches up from there.
+
+**ECM t-level upload**: tracker mode flips `no_submit=False` (with
+`project='Aliquot'`) in the progressive GMP-ECM `TLevelConfig`, so per-B1-batch
+results go to the ECM server (`api.endpoint`). The server matches the submitted
+decimal cofactor against `current_composite` of the registered
+`aliquot:{start}:i{index}` row. Without `--tracker`, behavior is unchanged
+(no ECM submission). YAFU-pretest ECM (`--ecm-program yafu`) does not upload
+progress.
+
+**Config** (`client.yaml` / `client.local.yaml`):
+```yaml
+aliquot_tracker:
+  url: https://aliquot.example.com  # required for --tracker
+  api_key: <key>    # optional; from {tracker}/profile
+  submitter: <name> # anonymous handle fallback
+factordb:
+  cookie: <fdbuser> # FactorDB auth cookie (was hardcoded in aliquot_wrapper.py)
+```
+
+**Tests**: `tests/test_tracker_submission.py` (submission loop, multiplicity
+reduction, fallback signaling, config parsing).
+
 ## Graceful Shutdown
 
 Multi-level Ctrl+C handling for Stage 2 and CPU Stage 1 execution:

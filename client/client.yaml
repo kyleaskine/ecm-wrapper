@@ -57,3 +57,14 @@ programs:
 
   t_level:
     path: bin/t-level  # T-level calculator for ECM work tracking
+
+factordb:
+  cookie: null  # fdbuser cookie value for authenticated FactorDB requests (set in client.local.yaml)
+
+# Aliquot tracker integration (aliquot_wrapper.py --tracker)
+# Submits factors to the tracker, which forwards them to FactorDB and
+# auto-advances sequences. Set the real values in client.local.yaml.
+aliquot_tracker:
+  url: null        # e.g. https://aliquot.example.com (base URL, no /api suffix)
+  api_key: null    # X-Api-Key for verified attribution (optional)
+  submitter: null  # Anonymous handle when no api_key (defaults to client.username)

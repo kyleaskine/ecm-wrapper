@@ -198,6 +198,12 @@ programs:
     working_dir: /opt/cado/work
   t_level:
     path: /opt/bin/t-level
+factordb:
+  cookie: fdbcookie123
+aliquot_tracker:
+  url: https://aliquot.example.com
+  api_key: trackerkey456
+  submitter: tester-handle
 """
     cfg1 = _load_yaml(yaml_text)
     d = cfg1.to_dict()
@@ -217,6 +223,10 @@ programs:
     assert cfg2.programs.gmp_ecm.stage2_max_b1 == 110000000
     assert cfg2.programs.gmp_ecm.gpu.curves_per_batch == 2304
     assert cfg2.execution.queue_dir == "/tmp/queue"
+    assert cfg2.factordb.cookie == "fdbcookie123"
+    assert cfg2.aliquot_tracker.url == "https://aliquot.example.com"
+    assert cfg2.aliquot_tracker.api_key == "trackerkey456"
+    assert cfg2.aliquot_tracker.submitter == "tester-handle"
 
     # Sanity: pre-existing fields also survive
     assert cfg2.api.endpoint == "http://example.com/api"

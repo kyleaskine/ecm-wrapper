@@ -79,6 +79,20 @@ class LoggingConfig:
 
 
 @dataclass
+class FactorDBConfig:
+    """FactorDB integration configuration (aliquot_wrapper --factordb)."""
+    cookie: Optional[str] = None  # fdbuser cookie value for authenticated requests
+
+
+@dataclass
+class AliquotTrackerConfig:
+    """Aliquot tracker integration configuration (aliquot_wrapper --tracker)."""
+    url: Optional[str] = None  # Tracker base URL, e.g. https://aliquot.example.com
+    api_key: Optional[str] = None  # X-Api-Key for verified attribution (optional)
+    submitter: Optional[str] = None  # Anonymous handle when no api_key (default: client.username)
+
+
+@dataclass
 class GPUConfig:
     """Nested GPU-specific tuning under programs.gmp_ecm.gpu.
 
@@ -159,6 +173,8 @@ class AppConfig:
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     programs: ProgramsConfig = field(default_factory=ProgramsConfig)
+    factordb: FactorDBConfig = field(default_factory=FactorDBConfig)
+    aliquot_tracker: AliquotTrackerConfig = field(default_factory=AliquotTrackerConfig)
 
     def ensure_dirs_exist(self) -> None:
         """Create all required directories."""
@@ -230,6 +246,14 @@ class AppConfig:
                     'path': self.programs.t_level.path,
                 },
             },
+            'factordb': {
+                'cookie': self.factordb.cookie,
+            },
+            'aliquot_tracker': {
+                'url': self.aliquot_tracker.url,
+                'api_key': self.aliquot_tracker.api_key,
+                'submitter': self.aliquot_tracker.submitter,
+            },
         }
 
 
@@ -272,6 +296,23 @@ class TypedConfigLoader:
             execution=self._parse_execution(raw.get('execution', {})),
             logging=self._parse_logging(raw.get('logging', {})),
             programs=self._parse_programs(raw.get('programs', {})),
+            factordb=self._parse_factordb(raw.get('factordb', {})),
+            aliquot_tracker=self._parse_aliquot_tracker(raw.get('aliquot_tracker', {})),
+        )
+
+    def _parse_factordb(self, raw: Dict[str, Any]) -> FactorDBConfig:
+        """Parse FactorDB configuration."""
+        return FactorDBConfig(
+            cookie=raw.get('cookie'),
+        )
+
+    def _parse_aliquot_tracker(self, raw: Dict[str, Any]) -> AliquotTrackerConfig:
+        """Parse aliquot tracker configuration. URL normalization (trailing
+        slash) is owned by AliquotTrackerClient, the sole consumer."""
+        return AliquotTrackerConfig(
+            url=raw.get('url'),
+            api_key=raw.get('api_key'),
+            submitter=raw.get('submitter'),
         )
 
     def _parse_api(self, raw: Dict[str, Any]) -> APIConfig:
