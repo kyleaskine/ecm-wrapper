@@ -472,6 +472,63 @@ class TestTwoStageMode:
         config = wrapper.run_two_stage_v2.call_args[0][0]
         assert config.b2 is None
 
+    def test_b2_from_dictionary(self):
+        """B2 looked up from dictionary when --b2 not specified."""
+        args = _default_args(composite="12345", b2=None)
+        params = _default_params(b1=110000000,
+                                 b2_dictionary={110000000: 11000000000000})
+        output = Mock()
+        wrapper = Mock()
+
+        wrapper.run_two_stage_v2.return_value = _make_factor_result()
+
+        run_two_stage_mode(wrapper, args, output, params)
+
+        config = wrapper.run_two_stage_v2.call_args[0][0]
+        assert config.b2 == 11000000000000
+
+    def test_explicit_b2_overrides_dictionary(self):
+        """Explicit --b2 wins over a dictionary entry."""
+        args = _default_args(composite="12345", b2=9999999)
+        params = _default_params(b1=110000000,
+                                 b2_dictionary={110000000: 11000000000000})
+        output = Mock()
+        wrapper = Mock()
+
+        wrapper.run_two_stage_v2.return_value = _make_factor_result()
+
+        run_two_stage_mode(wrapper, args, output, params)
+
+        config = wrapper.run_two_stage_v2.call_args[0][0]
+        assert config.b2 == 9999999
+
+    def test_dictionary_miss_falls_back_to_multiplier(self):
+        """B1 not in dictionary falls back to --b2-multiplier when given."""
+        args = _default_args(composite="12345", b2=None, b2_multiplier=1000.0)
+        params = _default_params(b1=100000, b2_dictionary={110000000: 11000000000000})
+        output = Mock()
+        wrapper = Mock()
+
+        wrapper.run_two_stage_v2.return_value = _make_factor_result()
+
+        run_two_stage_mode(wrapper, args, output, params)
+
+        config = wrapper.run_two_stage_v2.call_args[0][0]
+        assert config.b2 == 100000000  # 100000 * 1000
+
+    def test_dictionary_miss_without_fallback_exits(self):
+        """B1 not in dictionary with no other B2 source is a hard error."""
+        args = _default_args(composite="12345", b2=None)
+        params = _default_params(b1=100000, b2_dictionary={110000000: 11000000000000})
+        output = Mock()
+        wrapper = Mock()
+
+        with pytest.raises(SystemExit):
+            run_two_stage_mode(wrapper, args, output, params)
+
+        output.error.assert_called_once()
+        wrapper.run_two_stage_v2.assert_not_called()
+
 
 class TestSubmitEcmResult:
     """Tests for submit_ecm_result()."""

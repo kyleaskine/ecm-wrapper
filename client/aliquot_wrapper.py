@@ -75,14 +75,17 @@ class AliquotWrapper(BaseWrapper):
                  siqs_threshold: int = 100, ecm_program: str = 'gmp-ecm', threads: Optional[int] = None,
                  verbose: bool = False, use_two_stage: bool = False, max_batch_curves: Optional[int] = None,
                  progress_interval: int = 0, use_tracker: bool = False,
-                 tracker_start: Optional[int] = None):
+                 tracker_start: Optional[int] = None, small_method: str = 'siqs'):
         """Initialize aliquot wrapper with specified factorization engine.
 
         Args:
             config_path: Path to configuration file
             factorizer: Either 'cado' or 'hybrid' (default: 'cado')
-            hybrid_threshold: Digit length threshold for switching to ECM+CADO (default: 100)
-            siqs_threshold: Digit length threshold for using YAFU SIQS instead of CADO (default: 100)
+            hybrid_threshold: Digit length below which ECM pretesting is skipped and the
+                cofactor goes straight to the final method (default: 100)
+            siqs_threshold: Digit length threshold selecting the final method: below it
+                YAFU SIQS (or ECM to completion with small_method='ecm'), at/above it
+                CADO-NFS (default: 100)
             ecm_program: ECM program to use: 'gmp-ecm' or 'yafu' (default: 'gmp-ecm')
             threads: Optional thread/worker count for parallel execution
             verbose: Enable verbose output from factorization programs
@@ -93,12 +96,16 @@ class AliquotWrapper(BaseWrapper):
                 FactorDB) and upload ECM t-level progress to the ECM server
             tracker_start: Start number of the sequence on the tracker (required
                 when use_tracker is True)
+            small_method: How to finish cofactors below siqs_threshold: 'siqs'
+                (YAFU SIQS) or 'ecm' (GMP-ECM to completion, for platforms
+                without YAFU such as macOS)
         """
         super().__init__(config_path)
         self.config_path = config_path  # Store for lazy initialization of sub-wrappers
         self.factorizer_name = factorizer
         self.hybrid_threshold = hybrid_threshold
         self.siqs_threshold = siqs_threshold
+        self.small_method = small_method
         self.ecm_program = ecm_program
         self.threads = threads
         self.verbose = verbose
@@ -240,17 +247,104 @@ class AliquotWrapper(BaseWrapper):
         # Always use hybrid strategy (trial division + progressive ECM + CADO if needed)
         return self._factor_hybrid(n, digit_length)
 
+    def _build_tlevel_config(self, composite: int, target_t_level: float,
+                             start_t_level: float) -> TLevelConfig:
+        """TLevelConfig for a progressive GMP-ECM run, honoring the wrapper's
+        threading/GPU/batching settings and tracker-mode submission."""
+        # Determine max_batch_curves: CLI arg > config value > None
+        max_batch = self.max_batch_curves
+        if max_batch is None:
+            max_batch = self.typed_config.programs.gmp_ecm.max_batch
+
+        return TLevelConfig(
+            composite=str(composite),
+            target_t_level=target_t_level,
+            start_t_level=start_t_level,  # Continue from achieved t-level
+            threads=self.threads if self.threads else 1,
+            verbose=self.verbose,
+            use_two_stage=self.use_two_stage,  # GPU two-stage mode if enabled
+            max_batch_curves=max_batch,  # Enable batching for pipelined GPU/CPU execution
+            progress_interval=self.progress_interval,
+            project='Aliquot' if self.submit_ecm_results else None,
+            # Tracker mode uploads t-level progress to the ECM server
+            # (composites are registered there as aliquot:{start}:i{index});
+            # otherwise aliquot handles its own submissions
+            no_submit=not self.submit_ecm_results,
+        )
+
+    def _ecm_factor_completely(self, n: int, start_t_level: float,
+                               already_found: List[str]) -> List[str]:
+        """Factor a composite cofactor to completion with GMP-ECM alone.
+
+        Used below siqs_threshold with small_method='ecm' (platforms without
+        YAFU, e.g. macOS). The smallest prime factor of a d-digit composite
+        has at most ceil(d/2) digits, so each pass targets a t-level just past
+        that, escalating by 5 whenever a pass comes up empty - the miss
+        probability shrinks geometrically, so this terminates.
+
+        Args:
+            n: Composite to factor (must not be prime)
+            start_t_level: T-level already achieved on this cofactor
+            already_found: Factors of the enclosing term found so far (for
+                tracker mid-run sync)
+
+        Returns:
+            All prime factors of n (with multiplicity). Raises
+            KeyboardInterrupt if ECM was interrupted.
+        """
+        current = n
+        current_t = start_t_level
+        factors: List[str] = []
+
+        while current > 1:
+            if is_probably_prime(current):
+                factors.append(str(current))
+                break
+
+            digits = len(str(current))
+            min_target = (digits + 1) // 2 + 2
+            target = float(max(min_target, int(current_t) + 5))
+            self.logger.info(f"ECM to completion: running to t{target:.1f} on C{digits}")
+
+            if self.use_tracker:
+                self._sync_tracker_factors(already_found + factors)
+
+            result = self.ecm.run_tlevel_v2(
+                self._build_tlevel_config(current, target, current_t))
+
+            if result.curve_summary:
+                result.print_curve_summary(show_parametrization=self.verbose)
+
+            current_t = result.t_level_achieved
+
+            if result.interrupted:
+                self.logger.info("ECM was interrupted, stopping aliquot factorization")
+                raise KeyboardInterrupt("ECM interrupted")
+
+            for factor in result.factors:
+                while current % int(factor) == 0:
+                    current //= int(factor)
+                    factors.append(factor)
+
+            if result.factors and current > 1:
+                self.logger.info(f"ECM to completion: cofactor C{len(str(current))} "
+                                 f"remains (continuing from t{current_t:.2f})")
+
+        return factors
+
     def _factor_hybrid(self, n: int, digit_length: int) -> Tuple[bool, Dict[int, int], Dict]:
         """
         Hybrid factorization: Trial division + ECM + SIQS/CADO-NFS.
 
         Strategy:
         1. Trial division up to 10^7 (very fast, catches small factors)
-        2. ECM (configurable via ecm_program):
+        2. ECM pretesting for cofactors >= hybrid_threshold digits (configurable
+           via ecm_program):
            - GMP-ECM: Progressive approach with t-level targeting 4/13 of digit length
            - YAFU: Intelligent pretesting with -pretest flag
         3. Final factorization based on cofactor size (configurable via siqs_threshold):
-           - YAFU SIQS for cofactors < siqs_threshold digits (default: 100)
+           - Cofactors < siqs_threshold digits: YAFU SIQS, or GMP-ECM to
+             completion with small_method='ecm' (default: 100)
            - CADO-NFS for larger cofactors >= siqs_threshold digits
 
         This approach optimizes factorization by using the best tool for each size range.
@@ -293,6 +387,8 @@ class AliquotWrapper(BaseWrapper):
         # Initialize ecm_factors and ecm_results for both branches
         ecm_factors: List[str] = []
         ecm_results: Dict[str, Any] = {}
+        # Achieved t-level; carries into ECM-to-completion for small cofactors
+        current_t_level = 0.0
 
         if self.ecm_program == 'yafu':
             # Use YAFU for ECM with intelligent pretesting
@@ -323,8 +419,6 @@ class AliquotWrapper(BaseWrapper):
             # Use GMP-ECM's progressive approach with t-level (v2 API)
             # Keep running ECM until target is reached or cofactor is small enough for SIQS/CADO
             # Track achieved t-level to carry over when factor found (work done applies to cofactor too)
-            current_t_level = 0.0
-
             while current_composite > 1:
                 cofactor_digits = len(str(current_composite))
 
@@ -335,9 +429,10 @@ class AliquotWrapper(BaseWrapper):
                     current_composite = 1
                     break
 
-                # Check if small enough for SIQS/CADO (exit ECM loop)
-                if cofactor_digits < self.siqs_threshold:
-                    self.logger.info(f"Cofactor C{cofactor_digits} small enough for SIQS/CADO, exiting ECM")
+                # Below hybrid_threshold, skip ECM pretesting - the final
+                # method (SIQS/CADO/ECM-to-completion) takes it from here
+                if cofactor_digits < self.hybrid_threshold:
+                    self.logger.info(f"Cofactor C{cofactor_digits} below hybrid threshold, exiting ECM pretest")
                     break
 
                 target_t_level = calculate_target_tlevel(cofactor_digits)
@@ -357,27 +452,7 @@ class AliquotWrapper(BaseWrapper):
                 if self.use_tracker:
                     self._sync_tracker_factors(all_factors)
 
-                # Determine max_batch_curves: CLI arg > config value > None
-                max_batch = self.max_batch_curves
-                if max_batch is None:
-                    # Fall back to config value
-                    max_batch = self.typed_config.programs.gmp_ecm.max_batch
-
-                config = TLevelConfig(
-                    composite=str(current_composite),
-                    target_t_level=target_t_level,
-                    start_t_level=current_t_level,  # Continue from achieved t-level
-                    threads=self.threads if self.threads else 1,
-                    verbose=self.verbose,
-                    use_two_stage=self.use_two_stage,  # GPU two-stage mode if enabled
-                    max_batch_curves=max_batch,  # Enable batching for pipelined GPU/CPU execution
-                    progress_interval=self.progress_interval,
-                    project='Aliquot' if self.submit_ecm_results else None,
-                    # Tracker mode uploads t-level progress to the ECM server
-                    # (composites are registered there as aliquot:{start}:i{index});
-                    # otherwise aliquot handles its own submissions
-                    no_submit=not self.submit_ecm_results
-                )
+                config = self._build_tlevel_config(current_composite, target_t_level, current_t_level)
                 ecm_result = self.ecm.run_tlevel_v2(config)
 
                 # Print curve summary for this ECM run
@@ -396,12 +471,14 @@ class AliquotWrapper(BaseWrapper):
                 ecm_factors = ecm_result.factors
                 if ecm_factors:
                     self.logger.info(f"Progressive GMP-ECM found {len(ecm_factors)} prime factor(s)")
-                    all_factors.extend(ecm_factors)
 
-                    # Calculate final cofactor by dividing out found factors
+                    # Divide out found factors, recording one entry per
+                    # division so p^k contributes k entries and the final
+                    # product-vs-n verification holds
                     for factor in ecm_factors:
                         while current_composite % int(factor) == 0:
                             current_composite //= int(factor)
+                            all_factors.append(factor)
 
                     if current_composite > 1:
                         self.logger.info(f"Cofactor after GMP-ECM: C{len(str(current_composite))} (continuing from t{current_t_level:.2f})")
@@ -429,8 +506,17 @@ class AliquotWrapper(BaseWrapper):
             factorization = self.parse_factorization(all_factors)
             return True, factorization, ecm_results
 
-        # Choose between YAFU SIQS and CADO-NFS based on cofactor size
-        if cofactor_digits < self.siqs_threshold:
+        # Choose the final method by cofactor size: below siqs_threshold use
+        # YAFU SIQS (or ECM to completion with --small-method ecm), otherwise
+        # CADO-NFS
+        if cofactor_digits < self.siqs_threshold and self.small_method == 'ecm':
+            # Finish with GMP-ECM alone (no YAFU on this platform)
+            self.logger.info(f"Cofactor is {cofactor_digits} digits (composite), running ECM to completion")
+            completion_factors = self._ecm_factor_completely(
+                current_composite, current_t_level, all_factors)
+            all_factors.extend(completion_factors)
+            final_results = {'success': True, 'method': 'ecm_completion'}
+        elif cofactor_digits < self.siqs_threshold:
             # Use YAFU SIQS for smaller cofactors
             self.logger.info(f"Cofactor is {cofactor_digits} digits (composite), using YAFU SIQS")
             siqs_results = self.yafu.run_yafu_auto(
@@ -1115,6 +1201,9 @@ Examples:
   # Use YAFU SIQS for numbers < 100 digits (default)
   python3 aliquot_wrapper.py --start 276 --siqs-threshold 100
 
+  # No YAFU (e.g. macOS): finish small cofactors with GMP-ECM instead of SIQS
+  python3 aliquot_wrapper.py --start 276 --small-method ecm
+
   # Calculate with more iterations
   python3 aliquot_wrapper.py --start 1248 --max-iterations 50
 
@@ -1177,9 +1266,15 @@ Common test sequences:
     parser.add_argument('--factorizer', type=str, choices=['cado', 'hybrid'], default='hybrid',
                        help='Factorization strategy: cado (pure CADO-NFS) or hybrid (default: hybrid - uses ECM+CADO for large numbers)')
     parser.add_argument('--hybrid-threshold', type=int, default=100,
-                       help='Digit length threshold for hybrid ECM+CADO strategy (default: 100)')
+                       help='Skip ECM pretesting for cofactors below this many digits - they go '
+                            'straight to the final method (default: 100)')
     parser.add_argument('--siqs-threshold', type=int, default=100,
-                       help='Digit length threshold for using YAFU SIQS instead of CADO-NFS (default: 100)')
+                       help='Final-method selector: cofactors below this many digits use YAFU SIQS '
+                            '(or ECM with --small-method ecm), larger ones use CADO-NFS (default: 100)')
+    parser.add_argument('--small-method', type=str, choices=['siqs', 'ecm'], default='siqs',
+                       help='How to finish cofactors below --siqs-threshold: siqs (YAFU) or ecm '
+                            '(GMP-ECM to completion; use on platforms without YAFU, e.g. macOS) '
+                            '(default: siqs)')
     parser.add_argument('--ecm-program', type=str, choices=['gmp-ecm', 'yafu'], default='gmp-ecm',
                        help='ECM program: gmp-ecm (progressive t-level) or yafu (intelligent pretest) (default: gmp-ecm)')
     parser.add_argument('--resume-factordb', action='store_true',
@@ -1213,7 +1308,8 @@ Common test sequences:
                                 siqs_threshold=args.siqs_threshold, ecm_program=args.ecm_program,
                                 threads=args.workers, verbose=args.verbose, use_two_stage=args.two_stage,
                                 max_batch_curves=args.max_batch, progress_interval=args.progress_interval,
-                                use_tracker=args.tracker, tracker_start=args.start)
+                                use_tracker=args.tracker, tracker_start=args.start,
+                                small_method=args.small_method)
     except ValueError as config_error:
         print(f"Error: {config_error}")
         sys.exit(1)

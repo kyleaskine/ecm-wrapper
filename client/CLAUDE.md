@@ -362,6 +362,19 @@ Supports: lowercase/uppercase e, decimals (2.6e8), explicit + sign (26e+7)
 - CADO-NFS failure detection prevents partial result submission
 - Early termination when cofactor is already prime
 
+### Aliquot Threshold Semantics + --small-method (2026-07)
+- **Bug fix**: the ECM-pretest exit check used `siqs_threshold`, leaving
+  `hybrid_threshold` entirely unused. Now: `--hybrid-threshold` = skip ECM
+  pretesting below this many digits; `--siqs-threshold` = final-method selector
+  (below → SIQS, at/above → CADO-NFS). Defaults (both 100) behave as before.
+- **`--small-method {siqs,ecm}`** (default siqs): with `ecm`, cofactors below
+  `siqs_threshold` are factored to completion with GMP-ECM instead of YAFU
+  SIQS — for platforms without YAFU (macOS). `_ecm_factor_completely()`
+  targets t = ceil(digits/2)+2 (past the largest possible smallest factor),
+  escalating +5 per empty pass; honors tracker sync/upload and Ctrl+C.
+- ECM factor recording now appends one entry per division so p^k passes the
+  final product-vs-n verification (was: recorded once, divided k times).
+
 ### Pipeline Batch Processing
 - No results submitted when stage 2 fails
 - `None` return from stage 2 means "no factor found" (success), not failure

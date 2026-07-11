@@ -341,11 +341,21 @@ def run_multiprocess_mode(wrapper, args, output: UserOutput, params: ResolvedPar
 
 def run_two_stage_mode(wrapper, args, output: UserOutput, params: ResolvedParams) -> FactorResult:
     """Two-stage Mode - GPU stage 1 + CPU stage 2 pipeline."""
-    # Calculate B2 from multiplier if not explicitly specified
+    import sys
+
+    # Resolve B2: explicit --b2, then dictionary lookup, then multiplier
+    # (same precedence as t-level mode's get_b2_for_b1)
     if args.b2 is not None:
         two_stage_b2 = args.b2
-    elif hasattr(args, 'b2_multiplier') and args.b2_multiplier is not None:
+    elif params.b2_dictionary and params.b1 in params.b2_dictionary:
+        two_stage_b2 = params.b2_dictionary[params.b1]
+    elif getattr(args, 'b2_multiplier', None) is not None:
         two_stage_b2 = int(params.b1 * args.b2_multiplier)
+    elif params.b2_dictionary is not None:
+        # Dictionary was the only B2 source but has no entry for this B1
+        output.error(f"B1 {params.b1} not found in B2 dictionary. "
+                     f"Add an entry for it or use --b2/--b2-multiplier.")
+        sys.exit(1)
     else:
         two_stage_b2 = None  # Use GMP-ECM default
 
