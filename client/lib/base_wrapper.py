@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable, TYPE_CHECKING
 
 from .typed_config import TypedConfigLoader
-from .api_client import APIClient
+from .api_client import APIClient, ResourceNotFoundError
 from .file_utils import save_json, load_json
 from .submission_queue import SubmissionQueue
 
@@ -274,6 +274,10 @@ class BaseWrapper:
         assert self.api_clients is not None  # For type checker
 
         result = SubmissionResult()
+        # Counted per attempt, NOT via endpoint_responses: that dict is keyed
+        # by config name, so duplicate names would collapse and misclassify
+        permanent_failures = 0
+        transient_failures = 0
 
         for api_client_info in self.api_clients:
             api_client = api_client_info['client']
@@ -293,10 +297,18 @@ class BaseWrapper:
                 else:
                     self.logger.warning(f"✗ Failed to submit to {endpoint_name}")
                     result.endpoint_responses[endpoint_name] = None
+                    transient_failures += 1
+
+            except ResourceNotFoundError as e:
+                # 404: the server doesn't know this composite - no retry can fix that
+                self.logger.error(f"✗ {endpoint_name} permanently rejected the result: {e}")
+                result.endpoint_responses[endpoint_name] = None
+                permanent_failures += 1
 
             except Exception as e:
                 self.logger.error(f"✗ Error submitting to {endpoint_name}: {str(e)}")
                 result.endpoint_responses[endpoint_name] = None
+                transient_failures += 1
 
         # Log summary if multiple endpoints
         if len(self.api_clients) > 1:
@@ -304,9 +316,14 @@ class BaseWrapper:
             total_count = len(result.endpoint_responses)
             self.logger.info(f"Submission summary: {success_count}/{total_count} endpoints succeeded")
 
-        # If all submissions failed, enqueue for automatic retry
+        # If all submissions failed, enqueue for automatic retry - unless every
+        # failure was a permanent rejection, which would just poison the queue
         if not result and save_on_failure:
-            self.submission_queue.enqueue_result(payload, results_context, completion_chain)
+            if permanent_failures and not transient_failures:
+                self.logger.warning(
+                    "Not queueing result for retry: every endpoint rejected it as unsubmittable")
+            else:
+                self.submission_queue.enqueue_result(payload, results_context, completion_chain)
 
         return result
 

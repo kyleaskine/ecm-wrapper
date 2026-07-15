@@ -18,7 +18,7 @@ import logging
 import time
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -32,6 +32,9 @@ class TrackerSequence:
     current_composite: Optional[str]
     status: str
     factordb_status: Optional[str]
+    # FactorDB-shaped [(factor, exponent), ...] for the current term, when
+    # the payload carries a well-formed knownFactors field
+    known_factors: Optional[List[Tuple[str, int]]] = None
 
 
 @dataclass
@@ -42,6 +45,31 @@ class TrackerSubmitResult:
     auto_advanced: bool = False
     sequence: Optional[TrackerSequence] = None
     error: Optional[str] = None
+
+
+def _parse_known_factors(raw: Any) -> Optional[List[Tuple[str, int]]]:
+    """The tracker's knownFactors JSON (FactorDB's [[factor, exponent], ...]
+    for the current term) as (digit-string, exponent) pairs, or None when the
+    field is absent or malformed - callers treat None as "no data" and fall
+    back to other sources rather than trusting a partial parse."""
+    if not isinstance(raw, list):
+        return None
+    factors: List[Tuple[str, int]] = []
+    for entry in raw:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            return None
+        value, exponent = entry
+        if isinstance(value, bool) or isinstance(exponent, bool):
+            return None
+        if not isinstance(value, (str, int)) or not isinstance(exponent, int):
+            return None
+        value_str = str(value)
+        # isdecimal, not isdigit: isdigit accepts characters like "²" that
+        # int() rejects, and the consumer converts these strings
+        if not value_str.isdecimal() or exponent < 1:
+            return None
+        factors.append((value_str, exponent))
+    return factors
 
 
 def _parse_sequence(data: Dict[str, Any]) -> Optional[TrackerSequence]:
@@ -57,6 +85,7 @@ def _parse_sequence(data: Dict[str, Any]) -> Optional[TrackerSequence]:
         current_composite=data.get('currentComposite'),
         status=data.get('status', ''),
         factordb_status=data.get('factordbStatus'),
+        known_factors=_parse_known_factors(data.get('knownFactors')),
     )
 
 

@@ -262,6 +262,20 @@ re-registers the next composite with the ECM server.
   factors found so far (trial division, earlier ECM) are pushed to the tracker
   so FactorDB and the ECM server's composite registration stay in lockstep with
   the working cofactor. Best-effort; failures never interrupt factorization.
+- `AliquotWrapper.factor_term()` — per-term known-factor reconciliation
+  (2026-07): before factoring each term (≥40 digits, submission mode only),
+  externally-known prime factors are divided out first. Tracker mode reads
+  `knownFactors` from `get_sequence()` (FactorDB-shaped `[[factor, exp], ...]`;
+  the tracker's cofactor is verified to divide the term), falling back to a
+  direct FactorDB `api?query` lookup; `--factordb` mode queries FactorDB
+  directly; offline runs make no network calls. This exists because FactorDB
+  trial-divides deeper than the local 10^7 bound, so the ECM server's
+  registered composite (the tracker's cofactor) can be smaller than what local
+  TD leaves — factoring the stale larger cofactor made every t-level
+  submission for the term unattributable (404 after a slow server-side scan).
+  Division runs while-divisible, so a wrong external report can't corrupt the
+  factorization. The `--resume-factordb` CF/FF resume logic now goes through
+  the same method.
 - **Fallback**: any tracker failure falls back to the direct FactorDB path
   (`submit_to_factordb`), which self-dedupes against FactorDB; the tracker's
   nightly sync catches up from there.
@@ -285,7 +299,9 @@ factordb:
 ```
 
 **Tests**: `tests/test_tracker_submission.py` (submission loop, multiplicity
-reduction, fallback signaling, config parsing).
+reduction, fallback signaling, config parsing);
+`tests/test_factor_term.py` (per-term reconciliation, knownFactors parsing,
+permanent-rejection queue behavior).
 
 ## Graceful Shutdown
 
@@ -315,6 +331,20 @@ B1/B2 parameters accept scientific notation: `--b1 26e7`, `--b2 4e11`
 Supports: lowercase/uppercase e, decimals (2.6e8), explicit + sign (26e+7)
 
 ## Recent Client Bug Fixes
+
+### Aliquot Terms Reconciled with Tracker/FactorDB Before Factoring (2026-07)
+- **Problem**: only the `--resume-factordb` resume term used FactorDB's known
+  factors; every later term was factored from local trial division (10^7)
+  alone. FactorDB trial-divides deeper, so the tracker registered a smaller
+  cofactor with the ECM server than the wrapper worked on — every ECM t-level
+  submission for the term failed (unknown composite → server's slow ancestry
+  scan → 30s read timeouts → a permanently unsubmittable entry queued in
+  `data/results/`), and ECM re-found factors FactorDB already knew.
+- **Fix**: `factor_term()` reconciles each term with the tracker/FactorDB
+  before factoring (see Aliquot Tracker Integration above), and
+  `submit_payload_to_endpoints()` (`lib/base_wrapper.py`) no longer enqueues a
+  result when every endpoint rejected it permanently (404 →
+  `ResourceNotFoundError`); mixed transient/permanent failures still queue.
 
 ### Stage-1 Residue Preserved on Result-Submission Failure (2026-07)
 - **Problem**: If the `/submit_result` call for a stage-1 batch failed transiently

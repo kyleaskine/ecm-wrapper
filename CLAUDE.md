@@ -210,6 +210,9 @@ via the aliquot tracker (`../aliquot-tracker`), which forwards them to FactorDB
 re-registers the new composite with this ECM server. Tracker mode also uploads ECM
 t-level progress to the ECM server (aliquot composites are registered as
 `aliquot:{start}:i{index}` with decimal `current_composite`, which submissions match).
+Each term is reconciled with the tracker's known factors before factoring
+(FactorDB trial-divides deeper than the local bound), keeping the working cofactor
+aligned with the registered `current_composite`.
 Falls back to direct FactorDB submission when the tracker is unavailable.
 Config: `aliquot_tracker` section in client.yaml. See `client/CLAUDE.md` for details.
 

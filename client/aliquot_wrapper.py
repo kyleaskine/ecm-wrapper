@@ -24,6 +24,10 @@ from lib.tracker_client import AliquotTrackerClient, TrackerSequence
 from cado_wrapper import CADOWrapper
 from yafu_wrapper import YAFUWrapper
 
+# Below this many digits a term factors locally in seconds, so the external
+# known-factor lookup (a tracker/FactorDB round-trip per term) isn't worth it
+KNOWN_FACTOR_LOOKUP_MIN_DIGITS = 40
+
 
 class AliquotSequence:
     """Represents an aliquot sequence with tracking and cycle detection."""
@@ -75,7 +79,8 @@ class AliquotWrapper(BaseWrapper):
                  siqs_threshold: int = 100, ecm_program: str = 'gmp-ecm', threads: Optional[int] = None,
                  verbose: bool = False, use_two_stage: bool = False, max_batch_curves: Optional[int] = None,
                  progress_interval: int = 0, use_tracker: bool = False,
-                 tracker_start: Optional[int] = None, small_method: str = 'siqs'):
+                 tracker_start: Optional[int] = None, small_method: str = 'siqs',
+                 use_factordb: bool = False):
         """Initialize aliquot wrapper with specified factorization engine.
 
         Args:
@@ -99,6 +104,8 @@ class AliquotWrapper(BaseWrapper):
             small_method: How to finish cofactors below siqs_threshold: 'siqs'
                 (YAFU SIQS) or 'ecm' (GMP-ECM to completion, for platforms
                 without YAFU such as macOS)
+            use_factordb: Factors are submitted directly to FactorDB; also
+                enables the per-term FactorDB known-factor lookup
         """
         super().__init__(config_path)
         self.config_path = config_path  # Store for lazy initialization of sub-wrappers
@@ -114,6 +121,7 @@ class AliquotWrapper(BaseWrapper):
         self.progress_interval = progress_interval
 
         self.use_tracker = use_tracker
+        self.use_factordb = use_factordb
         self.tracker_start = tracker_start
         # ECM t-level upload rides tracker mode (kept as a separate switch so
         # the two concerns stay independently controllable)
@@ -246,6 +254,191 @@ class AliquotWrapper(BaseWrapper):
 
         # Always use hybrid strategy (trial division + progressive ECM + CADO if needed)
         return self._factor_hybrid(n, digit_length)
+
+    def factor_term(self, n: int,
+                    known_factors: Optional[Dict[int, int]] = None
+                    ) -> Tuple[bool, Dict[int, int], Dict]:
+        """
+        Factor a sequence term, first dividing out externally-known factors.
+
+        FactorDB trial-divides deeper on ingest than our local 10^7 bound
+        (and may hold factors other people found), so a fresh term's known
+        cofactor is usually smaller than what local trial division leaves.
+        In tracker mode this is also a correctness requirement: the ECM
+        server's registered composite IS the tracker's cofactor, so working
+        on a larger stale cofactor would make every t-level submission for
+        the term unattributable.
+
+        Args:
+            n: Term to factor
+            known_factors: Pre-fetched externally-known prime factors
+                {prime: exponent} (the FactorDB resume path already has
+                them). None = query the configured source: tracker (falling
+                back to FactorDB) in tracker mode, FactorDB in factordb
+                mode, nothing otherwise so local runs stay offline.
+
+        Returns:
+            Tuple of (success, factorization_dict, raw_results) - same
+            contract as factor_number()
+        """
+        if known_factors is None:
+            known_factors = self._external_known_factors(n)
+
+        # Divide while divisible rather than trusting reported exponents -
+        # the resulting factorization is derived from n itself, so a wrong
+        # or stale external report can never corrupt it
+        cofactor = n
+        factorization: Dict[int, int] = {}
+        for prime in sorted(known_factors):
+            while cofactor % prime == 0:
+                cofactor //= prime
+                factorization[prime] = factorization.get(prime, 0) + 1
+
+        if not factorization:
+            return self.factor_number(n)
+
+        known_count = sum(factorization.values())
+        if cofactor == 1:
+            self.logger.info(
+                f"All {known_count} factor(s) already known externally - "
+                f"no local factoring needed")
+            return True, factorization, {'success': True, 'method': 'external_factors'}
+
+        self.logger.info(
+            f"Divided out {known_count} externally-known factor(s); "
+            f"C{len(str(cofactor))} cofactor remains")
+
+        if is_probably_prime(cofactor):
+            self.logger.info(
+                f"Remaining cofactor C{len(str(cofactor))} is prime - "
+                f"factorization complete")
+            factorization[cofactor] = factorization.get(cofactor, 0) + 1
+            return True, factorization, {'success': True,
+                                         'method': 'external_factors+primality'}
+
+        success, cofactor_factorization, results = self.factor_number(cofactor)
+        if not success:
+            return False, {}, results
+        for prime, exp in cofactor_factorization.items():
+            factorization[prime] = factorization.get(prime, 0) + exp
+
+        if self._factorization_product(factorization) != n:
+            self.logger.error(
+                f"Combined factorization verification failed for term "
+                f"({len(str(n))} digits)")
+            return False, {}, results
+        return True, factorization, results
+
+    def _external_known_factors(self, n: int) -> Dict[int, int]:
+        """
+        Prime factors of n already known to the configured submission
+        destination. Tracker mode asks the tracker (whose cofactor is what
+        the ECM server has registered), falling back to a direct FactorDB
+        query; factordb mode asks FactorDB. Best-effort: {} on any failure,
+        and a no-op without a submission destination (offline runs stay
+        offline).
+        """
+        if len(str(n)) < KNOWN_FACTOR_LOOKUP_MIN_DIGITS:
+            return {}
+        if not (self.use_tracker or self.use_factordb):
+            return {}
+        if self.use_tracker:
+            known = self._tracker_known_factors(n)
+            if known is not None:
+                return known
+            self.logger.info(
+                "Tracker couldn't provide known factors - querying FactorDB directly")
+        return self._factordb_known_factors(n) or {}
+
+    def _tracker_known_factors(self, n: int) -> Optional[Dict[int, int]]:
+        """
+        Known prime factors of term n from the tracker's view of the
+        sequence, or None when the tracker can't speak for this term
+        (unreachable, inactive, on a different term, or no knownFactors
+        payload) - the caller falls back to a direct FactorDB query.
+        """
+        if self.tracker is None or self.tracker_start is None:
+            return None
+        state = self.tracker.get_sequence(self.tracker_start)
+        if state is None:
+            return None
+        current = self._tracker_current_composite(state)
+        if state.status != 'active' or current is None:
+            return None
+        if n % current != 0:
+            self.logger.warning(
+                f"Tracker is on a different term (its C{len(str(current))} at "
+                f"index {state.current_index} does not divide this term) - "
+                f"not using its known factors")
+            return None
+        if state.known_factors is None:
+            return None
+        known: Dict[int, int] = {}
+        for value, exponent in state.known_factors:
+            try:
+                factor = int(value)
+            except ValueError:
+                # Parser-validated digits can still fail here (e.g. CPython's
+                # int-conversion length limit) - never crash a multi-hour run
+                self.logger.warning(
+                    f"Unusable factor value in tracker knownFactors "
+                    f"({len(value)} chars) - ignoring the payload")
+                return None
+            # The list mirrors FactorDB's factors array, which includes the
+            # remaining composite cofactor; keep only settled prime factors
+            if factor > 1 and is_probably_prime(factor):
+                known[factor] = known.get(factor, 0) + exponent
+        return known
+
+    def _factordb_api_get(self, url: str) -> Optional[Dict[str, Any]]:
+        """
+        GET a FactorDB API endpoint (api?query= / api?id=) with the auth
+        cookie and parse the JSON body. Returns None (warning logged) on
+        request or parse failure.
+        """
+        import requests
+
+        try:
+            response = requests.get(
+                url, cookies=self._factordb_cookies(), timeout=30)
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError) as e:
+            self.logger.warning(f"FactorDB API request failed: {e}")
+            return None
+        return data if isinstance(data, dict) else None
+
+    @staticmethod
+    def _factordb_factor_pairs(data: Dict[str, Any]) -> List[Tuple[int, int]]:
+        """
+        The response's factors array ([[value, exponent], ...]) as int
+        pairs, skipping malformed entries.
+        """
+        pairs: List[Tuple[int, int]] = []
+        for pair in data.get('factors') or []:
+            try:
+                pairs.append((int(pair[0]), int(pair[1])))
+            except (TypeError, ValueError, IndexError):
+                continue
+        return pairs
+
+    def _factordb_known_factors(self, n: int) -> Optional[Dict[int, int]]:
+        """
+        Prime factors of n that FactorDB already knows, via the api?query
+        endpoint. Returns {} when FactorDB knows no factor smaller than n,
+        None when the query itself failed (network/parse).
+        """
+        data = self._factordb_api_get(f"https://factordb.com/api?query={n}")
+        if data is None:
+            return None
+
+        known: Dict[int, int] = {}
+        for factor, exponent in self._factordb_factor_pairs(data):
+            # The factors array includes the remaining cofactor (and n itself
+            # for status C/P); keep only settled prime factors below n
+            if 1 < factor < n and is_probably_prime(factor):
+                known[factor] = known.get(factor, 0) + exponent
+        return known
 
     def _build_tlevel_config(self, composite: int, target_t_level: float,
                              start_t_level: float) -> TLevelConfig:
@@ -623,7 +816,7 @@ class AliquotWrapper(BaseWrapper):
         seq = AliquotSequence(start)
 
         # Factor the starting number
-        success, factorization, _ = self.factor_number(start)
+        success, factorization, _ = self.factor_term(start)
         if not success:
             self.logger.error("Failed to factor starting number")
             return seq
@@ -655,8 +848,8 @@ class AliquotWrapper(BaseWrapper):
                 seq.terminated = True
                 break
 
-            # Factor next term
-            success, factorization, results = self.factor_number(next_term)
+            # Factor next term (dividing out externally-known factors first)
+            success, factorization, results = self.factor_term(next_term)
             if not success:
                 self.logger.error(f"Failed to factor {next_term}, stopping sequence")
                 seq.add_term(next_term, {})
@@ -725,29 +918,25 @@ class AliquotWrapper(BaseWrapper):
 
             composite_id = id_match.group(1)
 
-            # Fetch full number from FactorDB API
+            # Fetch full number from FactorDB API (the auth cookie may help
+            # with rate limiting)
             api_url = f"https://factordb.com/api?id={composite_id}"
             self.logger.info(f"Fetching full number from FactorDB API (ID: {composite_id})...")
-
-            # Use cookie for authenticated requests (may help with rate limiting)
-            cookies = self._factordb_cookies()
-            api_response = requests.get(api_url, cookies=cookies, timeout=30)
-            api_response.raise_for_status()
-
-            api_result = api_response.json()
+            api_result = self._factordb_api_get(api_url)
+            if api_result is None:
+                return None
 
             # Extract composite number and factor info from API response
             # API returns: {"id": "...", "status": "C"/"CF"/"FF", "factors": [[prime, exp], ...]}
-            if 'factors' in api_result and api_result['factors']:
+            factor_pairs = self._factordb_factor_pairs(api_result)
+            if factor_pairs:
                 status = api_result.get('status', 'C')
 
                 # Reconstruct number and collect known factors
                 composite = 1
                 known_factors: Dict[int, int] = {}
 
-                for factor_pair in api_result['factors']:
-                    factor = int(factor_pair[0])
-                    exponent = int(factor_pair[1])
+                for factor, exponent in factor_pairs:
                     composite *= factor ** exponent
 
                     # Check if this factor is a proven prime (use Miller-Rabin)
@@ -990,19 +1179,17 @@ class AliquotWrapper(BaseWrapper):
             cookies = self._factordb_cookies()
 
             # Step 1: Query FactorDB to see what factors they already have
-            query_url = f"https://factordb.com/api?query={n}"
-            query_response = requests.get(query_url, cookies=cookies, timeout=30)
-            query_response.raise_for_status()
-            fdb_data = query_response.json()
+            fdb_data = self._factordb_api_get(f"https://factordb.com/api?query={n}")
+            if fdb_data is None:
+                self.logger.error(f"FactorDB submission aborted for {n}: existing-factor query failed")
+                print(f"  Error: Failed to submit to FactorDB - existing-factor query failed")
+                return False
 
             # Parse existing factors from FactorDB
             # Response format: {"id": "...", "status": "C"/"CF"/"FF", "factors": [["prime", exp], ...]}
             existing_factors: Dict[int, int] = {}
-            if 'factors' in fdb_data and fdb_data['factors']:
-                for factor_pair in fdb_data['factors']:
-                    prime = int(factor_pair[0])
-                    exp = int(factor_pair[1])
-                    existing_factors[prime] = existing_factors.get(prime, 0) + exp
+            for prime, exp in self._factordb_factor_pairs(fdb_data):
+                existing_factors[prime] = existing_factors.get(prime, 0) + exp
 
             # Step 2: Determine NEW factors to submit (exclude largest prime - the final cofactor)
             sorted_primes = sorted(factorization.keys())
@@ -1309,7 +1496,7 @@ Common test sequences:
                                 threads=args.workers, verbose=args.verbose, use_two_stage=args.two_stage,
                                 max_batch_curves=args.max_batch, progress_interval=args.progress_interval,
                                 use_tracker=args.tracker, tracker_start=args.start,
-                                small_method=args.small_method)
+                                small_method=args.small_method, use_factordb=args.factordb)
     except ValueError as config_error:
         print(f"Error: {config_error}")
         sys.exit(1)
@@ -1390,41 +1577,13 @@ Common test sequences:
                 seq.sequence.append(None)  # Placeholder for unknown intermediates
             seq.sequence.append(resume_composite)
 
-            # Factor the resume composite (using known factors from FactorDB if available)
-            if fdb_status == "FF" and fdb_known_factors:
-                # FactorDB says it's fully factored - use their factors directly
-                print(f"  Using FactorDB's complete factorization (no local factoring needed)")
-                factorization = fdb_known_factors.copy()
-                success = True
-            elif fdb_status == "CF" and fdb_known_factors:
-                # FactorDB has partial factorization - only factor the cofactor
-                cofactor = resume_composite
-                for p, e in fdb_known_factors.items():
-                    cofactor //= p ** e
-
-                if is_probably_prime(cofactor):
-                    # Cofactor is prime - we're done!
-                    print(f"  FactorDB's cofactor C{len(str(cofactor))} is prime - no factoring needed")
-                    factorization = fdb_known_factors.copy()
-                    factorization[cofactor] = 1
-                    success = True
-                else:
-                    # Factor only the cofactor
-                    print(f"  Factoring only the {len(str(cofactor))}-digit cofactor (FactorDB has {len(fdb_known_factors)} known factors)")
-                    success, cofactor_factorization, _ = wrapper.factor_number(cofactor)
-                    if success:
-                        # Combine known factors with cofactor factorization
-                        factorization = fdb_known_factors.copy()
-                        for p, e in cofactor_factorization.items():
-                            if p in factorization:
-                                factorization[p] += e
-                            else:
-                                factorization[p] = e
-                    else:
-                        factorization = {}
-            else:
-                # No useful info from FactorDB - factor from scratch
-                success, factorization, _ = wrapper.factor_number(resume_composite)
+            # Factor the resume composite, dividing out FactorDB's known
+            # factors first. --resume-factordb just fetched them; a manual
+            # resume passes None so factor_term queries the configured
+            # source (tracker/FactorDB) itself.
+            success, factorization, _ = wrapper.factor_term(
+                resume_composite,
+                known_factors=fdb_known_factors if args.resume_factordb else None)
 
             if success:
                 seq.factorizations[resume_composite] = factorization
@@ -1451,8 +1610,8 @@ Common test sequences:
                         seq.terminated = True
                         break
 
-                    # Factor next term
-                    success, factorization, results = wrapper.factor_number(next_term)
+                    # Factor next term (dividing out externally-known factors first)
+                    success, factorization, results = wrapper.factor_term(next_term)
                     if not success:
                         wrapper.logger.error(f"Failed to factor {next_term}, stopping")
                         seq.add_term(next_term, {})
