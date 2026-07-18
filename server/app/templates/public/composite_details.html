@@ -158,6 +158,7 @@
             <table>
                 <tr>
                     <th>Factor</th>
+                    <th>Digits</th>
                     <th>Method</th>
                     <th>Group Order</th>
                     <th>Factorization</th>
@@ -165,6 +166,7 @@
                 {% for f in all_factors %}
                 <tr>
                     <td class="number-display">{{ esc(f.factor) }}</td>
+                    <td>{{ f.factor|length }}</td>
                     <td>{% if f.sigma %}ECM (&sigma;={{ "{:,}".format(f.sigma|int) }}){% elif f.method %}{{ f.method|upper }}{% else %}N/A{% endif %}</td>
                     <td class="number-display">{{ esc(f.group_order) if f.group_order else "N/A" }}</td>
                     <td class="number-display">{{ esc(f.group_order_factorization) if f.group_order_factorization else "N/A" }}</td>

@@ -1,5 +1,6 @@
-from sqlalchemy.orm import Session, defer
+from sqlalchemy.orm import Session, Query, defer
 from sqlalchemy import and_, or_, func, desc
+from sqlalchemy.exc import IntegrityError
 from typing import Optional, Dict, Any, List, Tuple, Sequence, Literal, cast
 from datetime import datetime, timedelta
 import uuid
@@ -8,9 +9,11 @@ import logging
 from ..models.composites import Composite
 from ..models.attempts import ECMAttempt
 from ..models.work_assignments import WorkAssignment
+from ..models.residues import ECMResidue
 from ..schemas.work import WorkRequest, WorkResponse
 from .t_level_calculator import TLevelCalculator
 from ..constants import ECM_BOUNDS, ACTIVE_WORK_STATUSES
+from ..utils.transactions import is_unique_violation
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +158,82 @@ class ECMParameterDecision:
         return self.ECM_BOUNDS[-1][1], self.ECM_BOUNDS[-1][2], 100
 
 
+# Markers identifying a violation of the one-active-assignment-per-composite
+# partial unique index (PostgreSQL index name / SQLite message form)
+UNIQUE_ACTIVE_WORK_MARKERS = (
+    'uq_work_assignments_one_active_per_composite',
+    'work_assignments.composite_id',
+)
+
+
+def pick_and_lock_composite(
+    db: Session, ordered_query: Query, check_residues: bool, max_attempts: int = 5
+) -> Optional[Composite]:
+    """
+    Lock a candidate composite and re-verify it is still free.
+
+    FOR UPDATE SKIP LOCKED only prevents double assignment while the
+    competing request still holds its row lock. Under READ COMMITTED the
+    NOT EXISTS filters in `ordered_query` are evaluated against the
+    statement snapshot: if a competing request commits while our SELECT is
+    executing, its work_assignments INSERT is invisible to our snapshot and
+    its row lock is already released, so the same composite is picked again
+    (observed in production: two /ecm-work requests 16 ms apart were both
+    assigned the same composite).
+
+    Every assignment writer holds the composite row lock until commit, so
+    once we hold the lock, fresh statements (new snapshot) are guaranteed
+    to see any competing committed assignment. Re-check here and move to
+    the next candidate on conflict. Rejected candidates stay locked until
+    this transaction ends, which is harmless - they are busy anyway.
+
+    The recheck costs up to two indexed point lookups on the no-contention
+    path. That is deliberate: without it, losing the race means the client
+    gets a spurious "no work" (via the unique-index backstop) instead of
+    the next free composite.
+
+    Args:
+        db: Database session
+        ordered_query: Filtered and ordered Composite query (must already
+            exclude busy composites; the recheck mirrors those exclusions)
+        check_residues: Also re-check for pending residues (stage 1 done,
+            stage 2 pending) - used by /ecm-work but not /p1-work
+        max_attempts: Candidates to try before giving up (bounds lock
+            accumulation within one request)
+
+    Returns:
+        A locked, conflict-free Composite, or None if none available
+    """
+    tried_ids: list[int] = []
+    for _ in range(max_attempts):
+        candidate_query = ordered_query
+        if tried_ids:
+            candidate_query = candidate_query.filter(Composite.id.notin_(tried_ids))
+        candidate = candidate_query.with_for_update(skip_locked=True, of=Composite).first()
+        if candidate is None:
+            return None
+
+        conflict = db.query(WorkAssignment.id).filter(
+            WorkAssignment.composite_id == candidate.id,
+            WorkAssignment.status.in_(ACTIVE_WORK_STATUSES)
+        ).first() is not None
+        if not conflict and check_residues:
+            conflict = db.query(ECMResidue.id).filter(
+                ECMResidue.composite_id == candidate.id,
+                ECMResidue.status.in_(['available', 'claimed'])
+            ).first() is not None
+
+        if not conflict:
+            return candidate
+
+        logger.info(
+            f"Composite {candidate.id} became busy after selection "
+            f"(lost assignment race); trying next candidate"
+        )
+        tried_ids.append(candidate.id)
+    return None
+
+
 class WorkAssignmentService:
     """Service for managing work assignments and distribution."""
 
@@ -190,8 +269,12 @@ class WorkAssignmentService:
         # Clean up expired work assignments
         self._cleanup_expired_work(db)
 
-        # Find suitable composite for work
-        composite = self._find_suitable_composite(db, work_request)
+        # Find a suitable composite: lock the row and re-verify it is still
+        # free (the query's NOT EXISTS exclusion can be stale when a
+        # concurrent request commits mid-query - see pick_and_lock_composite)
+        composite = pick_and_lock_composite(
+            db, self._suitable_composite_query(db, work_request), check_residues=False
+        )
         if not composite:
             return WorkResponse(message="No suitable work available")
 
@@ -209,10 +292,22 @@ class WorkAssignmentService:
         if not method or parameters is None:
             return WorkResponse(message="No suitable method available for this composite")
 
-        # Create work assignment
-        work_assignment = self._create_work_assignment(
-            db, composite, work_request.client_id, method, parameters
-        )
+        # Create work assignment. The recheck above should make a duplicate
+        # unreachable, but the partial unique index is the final arbiter:
+        # fail soft as "no work" (client re-requests) instead of a 500.
+        try:
+            with db.begin_nested():
+                work_assignment = self._create_work_assignment(
+                    db, composite, work_request.client_id, method, parameters
+                )
+        except IntegrityError as e:
+            if not is_unique_violation(e, *UNIQUE_ACTIVE_WORK_MARKERS):
+                raise
+            logger.warning(
+                f"Lost assignment race on composite {composite.id} at insert "
+                f"(client {work_request.client_id}); returning no-work"
+            )
+            return WorkResponse(message="Lost assignment race, please request again")
 
         # Cast method to Literal type since it's already validated
         typed_method = cast(Literal["ecm", "pm1", "pp1", "qs", "nfs"], method)
@@ -241,8 +336,8 @@ class WorkAssignmentService:
         if expired_work:
             db.flush()  # Make changes visible within transaction
 
-    def _find_suitable_composite(self, db: Session, work_request: WorkRequest) -> Optional[Composite]:
-        """Find a composite suitable for the client's capabilities."""
+    def _suitable_composite_query(self, db: Session, work_request: WorkRequest) -> Query:
+        """Build the filtered, ordered query for assignable composites."""
         query = db.query(Composite).filter(
             and_(
                 Composite.is_active == True,  # Only assign active composites
@@ -264,12 +359,10 @@ class WorkAssignmentService:
         ).correlate(Composite).exists())
 
         # Order by priority: smaller numbers first, then by creation time
-        composite = query.order_by(
+        return query.order_by(
             Composite.digit_length.asc(),
             Composite.created_at.asc()
-        ).first()
-
-        return composite
+        )
 
     def _determine_work_parameters(self, composite: Composite, previous_attempts: List[ECMAttempt],
                                  preferred_methods: Sequence[str]) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:

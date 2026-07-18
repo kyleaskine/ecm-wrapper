@@ -146,8 +146,14 @@ def create_work_assignment(composite_id: int, client_id: str,
                            method: str = "ecm",
                            work_id: str = "wa-test-0001",
                            b1: int = 50000, b2: int = 5000000,
-                           curves: int = 100) -> str:
-    """Helper to create a work assignment in the test database."""
+                           curves: int = 100,
+                           status: str = "assigned") -> str:
+    """Helper to create a work assignment in the test database.
+
+    Note: at most one ACTIVE (assigned/claimed/running) assignment may exist
+    per composite - enforced by a partial unique index. Pass an inactive
+    status (e.g. 'completed') to stack multiple assignments on one composite.
+    """
     from datetime import datetime, timedelta
     _, TestingSessionLocal = get_test_engine()
     db = TestingSessionLocal()
@@ -161,6 +167,7 @@ def create_work_assignment(composite_id: int, client_id: str,
             b2=b2,
             curves_requested=curves,
             expires_at=datetime.utcnow() + timedelta(days=1),
+            status=status,
         )
         db.add(assignment)
         db.commit()

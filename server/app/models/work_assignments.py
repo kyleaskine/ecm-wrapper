@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from typing import Optional, TYPE_CHECKING
-from sqlalchemy import String, ForeignKey, DateTime, Text, Index, BigInteger
+from sqlalchemy import String, ForeignKey, DateTime, Text, Index, BigInteger, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .base import Base, TimestampMixin
 
@@ -70,4 +70,16 @@ class WorkAssignment(Base, TimestampMixin):
         Index('ix_work_assignments_status_priority', 'status', 'priority'),
         Index('ix_work_assignments_expires_at', 'expires_at'),
         Index('ix_work_assignments_composite_method', 'composite_id', 'method'),
+        # At most one active assignment per composite. The work-request
+        # endpoints exclude busy composites with NOT EXISTS filters, but those
+        # are evaluated against the statement snapshot and can be stale when
+        # a concurrent request commits mid-query, so the database must be the
+        # final arbiter.
+        Index(
+            'uq_work_assignments_one_active_per_composite',
+            'composite_id',
+            unique=True,
+            postgresql_where=text("status IN ('assigned', 'claimed', 'running')"),
+            sqlite_where=text("status IN ('assigned', 'claimed', 'running')"),
+        ),
     )

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
 from sqlalchemy.orm import Session, defer
 from sqlalchemy import and_, or_, case, func
+from sqlalchemy.exc import IntegrityError
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 import uuid
@@ -16,7 +17,8 @@ from ...models.work_assignments import WorkAssignment
 from ...models.residues import ECMResidue
 from ...models.projects import Project, ProjectComposite
 from ...services.t_level_calculator import TLevelCalculator
-from ...utils.transactions import transaction_scope
+from ...services.work_assignment import pick_and_lock_composite, UNIQUE_ACTIVE_WORK_MARKERS
+from ...utils.transactions import transaction_scope, is_unique_violation
 from ...config import get_settings
 from ...constants import ECM_BOUNDS, OPTIMAL_B1_TABLE, get_b1_above_tlevel, ACTIVE_WORK_STATUSES
 
@@ -29,6 +31,24 @@ def _json_response(data: Dict[str, Any]) -> Response:
     """Return a JSON response with consistent formatting."""
     content = json.dumps(data, default=str) + "\n"
     return Response(content=content, media_type="application/json")
+
+
+def _no_work_response(message: str, include_p1_fields: bool = False) -> Response:
+    """Uniform empty-work payload for /ecm-work and /p1-work."""
+    data: Dict[str, Any] = {
+        "work_id": None,
+        "composite_id": None,
+        "composite": None,
+        "digit_length": None,
+        "current_t_level": None,
+        "target_t_level": None,
+        "expires_at": None,
+        "message": message,
+    }
+    if include_p1_fields:
+        data["pm1_b1"] = None
+        data["pp1_b1"] = None
+    return _json_response(data)
 
 
 @router.get("/ecm-work")
@@ -88,17 +108,10 @@ def get_ecm_work(
         ).count()
 
         if active_work_count >= settings.max_work_items_per_client:
-            response_data: Dict[str, Any] = {
-                "work_id": None,
-                "composite_id": None,
-                "composite": None,
-                "digit_length": None,
-                "current_t_level": None,
-                "target_t_level": None,
-                "expires_at": None,
-                "message": f"Client has {active_work_count} active work assignments (max: {settings.max_work_items_per_client})"
-            }
-            return _json_response(response_data)
+            return _no_work_response(
+                f"Client has {active_work_count} active work assignments "
+                f"(max: {settings.max_work_items_per_client})"
+            )
 
         # Build query for suitable composites
         # current_t_level now includes prior_t_level (calculated using -w flag)
@@ -155,36 +168,29 @@ def get_ecm_work(
             ECMResidue.status.in_(['available', 'claimed'])
         ).correlate(Composite).exists())
 
-        # Apply sorting strategy based on work_type.
-        # FOR UPDATE SKIP LOCKED holds the row until the WorkAssignment INSERT
-        # commits, so two concurrent requests can't both pick the same composite.
+        # Apply sorting strategy based on work_type
         if work_type == "progressive":
             # Progressive: prioritize composites with least ECM work done
-            composite = query.order_by(
+            query = query.order_by(
                 Composite.current_t_level.asc(),
                 Composite.target_t_level.asc(),
                 Composite.digit_length.asc()
-            ).with_for_update(skip_locked=True, of=Composite).first()
+            )
         else:  # "standard"
             # Standard: prioritize easiest composites first (by target t-level, which accounts for SNFS)
-            composite = query.order_by(
+            query = query.order_by(
                 Composite.target_t_level.asc(),
                 Composite.created_at.asc()
-            ).with_for_update(skip_locked=True, of=Composite).first()
+            )
+
+        # Lock the chosen row and re-verify it is still free (the NOT EXISTS
+        # filters above can be stale when a concurrent request commits
+        # mid-query - see pick_and_lock_composite)
+        composite = pick_and_lock_composite(db, query, check_residues=True)
 
         # No work available
         if not composite:
-            response_data = {
-                "work_id": None,
-                "composite_id": None,
-                "composite": None,
-                "digit_length": None,
-                "current_t_level": None,
-                "target_t_level": None,
-                "expires_at": None,
-                "message": "No suitable work available matching criteria"
-            }
-            return _json_response(response_data)
+            return _no_work_response("No suitable work available matching criteria")
 
         # Calculate suggested ECM parameters using t-level targeting
         # Note: target_t_level is guaranteed non-None by the filter above
@@ -227,8 +233,22 @@ def get_ecm_work(
             status='assigned'
         )
 
-        db.add(work_assignment)
-        db.flush()
+        # The recheck under lock should make a duplicate unreachable, but the
+        # partial unique index is the final arbiter: fail soft as "no work"
+        # (client re-requests) instead of a 500. Savepoint keeps the session
+        # usable after a rejected flush.
+        try:
+            with db.begin_nested():
+                db.add(work_assignment)
+                db.flush()
+        except IntegrityError as e:
+            if not is_unique_violation(e, *UNIQUE_ACTIVE_WORK_MARKERS):
+                raise
+            logger.warning(
+                f"Lost assignment race on composite {composite.id} at insert "
+                f"(client {client_id}); returning no-work"
+            )
+            return _no_work_response("Lost assignment race, please request again")
 
         prior_t = composite.prior_t_level
         current_t = composite.current_t_level
@@ -383,19 +403,11 @@ def get_p1_work(
         ).count()
 
         if active_work_count >= settings.max_work_items_per_client:
-            response_data: Dict[str, Any] = {
-                "work_id": None,
-                "composite_id": None,
-                "composite": None,
-                "digit_length": None,
-                "current_t_level": None,
-                "target_t_level": None,
-                "pm1_b1": None,
-                "pp1_b1": None,
-                "expires_at": None,
-                "message": f"Client has {active_work_count} active work assignments (max: {settings.max_work_items_per_client})"
-            }
-            return _json_response(response_data)
+            return _no_work_response(
+                f"Client has {active_work_count} active work assignments "
+                f"(max: {settings.max_work_items_per_client})",
+                include_p1_fields=True
+            )
 
         # Build candidate query - no ecm_progress filter (PM1/PP1 valuable regardless)
         query = db.query(Composite).filter(
@@ -463,24 +475,16 @@ def get_p1_work(
                 Composite.created_at.asc()
             )
 
-        # Lock the chosen row until the WorkAssignment INSERT commits so
-        # concurrent /p1-work callers can't both claim the same composite.
-        assigned_composite = query.with_for_update(skip_locked=True, of=Composite).first()
+        # Lock the chosen row and re-verify it is still free (the NOT EXISTS
+        # filter above can be stale when a concurrent request commits
+        # mid-query - see pick_and_lock_composite)
+        assigned_composite = pick_and_lock_composite(db, query, check_residues=False)
 
         if not assigned_composite:
-            response_data = {
-                "work_id": None,
-                "composite_id": None,
-                "composite": None,
-                "digit_length": None,
-                "current_t_level": None,
-                "target_t_level": None,
-                "pm1_b1": None,
-                "pp1_b1": None,
-                "expires_at": None,
-                "message": "No composites need P-1/P+1 work matching criteria"
-            }
-            return _json_response(response_data)
+            return _no_work_response(
+                "No composites need P-1/P+1 work matching criteria",
+                include_p1_fields=True
+            )
 
         # Compute B1 for the assigned composite
         computed_b1 = get_b1_above_tlevel(assigned_composite.target_t_level or 35.0)
@@ -501,8 +505,22 @@ def get_p1_work(
             status='assigned'
         )
 
-        db.add(work_assignment)
-        db.flush()
+        # See /ecm-work: unique index is the final arbiter; fail soft
+        try:
+            with db.begin_nested():
+                db.add(work_assignment)
+                db.flush()
+        except IntegrityError as e:
+            if not is_unique_violation(e, *UNIQUE_ACTIVE_WORK_MARKERS):
+                raise
+            logger.warning(
+                f"Lost assignment race on composite {assigned_composite.id} at insert "
+                f"(client {client_id}); returning no-work"
+            )
+            return _no_work_response(
+                "Lost assignment race, please request again",
+                include_p1_fields=True
+            )
 
         logger.info(
             f"Created P1 work assignment {work_id} for client {client_id}: "

@@ -7,6 +7,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from ....database import get_db
 from ....dependencies import verify_admin_key, get_composite_service
@@ -14,7 +15,8 @@ from ....services.composites import CompositeService
 from ....schemas.work import ManualReservationRequest, ManualReservationResponse
 from ....utils.serializers import serialize_work_assignment
 from ....utils.query_helpers import get_recent_work_assignments, get_expired_work_assignments
-from ....utils.transactions import transaction_scope
+from ....services.work_assignment import UNIQUE_ACTIVE_WORK_MARKERS
+from ....utils.transactions import transaction_scope, is_unique_violation
 from ....utils.errors import get_or_404
 from ....constants import ACTIVE_WORK_STATUSES
 
@@ -134,10 +136,22 @@ def reserve_composite(
         ManualReservationResponse with reservation details
     """
     from ....models.work_assignments import WorkAssignment
+    from ....models.composites import Composite
 
     # Look up the composite
     composite = get_or_404(
         composite_service.find_composite_by_identifier(db, request.composite_identifier),
+        "Composite",
+        request.composite_identifier
+    )
+
+    # Lock the composite row through commit, upholding the invariant the work
+    # endpoints' recheck relies on: every assignment writer holds this lock,
+    # so the reserved-check below and the INSERT are race-free. Blocks briefly
+    # if a work endpoint is assigning this composite right now.
+    composite = get_or_404(
+        db.query(Composite).filter(Composite.id == composite.id)
+        .with_for_update().first(),
         "Composite",
         request.composite_identifier
     )
@@ -159,20 +173,30 @@ def reserve_composite(
     work_id = str(uuid.uuid4())
     expires_at = datetime.utcnow() + timedelta(hours=request.duration_hours)
 
-    with transaction_scope(db, "reserve_composite"):
-        assignment = WorkAssignment(
-            id=work_id,
-            composite_id=composite.id,
-            client_id=request.client_id,
-            method=request.method,
-            b1=0,  # Not applicable for NFS
-            b2=None,
-            curves_requested=0,  # Not applicable for NFS
-            expires_at=expires_at,
-            status='running',  # Mark as running to indicate active work
-            assigned_at=datetime.utcnow()
+    try:
+        with transaction_scope(db, "reserve_composite"):
+            assignment = WorkAssignment(
+                id=work_id,
+                composite_id=composite.id,
+                client_id=request.client_id,
+                method=request.method,
+                b1=0,  # Not applicable for NFS
+                b2=None,
+                curves_requested=0,  # Not applicable for NFS
+                expires_at=expires_at,
+                status='running',  # Mark as running to indicate active work
+                assigned_at=datetime.utcnow()
+            )
+            db.add(assignment)
+    except IntegrityError as e:
+        # Backstop only - the row lock above serializes writers, so this
+        # should be unreachable; the partial unique index is the final arbiter
+        if not is_unique_violation(e, *UNIQUE_ACTIVE_WORK_MARKERS):
+            raise
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Composite was assigned to a client concurrently; reservation not created"
         )
-        db.add(assignment)
 
     return ManualReservationResponse(
         work_id=work_id,

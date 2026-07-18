@@ -673,8 +673,11 @@ class TestWorkIdResolution:
         """A genuine assignment's work_id remains part of the identity:
         distinct real assignments are distinct work."""
         composite = create_composite(self.PQR)
+        # First assignment finished; only one may be ACTIVE per composite
+        # (partial unique index), and submit only checks work_id existence
         wid_a = create_work_assignment(
-            composite["id"], "stale-test-client", work_id="wa-real-a"
+            composite["id"], "stale-test-client", work_id="wa-real-a",
+            status="completed"
         )
         wid_b = create_work_assignment(
             composite["id"], "stale-test-client", work_id="wa-real-b"

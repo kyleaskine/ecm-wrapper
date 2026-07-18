@@ -150,6 +150,32 @@ Discovered factors with discovery methods:
 
 ## Recent Server Bug Fixes
 
+### Duplicate Work Assignment Race (2026-07)
+- **Problem**: Two `/ecm-work` requests 16 ms apart were both assigned the same
+  composite (two GPU stage-1 producers in lockstep). Under READ COMMITTED the
+  NOT EXISTS exclusion of busy composites is evaluated against the statement
+  snapshot; `FOR UPDATE SKIP LOCKED` only helps while the competing transaction
+  still *holds* the row lock. If request A commits mid-way through request B's
+  SELECT, A's `work_assignments` INSERT is invisible to B's snapshot, A's row
+  lock is already released, and the composite row itself was never modified so
+  no EvalPlanQual recheck fires — B assigns the composite again.
+- **Fix (code)**: `pick_and_lock_composite()` (`app/services/work_assignment.py`) —
+  after locking the candidate, re-check active assignments (and pending
+  residues for `/ecm-work`) with *fresh statements*. Every assignment writer
+  holds the composite row lock until commit, so once we hold the lock a fresh
+  snapshot is guaranteed to see a committed competitor; on conflict move to the
+  next candidate. Used by `/ecm-work`, `/p1-work`, and the legacy `/work`
+  service (`WorkAssignmentService`, which previously had no locking at all);
+  the admin manual reservation takes a plain `FOR UPDATE` on the composite row
+  so every assignment writer upholds the invariant.
+- **Fix (schema)**: partial unique index
+  `uq_work_assignments_one_active_per_composite` on
+  `work_assignments (composite_id) WHERE status IN ('assigned','claimed','running')`
+  (migration `e5b1c9d7a2f4`) — at most one active assignment per composite,
+  regardless of code path. Insert sites catch the unique violation and fail
+  soft ("no work" for clients; 409 for the admin manual reservation).
+- **Tests**: `tests/test_work_assignment_race.py`
+
 ### Residue Upload for Stale Composites (2026-06)
 - **Problem**: Uploading a residue whose `stage1_attempt_id` had been deleted
   (composite factored/cleaned up) violated the FK at `flush()`. The `IntegrityError`
