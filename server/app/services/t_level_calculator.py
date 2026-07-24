@@ -311,42 +311,47 @@ class TLevelCalculator:
                 f"(starting_t_level={starting_t_level})"
             )
 
-            curve_strings = []
+            # Aggregate curves by (B1, B2, parametrization) before formatting.
+            # The t-level of N batches at identical bounds equals one batch of
+            # the summed curves - ECM curves are independent trials with the
+            # same per-curve success probability, so P(no factor) is
+            # (1-p)^(total curves) regardless of how the curves are grouped.
+            # Collapsing keeps the binary's input O(distinct bound-classes)
+            # instead of O(attempts): a composite hammered with hundreds of
+            # identical stage-1 batches otherwise builds a multi-KB curve
+            # string that the binary must parse - all while the caller holds
+            # the composite row lock. B2 None (GMP-ECM default) and B2 0
+            # (stage 1 only) are distinct work and never merge.
+            aggregated_curves: Dict[tuple, int] = {}
             for attempt in attempts:
-                if attempt.curves_completed > 0:
-                    # Validate required fields
-                    if attempt.b1 is None or attempt.b1 <= 0:
-                        logger.error(
-                            f"Skipping attempt with invalid B1: {attempt.b1} "
-                            f"(attempt_id={attempt.id if hasattr(attempt, 'id') else 'unknown'})"
-                        )
-                        continue
+                if attempt.curves_completed <= 0:
+                    continue
+                # Validate required fields
+                if attempt.b1 is None or attempt.b1 <= 0:
+                    logger.error(
+                        f"Skipping attempt with invalid B1: {attempt.b1} "
+                        f"(attempt_id={attempt.id if hasattr(attempt, 'id') else 'unknown'})"
+                    )
+                    continue
 
-                    # Format: curves@B1[,B2][,param]
-                    # Format numbers to avoid decimals in scientific notation (use 11e7 not 1.1e+08)
-                    b1_str = self._format_number_for_tlevel(attempt.b1)
+                # Use actual parametrization from attempt, default to 3 if not set
+                param = attempt.parametrization if attempt.parametrization is not None else 3
+                key = (attempt.b1, attempt.b2, param)
+                aggregated_curves[key] = aggregated_curves.get(key, 0) + attempt.curves_completed
 
-                    # Build curve string - omit B2 if None (let t-level use GMP-ECM default)
-                    # Use actual parametrization from attempt, default to 3 if not set
-                    param = str(attempt.parametrization) if attempt.parametrization is not None else "3"
+            curve_strings = []
+            for (b1, b2, param), curves in aggregated_curves.items():
+                # Format: curves@B1[,B2],p=param
+                # Format numbers to avoid decimals in scientific notation (use 11e7 not 1.1e+08)
+                b1_str = self._format_number_for_tlevel(b1)
 
-                    if attempt.b2 is not None:
-                        b2_str = self._format_number_for_tlevel(attempt.b2)
-                        curve_str = f"{attempt.curves_completed}@{b1_str},{b2_str},p={param}"
-                    else:
-                        # No B2 specified - let t-level binary use GMP-ECM defaults
-                        curve_str = f"{attempt.curves_completed}@{b1_str},p={param}"
-
-                    # Validate curve string before adding
-                    if curve_str and curve_str.strip():
-                        curve_strings.append(curve_str)
-                    else:
-                        logger.error(
-                            f"Skipping invalid curve string for attempt: "
-                            f"curves={attempt.curves_completed}, b1={attempt.b1}, "
-                            f"b2={attempt.b2}, param={attempt.parametrization}, "
-                            f"curve_str='{curve_str}'"
-                        )
+                # Omit B2 if None (let t-level use GMP-ECM default)
+                if b2 is not None:
+                    b2_str = self._format_number_for_tlevel(b2)
+                    curve_strings.append(f"{curves}@{b1_str},{b2_str},p={param}")
+                else:
+                    # No B2 specified - let t-level binary use GMP-ECM defaults
+                    curve_strings.append(f"{curves}@{b1_str},p={param}")
 
             if not curve_strings:
                 return starting_t_level
@@ -480,7 +485,13 @@ class TLevelCalculator:
                 leftover_attempt = LeftoverCurves(
                     leftover,
                     stage1.b1,
-                    stage1.parametrization or 3,
+                    # Preserve the real parametrization: 0 is a valid value, so
+                    # `or 3` collapsed genuine param-0 leftovers into 3 - costing
+                    # them with the wrong probability model and (post-aggregation)
+                    # merging them into the p=3 bucket. None normalizes to 3
+                    # downstream, same as real attempts; the residue-leftover path
+                    # below already passes the raw value.
+                    stage1.parametrization,
                     f"attempt {stage1.id}"
                 )
                 attempts.append(leftover_attempt)
