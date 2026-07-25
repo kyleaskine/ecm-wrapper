@@ -1233,19 +1233,73 @@ class TestConcurrentUploadGuard:
 
         assert len(list(tmp_path.rglob("*.txt"))) == 1
 
-    def test_non_checksum_integrity_error_not_masked(self, db_session, tmp_path):
-        """A foreign-key failure (invalid stage1_attempt_id) must surface
-        as an IntegrityError, not be misreported as a concurrent duplicate;
-        the written file is still cleaned up."""
-        from sqlalchemy.exc import IntegrityError
-
+    def test_dangling_stage1_attempt_rejected_before_writing(
+            self, db_session, tmp_path):
+        """A stage1_attempt_id that no longer exists is rejected up front
+        with a ValueError (-> 400, so the client discards) rather than
+        reaching the insert and surfacing as an opaque 500. Nothing is
+        written for it."""
         create_composite(str(self.COMPOSITE_INT))
         manager = self._manager(tmp_path)
+
+        with pytest.raises(ValueError, match="no longer exists"):
+            manager.store_residue_file(
+                db_session, self._residue_content(), "uploader-1",
+                stage1_attempt_id=999999
+            )
+        db_session.rollback()
+
+        assert list(tmp_path.rglob("*.txt")) == []
+
+    def test_non_checksum_integrity_error_not_masked(
+            self, db_session, tmp_path, monkeypatch):
+        """A non-checksum IntegrityError (here a foreign-key failure) must
+        surface as what it is, not be misreported as a concurrent
+        duplicate; the written file is still cleaned up.
+
+        The pre-check above rejects an already-dangling stage1_attempt_id
+        before anything is written, so reaching the IntegrityError branch
+        takes the race the pre-check cannot close: the attempt is deleted
+        after the check passes but before the insert flushes.
+        """
+        from sqlalchemy.exc import IntegrityError
+        from app.services.residue_manager import ResidueManager
+
+        composite = create_composite(str(self.COMPOSITE_INT))
+        manager = self._manager(tmp_path)
+
+        attempt = ECMAttempt(
+            composite_id=composite["id"],
+            client_id="gpu-producer",
+            method="ecm",
+            b1=50000,
+            b2=0,
+            parametrization=3,
+            curves_requested=100,
+            curves_completed=100,
+            program="gmp-ecm",
+        )
+        db_session.add(attempt)
+        db_session.flush()
+        attempt_id = attempt.id
+
+        # _find_duplicate_residue runs after the stage-1 pre-check and
+        # before the file write, so it is the seam for landing the delete
+        # inside the race window.
+        def drop_attempt_and_report_no_duplicate(self, db, checksum):
+            db.query(ECMAttempt).filter(ECMAttempt.id == attempt_id).delete()
+            db.flush()
+            return None
+
+        monkeypatch.setattr(
+            ResidueManager, "_find_duplicate_residue",
+            drop_attempt_and_report_no_duplicate
+        )
 
         with pytest.raises(IntegrityError):
             manager.store_residue_file(
                 db_session, self._residue_content(), "uploader-1",
-                stage1_attempt_id=999999
+                stage1_attempt_id=attempt_id
             )
         db_session.rollback()
 
