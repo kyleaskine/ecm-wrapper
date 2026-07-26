@@ -108,7 +108,7 @@ async def admin_login_page(request: Request):
     """
     Admin login page - prompts for API key and redirects to dashboard.
     """
-    return templates.TemplateResponse("admin/login.html", {"request": request})
+    return templates.TemplateResponse(request, "admin/login.html")
 
 
 @router.get("/dashboard", response_class=HTMLResponse)
@@ -133,8 +133,7 @@ def admin_dashboard(
     recent_attempts, _ = get_aggregated_attempts(db, limit=50, attempts_per_composite=0)
 
     # Return template response
-    return templates.TemplateResponse("admin/dashboard.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "admin/dashboard.html", {
         "summary_stats": summary_stats,
         "recent_work": recent_work,
         "composites": composites,

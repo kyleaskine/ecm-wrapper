@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sys
+from typing import cast
 
 # Raise Python 3.11+ integer string conversion limit for large composites
 # Default is 4300 digits; ECM works with numbers that can exceed this
@@ -12,6 +13,7 @@ from fastapi.responses import HTMLResponse, Response, JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ExceptionHandler
 
 from .config import get_settings
 from .dependencies import AdminAuthRedirect
@@ -82,7 +84,13 @@ app = FastAPI(
 
 # Add rate limiter to app state
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# slowapi types its handler as taking RateLimitExceeded, but starlette types
+# the registry as taking Exception, so the narrower signature is not assignable.
+# Correct at runtime -- starlette only dispatches this handler for the
+# exception class it is registered against.
+app.add_exception_handler(
+    RateLimitExceeded, cast(ExceptionHandler, _rate_limit_exceeded_handler)
+)
 
 # Admin HTML auth redirect: when a dashboard page fails auth, redirect to login
 @app.exception_handler(AdminAuthRedirect)

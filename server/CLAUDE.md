@@ -43,6 +43,11 @@ Implementation details for the ECM coordination server. See also the [root CLAUD
   - `query_helpers.py` - Reusable database query patterns
   - `html_helpers.py` - Template formatting and HTML escaping
 - **Templates**: `app/templates/` - Jinja2 HTML templates
+  - Render with `templates.TemplateResponse(request, "name.html", {...})`.
+    Starlette 1.x made `request` the first positional parameter; the old
+    `TemplateResponse("name.html", {"request": request, ...})` form raises at
+    runtime. Do not put `"request"` in the context dict — starlette injects it.
+    `tests/test_html_pages.py` renders every page to catch this.
   - `base.html` - Shared CSS and layout
   - `admin/` - Admin dashboard templates
   - `public/` - Public dashboard templates
@@ -149,6 +154,36 @@ Discovered factors with discovery methods:
 - Skips factors that don't divide (handles composite factors gracefully)
 
 ## Recent Server Bug Fixes
+
+### FastAPI/Starlette Security Upgrade (2026-07)
+- **Why**: `pip-audit` reported 24 advisories against `requirements.txt`. The
+  reachable ones were multipart-parsing DoS (unbounded part counts, negative
+  `Content-Length` read-until-EOF, unbounded buffering of non-file form fields)
+  against `/api/v1/residues/upload`, which takes an `UploadFile` behind only an
+  `X-Client-ID` header on a 1 GB droplet.
+- **Upgrade**: fastapi 0.104.1 → 0.140.0, starlette 0.27.0 → 1.3.1,
+  pydantic 2.5.3 → 2.13.4 (fastapi ≥0.140 requires ≥2.9), pydantic-settings,
+  slowapi 0.1.9 → 0.1.10, python-multipart 0.0.6 → 0.0.32, jinja2 3.1.2 → 3.1.6.
+  The `httpx<0.28` cap is gone (it existed for starlette 0.27's TestClient).
+  `starlette` is now pinned directly — fastapi only floors it at `>=0.46.0`,
+  below several of the fixes.
+- **Code change**: all 15 `TemplateResponse` call sites migrated to the
+  `(request, name, context)` signature (see Templates above).
+- **Test gap this exposed**: nothing rendered a template or posted multipart,
+  so both breakages would have reached production with a green suite. Added
+  `tests/test_html_pages.py` (renders all 15 pages) and
+  `tests/test_residue_upload_multipart.py` (real multipart upload, byte-exact
+  round trip). Result: `pip-audit` reports no known vulnerabilities.
+- **CI**: `.github/workflows/audit.yml` runs `pip-audit --strict` weekly by
+  cron, and on pushes/PRs **that touch `server/requirements.txt`** (it is
+  paths-filtered, so most PRs skip it; the cron is what catches newly published
+  advisories against unchanged pins). `.github/workflows/test.yml` runs the
+  suite on pushes/PRs touching `server/**`, and `deploy.yml` calls it via
+  `workflow_call` with `needs: test`, so a deploy cannot ship a red suite.
+  Both use Python 3.11 to match `server/docker/Dockerfile` -- the dependency
+  tree resolves per Python version, and CI installs fresh from
+  `requirements.txt`, so it exercises the set the image gets rather than
+  whatever a long-lived local venv happens to hold.
 
 ### Duplicate Work Assignment Race (2026-07)
 - **Problem**: Two `/ecm-work` requests 16 ms apart were both assigned the same

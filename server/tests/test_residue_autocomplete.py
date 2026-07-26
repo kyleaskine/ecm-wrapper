@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import create_composite, get_test_engine
+from conftest import admin_auth, create_composite, get_test_engine
 
 from app.models.attempts import ECMAttempt
 from app.models.residues import ECMResidue
@@ -556,18 +556,13 @@ class TestResidueWorkClaimGuard:
 
 class TestReconcileEndpoint:
     def test_reconcile_completes_stuck_residues(self, client):
-        from app.main import app
-        from app.dependencies import verify_admin_key
 
         composite = create_composite(COMPOSITE)
         setup = create_stage2_setup(composite["id"], status="available")
         attempt_id = create_stage2_attempt(composite["id"])
 
-        app.dependency_overrides[verify_admin_key] = lambda: True
-        try:
+        with admin_auth():
             response = client.post("/api/v1/admin/residues/reconcile")
-        finally:
-            del app.dependency_overrides[verify_admin_key]
 
         assert response.status_code == 200
         data = response.json()
@@ -614,13 +609,8 @@ class TestReconcileEndpoint:
         finally:
             db.close()
 
-        from app.main import app
-        from app.dependencies import verify_admin_key
-        app.dependency_overrides[verify_admin_key] = lambda: True
-        try:
+        with admin_auth():
             response = client.post("/api/v1/admin/residues/reconcile")
-        finally:
-            del app.dependency_overrides[verify_admin_key]
 
         assert response.status_code == 200
         data = response.json()
@@ -684,18 +674,13 @@ class TestLapsedClaimCompletion:
     def test_delayed_completion_after_reconcile_succeeds(self, client):
         """Reconcile finalizes a stuck residue (no claim on it); the original
         worker's queued completion retry must then succeed, not 403 forever."""
-        from app.main import app
-        from app.dependencies import verify_admin_key
 
         composite = create_composite(COMPOSITE)
         setup = create_stage2_setup(composite["id"], status="available")
         attempt_id = create_stage2_attempt(composite["id"], client_id="cpu-worker")
 
-        app.dependency_overrides[verify_admin_key] = lambda: True
-        try:
+        with admin_auth():
             assert client.post("/api/v1/admin/residues/reconcile").status_code == 200
-        finally:
-            del app.dependency_overrides[verify_admin_key]
         assert get_residue(setup["residue_id"])["status"] == "completed"
 
         response = client.post(
@@ -961,13 +946,8 @@ class TestSupersessionCycleGuard:
     """
 
     def _reconcile(self, client):
-        from app.main import app
-        from app.dependencies import verify_admin_key
-        app.dependency_overrides[verify_admin_key] = lambda: True
-        try:
+        with admin_auth():
             return client.post("/api/v1/admin/residues/reconcile")
-        finally:
-            del app.dependency_overrides[verify_admin_key]
 
     def test_delayed_completion_after_reconcile_does_not_cycle(self, client):
         composite = create_composite(COMPOSITE)
@@ -1382,16 +1362,11 @@ class TestDeferredFileDeletion:
         """Admin delete used to os.remove() before the row delete committed -
         an orphaned file if the delete rolled back. It now stages deletion
         through the same after-commit hook."""
-        from app.main import app
-        from app.dependencies import verify_admin_key
         residue_id, _, f = self._setup(db_session, tmp_path)
         assert f.exists()
 
-        app.dependency_overrides[verify_admin_key] = lambda: True
-        try:
+        with admin_auth():
             resp = client.delete(f"/api/v1/admin/residues/{residue_id}")
-        finally:
-            del app.dependency_overrides[verify_admin_key]
 
         assert resp.status_code == 200
         # Removed via the post-commit hook, after the row delete committed

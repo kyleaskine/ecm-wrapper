@@ -18,9 +18,15 @@ on:
           - staging
 
 jobs:
+  # Gate the deploy on the suite. The regression tests only protect the
+  # server if something runs them before the image is built.
+  test:
+    uses: ./.github/workflows/test.yml
+
   deploy:
+    needs: test
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4

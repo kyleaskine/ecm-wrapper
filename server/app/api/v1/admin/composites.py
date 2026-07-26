@@ -248,8 +248,7 @@ def get_composite_details_page(
     # Get method breakdown for tabbed interface (same as public page)
     method_breakdown = composite_service.get_method_breakdown(composite_id, db)
 
-    return templates.TemplateResponse("admin/composite_details.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "admin/composite_details.html", {
         "composite": details['composite'],
         "progress": details['progress'],
         "recent_attempts": details['recent_attempts'],

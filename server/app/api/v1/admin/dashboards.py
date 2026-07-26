@@ -37,8 +37,7 @@ def inactive_composites_dashboard(
     composites, total = get_inactive_composites(db, limit=limit, offset=offset)
     pagination = calculate_pagination(offset, limit, total)
 
-    return templates.TemplateResponse("admin/inactive_composites.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "admin/inactive_composites.html", {
         "composites": composites,
         **pagination.to_dict()
     })
@@ -69,8 +68,7 @@ def outstanding_work_dashboard(
     )
     pagination = calculate_pagination(offset, limit, total)
 
-    return templates.TemplateResponse("admin/outstanding_work.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "admin/outstanding_work.html", {
         "assignments": assignments,
         **pagination.to_dict(),
         # Filter values for form state
@@ -97,8 +95,7 @@ def recent_composites_dashboard(
     composites, total = get_recently_added_composites(db, days=days, limit=limit, offset=offset)
     pagination = calculate_pagination(offset, limit, total)
 
-    return templates.TemplateResponse("admin/recent_composites.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "admin/recent_composites.html", {
         "composites": composites,
         **pagination.to_dict(),
         "days": days
@@ -139,8 +136,7 @@ def residue_status_dashboard(
     stats = residue_manager.get_stats(db)
     pagination = calculate_pagination(offset, limit, total)
 
-    return templates.TemplateResponse("admin/residue_status.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "admin/residue_status.html", {
         "residues": residues,
         **pagination.to_dict(),
         # Filter values for form state

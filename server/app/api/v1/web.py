@@ -101,8 +101,7 @@ def dashboard(
         ).filter(ProjectComposite.project_id == project)
     total_factors = factors_count_query.count()
 
-    return templates.TemplateResponse("public/dashboard.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "public/dashboard.html", {
         "composites": composites,
         "attempts": attempts,
         "factors": factors,
@@ -264,8 +263,7 @@ def testing_status(
     showing_from = offset + 1 if total > 0 else 0
     showing_to = min(offset + limit, total)
 
-    return templates.TemplateResponse("public/testing_status.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "public/testing_status.html", {
         "milestone_groups": milestone_groups,
         "composites": composite_data,
         # Pagination metadata
@@ -445,8 +443,7 @@ def p1_testing_status(
         'total_pp1_curves': total_pp1_curves,
     }
 
-    return templates.TemplateResponse("public/p1_testing_status.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "public/p1_testing_status.html", {
         "summary": summary,
         "composites": paginated_composites,
         # Pagination metadata
@@ -498,8 +495,7 @@ def residue_status_public(
     stats = residue_manager.get_stats(db)
     pagination = calculate_pagination(offset, limit, total)
 
-    return templates.TemplateResponse("public/residue_status.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "public/residue_status.html", {
         "residues": residues,
         **pagination.to_dict(),
         # Filter values for form state
@@ -611,8 +607,7 @@ def get_composite_details_public(
     # Get method breakdown for tabbed interface
     method_breakdown = composite_service.get_method_breakdown(composite_id, db)
 
-    return templates.TemplateResponse("public/composite_details.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "public/composite_details.html", {
         "composite": details['composite'],
         "progress": details['progress'],
         "recent_attempts": details['recent_attempts'],
@@ -673,8 +668,7 @@ def recent_curves(
     page = (offset // limit) + 1 if limit > 0 else 1
     total_pages = (total + limit - 1) // limit if limit > 0 else 1
 
-    return templates.TemplateResponse("public/recent_curves.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "public/recent_curves.html", {
         "attempts": attempts,
         "group_by_composite": group_by_composite,
         "factor_counts_by_attempt": factor_counts_by_attempt,
@@ -746,8 +740,7 @@ def recent_factors(
     page = (offset // limit) + 1 if limit > 0 else 1
     total_pages = (total + limit - 1) // limit if limit > 0 else 1
 
-    return templates.TemplateResponse("public/recent_factors.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "public/recent_factors.html", {
         "factors": factors,
         "factor_composites": factor_composites_by_id,
         "factor_attempts": factor_attempts_by_id,
@@ -854,8 +847,7 @@ def leaderboard(
             'factors': factors_lookup.get(day, 0)
         })
 
-    return templates.TemplateResponse("public/leaderboard.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "public/leaderboard.html", {
         "top_by_curves": top_by_curves,
         "top_by_factors": top_by_factors,
         "total_curves_period": total_curves_period,

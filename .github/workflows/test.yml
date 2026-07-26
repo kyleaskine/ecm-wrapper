@@ -1,0 +1,47 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'server/**'
+      - '.github/workflows/test.yml'
+  pull_request:
+    paths:
+      - 'server/**'
+      - '.github/workflows/test.yml'
+  # Called by deploy.yml so a deploy cannot ship a red suite.
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # Match the runtime in server/docker/Dockerfile. The suite itself uses
+    # in-memory SQLite, so no database service is needed.
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    # A fresh resolve, unlike a long-lived local venv where transitive deps
+    # linger at whatever satisfied the constraints when they were installed.
+    # This is what the deployed image gets.
+    - name: Install dependencies
+      working-directory: server
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Show resolved dependency set
+      working-directory: server
+      run: pip freeze
+
+    - name: Run tests
+      working-directory: server
+      run: pytest tests/ -q

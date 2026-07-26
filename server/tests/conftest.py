@@ -7,6 +7,7 @@ Provides:
 - Helper functions for test data setup
 """
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 # Add server directory to Python path
@@ -140,6 +141,39 @@ def client():
         yield test_client
 
     app.dependency_overrides.clear()
+
+
+@contextmanager
+def admin_auth():
+    """Satisfy admin authentication for the duration of the block.
+
+    Overrides both admin dependencies: verify_admin_key (JSON endpoints,
+    401 on failure) and verify_admin_key_html (HTML pages, which raise
+    AdminAuthRedirect instead). Restores any previous override on exit.
+    """
+    from app.dependencies import verify_admin_key, verify_admin_key_html
+
+    previous = {
+        dep: app.dependency_overrides.get(dep)
+        for dep in (verify_admin_key, verify_admin_key_html)
+    }
+    for dep in previous:
+        app.dependency_overrides[dep] = lambda: True
+    try:
+        yield
+    finally:
+        for dep, prior in previous.items():
+            if prior is None:
+                app.dependency_overrides.pop(dep, None)
+            else:
+                app.dependency_overrides[dep] = prior
+
+
+@pytest.fixture(scope="function")
+def admin_client(client):
+    """TestClient with admin authentication satisfied for the whole test."""
+    with admin_auth():
+        yield client
 
 
 def create_work_assignment(composite_id: int, client_id: str,

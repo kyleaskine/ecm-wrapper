@@ -23,10 +23,13 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    # Must match server/docker/Dockerfile: the dependency tree is resolved
+    # per Python version, so auditing on a different one audits a set that is
+    # not necessarily the deployed set.
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.12'
+        python-version: '3.11'
 
     - name: Install pip-audit
       run: pip install pip-audit==2.9.0
@@ -34,29 +37,17 @@ jobs:
     # Audits the pinned set without installing it (--no-deps would hide
     # transitive vulns, so let pip-audit resolve the full tree).
     #
-    # ignore-vuln entries are ACCEPTED, TRACKED risk, not false positives:
-    # all of the below are fixed only by the fastapi 0.104 -> 0.140 /
-    # starlette 0.27 -> 1.x upgrade, which is a separate change.
-    # Delete each ID as that upgrade lands; the list should reach empty.
-    #   PYSEC-2024-38    fastapi   Content-Type ReDoS (needs fastapi >=0.109.1)
-    #   PYSEC-2026-161   starlette Host header URL injection
-    #   PYSEC-2026-248   starlette request path not validated in request.url
-    #   PYSEC-2026-249   starlette form() limits not enforced
-    #   PYSEC-2026-1941  starlette large-file multipart DoS
-    #   PYSEC-2026-1943  starlette unbounded buffering of non-file form fields
-    #   PYSEC-2026-2280  starlette HTTPEndpoint method lookup (unused here)
-    #   PYSEC-2026-2281  starlette StaticFiles SSRF, Windows-only (unused here)
+    # There is no ignore list: the set is currently clean, so any finding
+    # here is new. If one has to be deferred, add it as an explicit
+    # --ignore-vuln with a comment saying why and what clears it, rather
+    # than letting this step go red and be ignored by habit.
+    # --strict: without it, a dependency whose metadata cannot be collected is
+    # skipped with a warning and the job still exits 0 -- a silent hole in the
+    # gate.
     - name: Audit server requirements
       run: |
         pip-audit \
           --requirement server/requirements.txt \
           --progress-spinner off \
           --desc on \
-          --ignore-vuln PYSEC-2024-38 \
-          --ignore-vuln PYSEC-2026-161 \
-          --ignore-vuln PYSEC-2026-248 \
-          --ignore-vuln PYSEC-2026-249 \
-          --ignore-vuln PYSEC-2026-1941 \
-          --ignore-vuln PYSEC-2026-1943 \
-          --ignore-vuln PYSEC-2026-2280 \
-          --ignore-vuln PYSEC-2026-2281
+          --strict
