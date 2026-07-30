@@ -17,7 +17,7 @@ imports (`from lib.work_modes import WorkLoopContext, get_work_mode`) keep
 working unchanged.
 """
 
-from .base import WorkMode, WorkLoopContext, MAX_CONSECUTIVE_FAILURES
+from .base import WorkMode, WorkLoopContext, MAX_CONSECUTIVE_FAILURES, SubmissionFailedError
 from .stage1_producer import Stage1ProducerMode
 from .stage2_consumer import Stage2ConsumerMode
 from .p1_sweep import P1WorkMode
@@ -62,6 +62,7 @@ __all__ = [
     'WorkMode',
     'WorkLoopContext',
     'MAX_CONSECUTIVE_FAILURES',
+    'SubmissionFailedError',
     'Stage1ProducerMode',
     'Stage2ConsumerMode',
     'P1WorkMode',

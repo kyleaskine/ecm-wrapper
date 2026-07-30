@@ -12,9 +12,10 @@ Queue directory structure:
 import datetime
 import json
 import logging
+import os
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, Iterator, List, Optional, Tuple, TYPE_CHECKING
 
 from .api_client import ResourceNotFoundError, PermanentUploadError
 
@@ -407,18 +408,102 @@ class SubmissionQueue:
         claim should be kept so the queue can finalize it on retry instead of
         the work being re-executed by another client.
         """
+        for _, data in self._iter_result_items():
+            chain = data.get("completion_chain") or {}
+            if chain.get("residue_id") == residue_id:
+                return True
+        return False
+
+    def _iter_result_items(
+        self,
+        newest_first: bool = False,
+    ) -> Iterator[Tuple[Path, Dict[str, Any]]]:
+        """
+        Yield (path, item) for every readable result item, oldest-first.
+
+        Ordering is by filename, which carries a microsecond timestamp from
+        _generate_filename - lexicographic order is chronological, it needs no
+        stat() (which would race a concurrent drain unlinking the file), and it
+        cannot tie the way a coarse st_mtime can. Unreadable or half-written
+        files are skipped rather than raising: callers run inside failure
+        handling, where an exception would escape into the work loop.
+        """
         if not self.results_dir.exists():
-            return False
-        for f in self.results_dir.glob("*.json"):
+            return
+        for f in sorted(self.results_dir.glob("*.json"), reverse=newest_first):
             try:
                 with open(f, 'r') as fh:
                     data = json.load(fh)
             except (json.JSONDecodeError, OSError):
                 continue
-            chain = data.get("completion_chain") or {}
-            if chain.get("residue_id") == residue_id:
-                return True
-        return False
+            if data.get("type") != "result":
+                continue
+            yield f, data
+
+    def attach_work_completion(self, work_id: str, client_id: str) -> bool:
+        """
+        Attach a work_complete chain to the newest queued result for work_id.
+
+        Used by the work loop to decide whether to abandon an assignment after a
+        failed submission: if the queue already holds the computed result, the
+        assignment should be kept so a later drain can complete it, instead of
+        the composite going back in the pool for another client to re-run.
+
+        The chain hangs off the *newest* matching result because one assignment
+        can produce several submissions (a 'p1' assignment submits pm1 and pp1
+        separately); completing on the last one keeps the assignment alive until
+        every result has landed.
+
+        Returns:
+            True if a queued result was found and now carries the chain.
+        """
+        newest: Optional[Tuple[Path, Dict[str, Any]]] = None
+        for path, data in self._iter_result_items(newest_first=True):
+            if (data.get("payload") or {}).get("work_id") != work_id:
+                continue
+            if data.get("completion_chain"):
+                # A follow-up already owns this assignment's results (stage 1's
+                # residue upload). Attaching to a different result of the same
+                # assignment would hold work that path releases deliberately, so
+                # decline outright rather than skipping to an older item.
+                return False
+            if newest is None:
+                newest = (path, data)
+
+        if newest is None:
+            return False
+
+        path, item = newest
+        item["completion_chain"] = {
+            "action": "work_complete",
+            "work_id": work_id,
+            "client_id": client_id,
+        }
+        # Rewrite atomically: a truncating in-place write that dies midway would
+        # leave the only copy of a multi-hour result as unparseable JSON, which
+        # _iter_result_items and drain() both skip forever.
+        if not self._rewrite_item(path, item):
+            return False
+
+        self.logger.info(
+            f"Attached work completion for {work_id} to queued result {path.name}"
+        )
+        return True
+
+    def _rewrite_item(self, path: Path, item: Dict[str, Any]) -> bool:
+        """Replace a queue item file atomically. Returns False on I/O error."""
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            with open(tmp, 'w') as fh:
+                json.dump(item, fh, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+            return True
+        except OSError as e:
+            self.logger.error(f"Failed to rewrite queue item {path.name}: {e}")
+            tmp.unlink(missing_ok=True)
+            return False
 
     def _get_queue_files(self) -> List[Path]:
         """Get all queue item files sorted oldest-first."""
@@ -477,6 +562,7 @@ class SubmissionQueue:
                         residue_path = item.get("residue_file")
                         if residue_path:
                             Path(residue_path).unlink(missing_ok=True)
+                    self._release_chained_work(item)
                     fail_count += 1
                     continue
 
@@ -525,15 +611,87 @@ class SubmissionQueue:
 
         - ``action == "residue_upload"`` (stage 1): upload the preserved residue,
           linked to the attempt_id the resubmitted result returned.
+        - ``action == "work_complete"``: complete the work assignment that was
+          held open while the result sat in the queue.
         - otherwise (stage 2): complete the residue with that attempt_id.
         """
         chain = item.get("completion_chain") or {}
         if not chain:
             return
-        if chain.get("action") == "residue_upload":
+        action = chain.get("action")
+        if action == "residue_upload":
             self._chain_residue_upload(api_client, item, response)
+        elif action == "work_complete":
+            self._chain_work_complete(api_client, item)
         else:
             self._chain_residue_complete(api_client, item, response)
+
+    def _chain_work_complete(
+        self,
+        api_client: 'APIClient',
+        item: Dict[str, Any],
+    ) -> None:
+        """
+        After a queued result re-submits successfully, complete the work
+        assignment that was held open for it.
+
+        The assignment was deliberately not abandoned when the submission failed,
+        so the composite stayed reserved for this client (rather than being handed
+        to someone else to re-run) until the result finally landed. A transient
+        failure here queues a standalone work_complete; a 404 means the server
+        already expired the assignment, which is harmless - the result is in.
+
+        Errors are swallowed: an exception escaping into _retry_item would leave
+        the already-accepted result in the queue to be re-POSTed on every future
+        drain (a duplicate attempt, double-counted curves). As with the two
+        residue chains, a KeyboardInterrupt landing inside the call still gets
+        through - Ctrl+C during a drain must stay interruptible.
+        """
+        chain = item.get("completion_chain") or {}
+        work_id = chain.get("work_id")
+        client_id = chain.get("client_id")
+        if not work_id or not client_id:
+            return
+
+        try:
+            if not api_client.complete_work(work_id=work_id, client_id=client_id):
+                self.enqueue_work_completion(work_id=work_id, client_id=client_id)
+        except ResourceNotFoundError:
+            self.logger.info(
+                f"Work {work_id} already expired/completed on server; "
+                "chained completion skipped"
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"Chained complete_work failed for {work_id}: {e}; "
+                "queuing for later retry"
+            )
+            self.enqueue_work_completion(work_id=work_id, client_id=client_id)
+
+    def _release_chained_work(self, item: Dict[str, Any]) -> None:
+        """
+        Release the assignment held for a result item that is being discarded.
+
+        A work_complete chain is the only thing that ever releases an assignment
+        the work loop deliberately held (see WorkMode.cleanup_on_failure). When
+        the result is dropped instead of submitted - a permanent rejection, or
+        the retry cap - that chain never runs, so the assignment would sit active
+        until the server expires it, consuming the client's active-work quota.
+        Queue an abandonment instead: the result is gone, so completing would be
+        a lie, and the composite should go back in the pool.
+        """
+        chain = item.get("completion_chain") or {}
+        if chain.get("action") != "work_complete":
+            return
+        work_id = chain.get("work_id")
+        client_id = chain.get("client_id")
+        if not work_id or not client_id:
+            return
+        self.logger.warning(
+            f"Queued result for work {work_id} was discarded; releasing the "
+            "assignment that was held for it"
+        )
+        self.enqueue_work_abandonment(work_id=work_id, client_id=client_id)
 
     def _chain_residue_upload(
         self,
@@ -769,12 +927,14 @@ class SubmissionQueue:
                 f"Discarding {item_type} from queue: resource no longer exists on server "
                 f"(likely expired or already completed)"
             )
+            self._release_chained_work(item)
             return True  # Treat as success to remove from queue
 
         except PermanentUploadError as e:
             # 4xx residue upload rejection: composite factored, stage-1 attempt
             # gone, invalid file, etc. Retrying can never succeed, so discard.
             self.logger.warning(f"Discarding {item_type} from queue: {e}")
+            self._release_chained_work(item)
             return True  # Treat as success to remove from queue
 
         except Exception as e:
@@ -787,5 +947,6 @@ class SubmissionQueue:
                 self.logger.warning(
                     f"Discarding {item_type} from queue: permanent error: {error_str}"
                 )
+                self._release_chained_work(item)
                 return True  # Remove from queue
             raise  # Re-raise for transient errors

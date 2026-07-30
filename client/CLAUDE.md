@@ -332,6 +332,50 @@ Supports: lowercase/uppercase e, decimals (2.6e8), explicit + sign (26e+7)
 
 ## Recent Client Bug Fixes
 
+### Work Assignment Held When Only Submission Fails (2026-07)
+- **Problem**: the work loop had one failure path. `submit_results()` returning
+  `False` because the network was down (result safely queued) was treated
+  identically to a failed computation: `base.py` called `cleanup_on_failure()`,
+  which abandoned the assignment with `reason="execution_error"`. A 38-minute
+  P+1 run at B1=850M released its composite back into the pool, where
+  `/p1-work`'s `NOT EXISTS` filter (against `ecm_attempts`, which has no row
+  until the queued result lands) would hand it to another client to redo.
+  `Stage2ConsumerMode` already solved this for residue claims; the base class
+  never got the equivalent.
+- **Fix** (`lib/submission_queue.py`): `attach_work_completion(work_id,
+  client_id)` finds the newest queued result for the assignment and hangs a
+  `{"action": "work_complete", ...}` chain off it; `_run_completion_chain`
+  dispatches that to `_chain_work_complete` (transient failure → standalone
+  `work_complete` item; 404 → dropped, the assignment already expired). It
+  attaches to the *newest* matching result because a `p1` assignment submits
+  pm1 and pp1 separately, and declines outright if **any** result of that
+  assignment already carries a chain (stage 1's residue upload owns that slot
+  and abandons deliberately). The rewrite goes through `_rewrite_item()`
+  (tmp + `os.replace`): a truncating in-place write that died midway would turn
+  the only copy of a multi-hour result into unparseable JSON that every future
+  drain skips. Ordering and scanning are shared via `_iter_result_items()`,
+  which sorts by the microsecond-stamped filename rather than `st_mtime` — no
+  `stat()` to race a concurrent drain, and no ties.
+- **Fix** (`lib/work_modes/base.py`): `cleanup_on_failure()` holds the
+  assignment only for `SubmissionFailedError` (raised by the work loop's submit
+  step alone), not for execution errors or Ctrl+C — t-level mode submits per B1
+  batch, so an unrelated queued result for the same `work_id` is common, and
+  holding on a crash would later mark a partially-executed assignment complete.
+  The server's 1-day assignment expiry (`timeout_days` in `ecm_work.py`) is the
+  backstop.
+- **Fix** (`lib/submission_queue.py`): `_release_chained_work()` queues a
+  `work_abandon` when a chained result is discarded (permanent rejection, or the
+  200-attempt cap). The chain is the only thing that releases a held assignment,
+  so dropping it silently would pin the composite until expiry and eat into the
+  server's `max_work_items_per_client` (12) quota.
+- **Note**: the result submits fine either way — the server's `abandon_work`
+  only sets `status='failed'`, and `_resolve_composite`/`_effective_work_id`
+  look the assignment up by id without filtering on status. The bug costs
+  duplicated CPU, not data.
+- **Tests**: `tests/test_submission_queue.py` (`TestAttachWorkCompletion`,
+  `TestChainedWorkCompletion`), `tests/test_work_modes.py`
+  (`TestCleanupOnFailure`).
+
 ### Aliquot Terms Reconciled with Tracker/FactorDB Before Factoring (2026-07)
 - **Problem**: only the `--resume-factordb` resume term used FactorDB's known
   factors; every later term was factored from local trial division (10^7)

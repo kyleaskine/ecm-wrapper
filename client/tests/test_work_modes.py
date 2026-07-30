@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 from lib.work_modes import (
-    WorkLoopContext, WorkMode, MAX_CONSECUTIVE_FAILURES,
+    WorkLoopContext, WorkMode, MAX_CONSECUTIVE_FAILURES, SubmissionFailedError,
     StandardAutoWorkMode, Stage1ProducerMode, Stage2ConsumerMode,
     CompositeTargetMode, get_work_mode
 )
@@ -395,16 +395,21 @@ class TestCleanupOnFailure:
     def setup_method(self):
         """Set up test fixtures."""
         self.wrapper = MockWrapper()
-        self.wrapper.abandon_work = Mock()
+        self.wrapper.abandon_work = Mock(return_value=True)
+        # No queued result for the work by default: the abandon path applies.
+        self.wrapper.submission_queue.attach_work_completion.return_value = False
 
-    def test_cleanup_abandons_work_if_work_id_set(self):
-        """Test cleanup_on_failure abandons work when work_id is set."""
+    def _make_mode(self) -> StandardAutoWorkMode:
         ctx = WorkLoopContext(
             wrapper=self.wrapper,
             client_id='test',
             args=create_mock_args()
         )
-        mode = StandardAutoWorkMode(ctx)
+        return StandardAutoWorkMode(ctx)
+
+    def test_cleanup_abandons_work_if_work_id_set(self):
+        """Test cleanup_on_failure abandons work when work_id is set."""
+        mode = self._make_mode()
         mode.current_work_id = 'work-123'
 
         mode.cleanup_on_failure({'work_id': 'work-123'}, RuntimeError("test error"))
@@ -414,16 +419,70 @@ class TestCleanupOnFailure:
 
     def test_cleanup_does_nothing_if_no_work_id(self):
         """Test cleanup_on_failure does nothing when no work_id set."""
-        ctx = WorkLoopContext(
-            wrapper=self.wrapper,
-            client_id='test',
-            args=create_mock_args()
-        )
-        mode = StandardAutoWorkMode(ctx)
+        mode = self._make_mode()
 
         mode.cleanup_on_failure(None, RuntimeError("test error"))
 
         self.wrapper.abandon_work.assert_not_called()
+
+    def test_queues_abandonment_when_abandon_call_fails(self):
+        """Network down and nothing queued: abandonment retries on reconnect."""
+        self.wrapper.abandon_work.return_value = False
+        mode = self._make_mode()
+        mode.current_work_id = 'work-123'
+
+        mode.cleanup_on_failure({'work_id': 'work-123'}, RuntimeError("test error"))
+
+        self.wrapper.submission_queue.enqueue_work_abandonment.assert_called_once_with(
+            'work-123', 'test',
+        )
+
+    def test_holds_assignment_when_result_is_queued(self):
+        """
+        The curves ran and only the submission failed (network down): the result
+        sits in the queue, so the assignment must be held rather than released -
+        abandoning would let another client re-run finished work.
+        """
+        self.wrapper.submission_queue.attach_work_completion.return_value = True
+        mode = self._make_mode()
+        mode.current_work_id = 'work-123'
+
+        mode.cleanup_on_failure({'work_id': 'work-123'}, SubmissionFailedError("Submission failed"))
+
+        self.wrapper.submission_queue.attach_work_completion.assert_called_once_with(
+            'work-123', 'test',
+        )
+        self.wrapper.abandon_work.assert_not_called()
+        self.wrapper.submission_queue.enqueue_work_abandonment.assert_not_called()
+        assert mode.current_work_id is None  # Still cleared from in-memory state
+
+    def test_execution_error_abandons_despite_queued_result(self):
+        """
+        Only a submission failure may hold. T-level mode submits per B1 batch,
+        so an earlier batch's result can be sitting in the queue when a later
+        batch crashes - that assignment is partially executed and must be
+        released, not held and later marked complete.
+        """
+        self.wrapper.submission_queue.attach_work_completion.return_value = True
+        mode = self._make_mode()
+        mode.current_work_id = 'work-123'
+
+        mode.cleanup_on_failure({'work_id': 'work-123'}, RuntimeError("ECM binary crashed"))
+
+        self.wrapper.submission_queue.attach_work_completion.assert_not_called()
+        self.wrapper.abandon_work.assert_called_once_with('work-123', reason='execution_error')
+
+    def test_keyboard_interrupt_abandons_despite_queued_result(self):
+        """A hard Ctrl+C releases the composite immediately rather than holding
+        it for the full server-side expiry while this client is gone."""
+        self.wrapper.submission_queue.attach_work_completion.return_value = True
+        mode = self._make_mode()
+        mode.current_work_id = 'work-123'
+
+        mode.cleanup_on_failure({'work_id': 'work-123'}, KeyboardInterrupt())
+
+        self.wrapper.submission_queue.attach_work_completion.assert_not_called()
+        self.wrapper.abandon_work.assert_called_once_with('work-123', reason='execution_error')
 
 
 class TestStage2CleanupOnFailure:

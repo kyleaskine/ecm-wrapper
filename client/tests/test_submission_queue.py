@@ -315,6 +315,190 @@ class TestChainedResidueCompletion:
         mock_api_client.complete_residue.assert_not_called()
 
 
+class TestAttachWorkCompletion:
+    """The work loop holds an assignment when the queue already has its result."""
+
+    def test_empty_queue_returns_false(self, queue):
+        assert queue.attach_work_completion("work-123", "worker-7") is False
+
+    def test_attaches_chain_to_matching_result(self, queue):
+        filepath = queue.enqueue_result({"composite": "123", "work_id": "work-123"})
+
+        assert queue.attach_work_completion("work-123", "worker-7") is True
+
+        data = json.loads(filepath.read_text())
+        assert data["completion_chain"] == {
+            "action": "work_complete",
+            "work_id": "work-123",
+            "client_id": "worker-7",
+        }
+
+    def test_ignores_other_work_ids(self, queue):
+        queue.enqueue_result({"composite": "123", "work_id": "other-work"})
+        assert queue.attach_work_completion("work-123", "worker-7") is False
+
+    def test_attaches_to_newest_result_for_the_work(self, queue):
+        # A 'p1' assignment submits pm1 and pp1 separately; completing on the
+        # last one keeps the assignment alive until both results have landed.
+        # Ordering comes from the microsecond-stamped filename, so no mtime
+        # fixup is needed for this to be deterministic.
+        first = queue.enqueue_result({"composite": "123", "work_id": "work-123", "method": "pm1"})
+        second = queue.enqueue_result({"composite": "123", "work_id": "work-123", "method": "pp1"})
+        assert first.name < second.name
+
+        assert queue.attach_work_completion("work-123", "worker-7") is True
+
+        assert "completion_chain" not in json.loads(first.read_text())
+        assert json.loads(second.read_text())["completion_chain"]["action"] == "work_complete"
+
+    def test_does_not_displace_an_existing_chain(self, queue, queue_dir):
+        # A stage-1 result already carries a residue_upload chain; the residue is
+        # the more valuable follow-up and that path abandons the work on purpose.
+        residue = Path(queue_dir) / "residue.txt"
+        residue.write_text("METHOD=ECM; SIGMA=3:1\n")
+        filepath = queue.enqueue_result(
+            {"composite": "123", "work_id": "work-123"},
+            completion_chain={
+                "action": "residue_upload",
+                "residue_file": str(residue),
+                "client_id": "worker-7",
+            },
+        )
+
+        assert queue.attach_work_completion("work-123", "worker-7") is False
+        assert json.loads(filepath.read_text())["completion_chain"]["action"] == "residue_upload"
+
+    def test_declines_when_any_result_of_the_work_has_a_chain(self, queue, queue_dir):
+        # The chain-less sibling must not be used as a back door into holding an
+        # assignment the residue-upload path means to release.
+        residue = Path(queue_dir) / "residue.txt"
+        residue.write_text("METHOD=ECM; SIGMA=3:1\n")
+        plain = queue.enqueue_result({"composite": "123", "work_id": "work-123"})
+        queue.enqueue_result(
+            {"composite": "123", "work_id": "work-123"},
+            completion_chain={
+                "action": "residue_upload",
+                "residue_file": str(residue),
+                "client_id": "worker-7",
+            },
+        )
+
+        assert queue.attach_work_completion("work-123", "worker-7") is False
+        assert "completion_chain" not in json.loads(plain.read_text())
+
+    def test_corrupt_item_does_not_raise(self, queue):
+        (queue.results_dir).mkdir(parents=True, exist_ok=True)
+        (queue.results_dir / "result_broken.json").write_text("{ truncated")
+        target = queue.enqueue_result({"composite": "123", "work_id": "work-123"})
+
+        assert queue.attach_work_completion("work-123", "worker-7") is True
+        assert json.loads(target.read_text())["completion_chain"]["action"] == "work_complete"
+
+    def test_attach_is_atomic(self, queue):
+        # A failed rewrite must leave the original result intact, not a truncated
+        # file that every future drain skips - it is the only copy of the work.
+        filepath = queue.enqueue_result({"composite": "123", "work_id": "work-123"})
+        original = filepath.read_text()
+
+        with patch("lib.submission_queue.os.replace", side_effect=OSError("disk full")):
+            assert queue.attach_work_completion("work-123", "worker-7") is False
+
+        assert filepath.read_text() == original
+        assert list(queue.results_dir.glob("*.tmp")) == []
+
+
+class TestChainedWorkCompletion:
+    def test_completes_work_after_result_submits(self, queue, mock_api_client):
+        queue.enqueue_result({"composite": "123", "work_id": "work-123"})
+        queue.attach_work_completion("work-123", "worker-7")
+
+        success, fail = queue.drain(mock_api_client)
+
+        assert (success, fail) == (1, 0)
+        mock_api_client.complete_work.assert_called_once_with(
+            work_id="work-123", client_id="worker-7",
+        )
+        assert queue.count() == 0
+
+    def test_queues_completion_when_chain_call_fails(self, queue, mock_api_client):
+        mock_api_client.complete_work.return_value = False  # Network blip again
+        queue.enqueue_result({"composite": "123", "work_id": "work-123"})
+        queue.attach_work_completion("work-123", "worker-7")
+
+        success, fail = queue.drain(mock_api_client)
+
+        # Result landed; only the completion is left for a later drain.
+        assert (success, fail) == (1, 0)
+        files = list(queue.completions_dir.glob("work_complete_*.json"))
+        assert len(files) == 1
+        assert json.loads(files[0].read_text())["payload"] == {
+            "work_id": "work-123", "client_id": "worker-7",
+        }
+
+    def test_expired_assignment_is_not_requeued(self, queue, mock_api_client):
+        from lib.api_client import ResourceNotFoundError
+        mock_api_client.complete_work.side_effect = ResourceNotFoundError("gone")
+        queue.enqueue_result({"composite": "123", "work_id": "work-123"})
+        queue.attach_work_completion("work-123", "worker-7")
+
+        success, fail = queue.drain(mock_api_client)
+
+        # The result is what mattered; a 404 on the assignment is harmless.
+        assert (success, fail) == (1, 0)
+        assert queue.count() == 0
+
+    def test_permanent_rejection_releases_the_held_assignment(self, queue, mock_api_client):
+        # The chain is the only thing that would ever release a held assignment.
+        # If the result is discarded, the work must be abandoned instead - the
+        # result will never land, so completing it would be a lie.
+        from lib.api_client import ResourceNotFoundError
+        mock_api_client.submit_result.side_effect = ResourceNotFoundError("unknown composite")
+        queue.enqueue_result({"composite": "123", "work_id": "work-123"})
+        queue.attach_work_completion("work-123", "worker-7")
+
+        queue.drain(mock_api_client)
+
+        files = list(queue.completions_dir.glob("work_abandon_*.json"))
+        assert len(files) == 1
+        assert json.loads(files[0].read_text())["payload"] == {
+            "work_id": "work-123", "client_id": "worker-7",
+        }
+
+    def test_retry_cap_releases_the_held_assignment(self, queue, mock_api_client):
+        filepath = queue.enqueue_result({"composite": "123", "work_id": "work-123"})
+        queue.attach_work_completion("work-123", "worker-7")
+        item = json.loads(filepath.read_text())
+        item["attempts"] = 200  # Next drain exceeds the cap and discards it
+        filepath.write_text(json.dumps(item))
+
+        queue.drain(mock_api_client)
+
+        assert not filepath.exists()
+        assert len(list(queue.completions_dir.glob("work_abandon_*.json"))) == 1
+
+    def test_discarded_result_without_chain_releases_nothing(self, queue, mock_api_client):
+        from lib.api_client import ResourceNotFoundError
+        mock_api_client.submit_result.side_effect = ResourceNotFoundError("unknown composite")
+        queue.enqueue_result({"composite": "123", "work_id": "work-123"})  # No chain
+
+        queue.drain(mock_api_client)
+
+        assert list(queue.completions_dir.glob("work_abandon_*.json")) == []
+
+    def test_unexpected_error_does_not_resubmit_result(self, queue, mock_api_client):
+        mock_api_client.complete_work.side_effect = RuntimeError("boom")
+        queue.enqueue_result({"composite": "123", "work_id": "work-123"})
+        queue.attach_work_completion("work-123", "worker-7")
+
+        success, fail = queue.drain(mock_api_client)
+
+        # The result was accepted, so it must leave the queue - otherwise every
+        # future drain would re-POST it as a duplicate attempt.
+        assert (success, fail) == (1, 0)
+        assert list(queue.results_dir.glob("result_*.json")) == []
+        assert len(list(queue.completions_dir.glob("work_complete_*.json"))) == 1
+
+
 class TestChainedResidueUpload:
     """Stage-1 residue-upload chain: a queued result carries the residue so a
     long GPU batch is not lost when the server is down at submit time."""

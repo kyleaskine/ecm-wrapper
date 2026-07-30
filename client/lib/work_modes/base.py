@@ -33,6 +33,17 @@ if TYPE_CHECKING:
 MAX_CONSECUTIVE_FAILURES = 3
 
 
+class SubmissionFailedError(RuntimeError):
+    """
+    The work executed, but reporting its result to the server failed.
+
+    Distinct from an execution error: the curves are done and the result is in
+    the submission queue, so cleanup can hold the assignment instead of handing
+    the composite to another client. Only the work loop's submit step raises
+    this - an ECM crash or a Ctrl+C must not be mistaken for it.
+    """
+
+
 @dataclass
 class WorkLoopContext:
     """
@@ -162,17 +173,34 @@ class WorkMode(ABC):
 
         Override in subclasses for custom cleanup behavior.
         Default implementation abandons work if we have a work_id.
-        If the abandon call fails (e.g. network down), queues a work
-        completion for later retry so the assignment doesn't stay active.
+        If the abandon call fails (e.g. network down), queues an abandonment
+        for later retry so the assignment doesn't stay active.
+
+        Exception: on SubmissionFailedError the curves ran and only the report
+        failed, so the result is already in the queue. Abandoning then would
+        release the composite for another client to re-run work we have
+        finished, so the assignment is held instead and a work_complete is
+        chained onto the queued result. The server's assignment expiry (1 day)
+        is the backstop if this client never returns. Every other failure -
+        an execution error, a Ctrl+C - abandons as before, even if an unrelated
+        result for this assignment happens to be sitting in the queue (t-level
+        mode submits per B1 batch, so that is a real possibility).
 
         Args:
             work: Work assignment that failed (may be None)
             error: The exception that occurred (can be Exception or KeyboardInterrupt)
         """
         if self.current_work_id:
-            if not self.wrapper.abandon_work(self.current_work_id, reason="execution_error"):
+            queue = self.wrapper.submission_queue
+            if isinstance(error, SubmissionFailedError) and queue.attach_work_completion(
+                    self.current_work_id, self.ctx.client_id):
+                self.logger.info(
+                    f"Holding work {self.current_work_id} assignment - "
+                    "completed result is queued for retry"
+                )
+            elif not self.wrapper.abandon_work(self.current_work_id, reason="execution_error"):
                 # Network likely down - queue abandonment so assignment gets released on reconnect
-                self.wrapper.submission_queue.enqueue_work_abandonment(
+                queue.enqueue_work_abandonment(
                     self.current_work_id, self.ctx.client_id
                 )
             self.current_work_id = None
@@ -474,7 +502,7 @@ class WorkMode(ABC):
                     # Submit results
                     if not self.submit_results(work, result):
                         self.consecutive_failures += 1
-                        self.cleanup_on_failure(work, RuntimeError("Submission failed"))
+                        self.cleanup_on_failure(work, SubmissionFailedError("Submission failed"))
 
                         if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                             self.logger.error(
