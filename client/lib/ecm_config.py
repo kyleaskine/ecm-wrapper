@@ -242,6 +242,13 @@ class FactorResult:
     t_level_achieved: float = 0.0  # T-level reached during execution
     curve_summary: List[Dict[str, Any]] = field(default_factory=list)  # Detailed curve execution summary
 
+    # True if a run that submits internally (t-level mode submits per B1 batch)
+    # had at least one submission fail and get queued. The curves are done, so
+    # the caller must not treat this as an execution error - but it must not
+    # report success either, or the work assignment gets completed with no
+    # progress recorded and the composite is handed straight back out.
+    submission_failed: bool = False
+
     def add_factor(self, factor: str, sigma: Optional[str] = None):
         """Add a discovered factor with its sigma."""
         self.factors.append(factor)
@@ -413,6 +420,7 @@ class BatchResult:
     success: bool = False
     raw_output: Optional[str] = None
     interrupted: bool = False
+    submission_failed: bool = False  # A per-batch submission failed and was queued
 
     def to_factor_result(self) -> FactorResult:
         """Convert to FactorResult for API compatibility."""
@@ -424,4 +432,5 @@ class BatchResult:
         result.success = self.success
         result.raw_output = self.raw_output
         result.interrupted = self.interrupted
+        result.submission_failed = self.submission_failed
         return result

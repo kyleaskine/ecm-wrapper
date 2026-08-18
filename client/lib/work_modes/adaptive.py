@@ -405,8 +405,20 @@ class AdaptiveCPUMode(WorkMode):
     def cleanup_on_failure(self, work: Optional[Dict[str, Any]], error: BaseException) -> None:
         if self._current_mode == 'stage2':
             if self.current_residue_id:
-                if not self.api_client.abandon_residue(self.ctx.client_id, self.current_residue_id):
-                    self.wrapper.submission_queue.enqueue_residue_abandonment(
+                queue = self.wrapper.submission_queue
+                if queue.has_pending_result_for_residue(self.current_residue_id):
+                    # Same reasoning as Stage2ConsumerMode: hours of stage 2 ran
+                    # and only the submission failed, so the queue holds the
+                    # result with a complete_residue chain. Releasing the claim
+                    # would hand the residue to another client to redo, and the
+                    # chained completion would then fire against a residue this
+                    # client no longer holds.
+                    self.logger.info(
+                        f"Holding residue {self.current_residue_id} claim - "
+                        "completed result is queued for retry"
+                    )
+                elif not self.api_client.abandon_residue(self.ctx.client_id, self.current_residue_id):
+                    queue.enqueue_residue_abandonment(
                         self.current_residue_id, self.ctx.client_id
                     )
                 self.current_residue_id = None

@@ -25,6 +25,7 @@ from lib.work_modes import (
 )
 from lib.work_args import WorkArgs
 from lib.ecm_config import FactorResult
+from lib.submission_queue import SubmissionQueue
 
 
 class MockWrapper:
@@ -39,7 +40,11 @@ class MockWrapper:
         self.stop_event = threading.Event()
         self._api_clients_initialized = False
         self.api_client = Mock()
-        self.submission_queue = Mock()
+        self.typed_config = None  # resolve_worker_count falls back to CPU count
+        # spec'd: cleanup_on_failure is a cross-module contract with
+        # SubmissionQueue, and an unspecced Mock would keep passing after a
+        # method there was renamed while the real client raised AttributeError.
+        self.submission_queue = Mock(spec=SubmissionQueue)
 
     def _ensure_api_clients(self):
         self._api_clients_initialized = True
@@ -530,6 +535,138 @@ class TestStage2CleanupOnFailure:
         self.wrapper.submission_queue.enqueue_residue_abandonment.assert_called_once_with(
             32225, 'test-client',
         )
+
+
+class TestStage1CleanupOnFailure:
+    """Stage1ProducerMode.cleanup_on_failure: hold-vs-abandon decision."""
+
+    def setup_method(self):
+        self.wrapper = MockWrapper()
+        self.wrapper.abandon_work = Mock(return_value=True)
+
+    def _make_mode(self, has_pending: bool) -> Stage1ProducerMode:
+        self.wrapper.submission_queue.has_pending_result_for_work.return_value = has_pending
+        ctx = WorkLoopContext(
+            wrapper=self.wrapper,
+            client_id='test-client',
+            args=create_mock_args(stage1_only=True, b1=110000000, curves=3000),
+        )
+        mode = Stage1ProducerMode(ctx)
+        mode.current_work_id = 'work-123'
+        return mode
+
+    def test_holds_assignment_when_stage1_result_is_queued(self):
+        """
+        A multi-hour GPU batch whose submission failed is queued together with
+        its residue; releasing the composite would have another GPU redo it.
+        """
+        mode = self._make_mode(has_pending=True)
+
+        mode.cleanup_on_failure({}, SubmissionFailedError("Submission failed"))
+
+        self.wrapper.abandon_work.assert_not_called()
+        self.wrapper.submission_queue.enqueue_work_abandonment.assert_not_called()
+        assert mode.current_work_id is None
+
+    def test_execution_error_abandons(self):
+        mode = self._make_mode(has_pending=True)
+
+        mode.cleanup_on_failure({}, RuntimeError("GPU stage 1 crashed"))
+
+        self.wrapper.abandon_work.assert_called_once_with('work-123', reason='stage1_failed')
+
+    def test_abandons_when_nothing_is_queued(self):
+        mode = self._make_mode(has_pending=False)
+
+        mode.cleanup_on_failure({}, SubmissionFailedError("Submission failed"))
+
+        self.wrapper.abandon_work.assert_called_once_with('work-123', reason='stage1_failed')
+
+    def test_queues_abandonment_when_abandon_call_fails(self):
+        mode = self._make_mode(has_pending=False)
+        self.wrapper.abandon_work.return_value = False  # Network down
+
+        mode.cleanup_on_failure({}, RuntimeError("execution failed"))
+
+        self.wrapper.submission_queue.enqueue_work_abandonment.assert_called_once_with(
+            'work-123', 'test-client',
+        )
+
+
+class TestAdaptiveStage2CleanupOnFailure:
+    """AdaptiveMode's stage-2 branch must hold the claim like Stage2ConsumerMode."""
+
+    def setup_method(self):
+        self.wrapper = MockWrapper()
+        self.wrapper.api_client.abandon_residue = Mock(return_value=True)
+
+    def _make_mode(self, has_pending: bool):
+        from lib.work_modes import AdaptiveCPUMode
+        self.wrapper.submission_queue.has_pending_result_for_residue.return_value = has_pending
+        ctx = WorkLoopContext(
+            wrapper=self.wrapper,
+            client_id='test-client',
+            args=create_mock_args(adaptive=True, workers=2),
+        )
+        mode = AdaptiveCPUMode(ctx)
+        mode._current_mode = 'stage2'
+        mode.current_residue_id = 32225
+        return mode
+
+    def test_holds_claim_when_result_is_queued(self):
+        mode = self._make_mode(has_pending=True)
+
+        mode.cleanup_on_failure({}, RuntimeError("submit failed"))
+
+        self.wrapper.api_client.abandon_residue.assert_not_called()
+        self.wrapper.submission_queue.enqueue_residue_abandonment.assert_not_called()
+        assert mode.current_residue_id is None
+
+    def test_abandons_when_no_pending_result(self):
+        mode = self._make_mode(has_pending=False)
+
+        mode.cleanup_on_failure({}, RuntimeError("execution failed"))
+
+        self.wrapper.api_client.abandon_residue.assert_called_once_with(
+            'test-client', 32225,
+        )
+
+
+class TestTLevelSubmissionFailure:
+    """
+    T-level mode submits per B1 batch inside the executor, so submit_results is
+    the only place a queued batch can be reported to the work loop.
+    """
+
+    def setup_method(self):
+        self.wrapper = MockWrapper()
+
+    def _make_mode(self) -> StandardAutoWorkMode:
+        ctx = WorkLoopContext(
+            wrapper=self.wrapper,
+            client_id='test-client',
+            args=create_mock_args(),
+        )
+        mode = StandardAutoWorkMode(ctx)
+        mode._is_tlevel_mode = True
+        return mode
+
+    def test_queued_batch_reports_failure(self):
+        """
+        Returning True here completes the assignment with no t-level progress
+        recorded, and /ecm-work hands the same composite straight back out.
+        """
+        mode = self._make_mode()
+        result = FactorResult(success=True, curves_run=1200)
+        result.submission_failed = True
+
+        assert mode.submit_results({'work_id': 'work-123'}, result) is False
+
+    def test_successful_batches_report_success(self):
+        mode = self._make_mode()
+        result = FactorResult(success=True, curves_run=1200)
+
+        assert mode.submit_results({'work_id': 'work-123'}, result) is True
 
 
 def main():

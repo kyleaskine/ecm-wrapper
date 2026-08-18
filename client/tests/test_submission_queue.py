@@ -1,8 +1,10 @@
 """Tests for the SubmissionQueue persistent retry mechanism."""
 import json
+import os
 import tempfile
 import shutil
 from pathlib import Path
+from typing import Optional
 from unittest.mock import Mock, patch
 
 import pytest
@@ -464,17 +466,38 @@ class TestChainedWorkCompletion:
             "work_id": "work-123", "client_id": "worker-7",
         }
 
-    def test_retry_cap_releases_the_held_assignment(self, queue, mock_api_client):
+    def test_age_cap_releases_the_held_assignment(self, queue, mock_api_client):
+        import datetime
         filepath = queue.enqueue_result({"composite": "123", "work_id": "work-123"})
         queue.attach_work_completion("work-123", "worker-7")
         item = json.loads(filepath.read_text())
-        item["attempts"] = 200  # Next drain exceeds the cap and discards it
+        aged = datetime.datetime.now() - datetime.timedelta(days=8)
+        item["created_at"] = aged.isoformat()
         filepath.write_text(json.dumps(item))
 
         queue.drain(mock_api_client)
 
         assert not filepath.exists()
         assert len(list(queue.completions_dir.glob("work_abandon_*.json"))) == 1
+
+    def test_attempt_count_alone_does_not_discard_a_held_result(self, queue, mock_api_client):
+        """
+        Attempts are consumed by the 30-second no-work poll, not by elapsed
+        time: a two-hour outage must not destroy a multi-hour result or release
+        the assignment held for it.
+        """
+        mock_api_client.submit_result.return_value = None  # Server still down
+        filepath = queue.enqueue_result({"composite": "123", "work_id": "work-123"})
+        queue.attach_work_completion("work-123", "worker-7")
+        item = json.loads(filepath.read_text())
+        item["attempts"] = 500
+        filepath.write_text(json.dumps(item))
+
+        queue.drain(mock_api_client)
+
+        assert filepath.exists()
+        assert json.loads(filepath.read_text())["attempts"] == 501
+        assert list(queue.completions_dir.glob("work_abandon_*.json")) == []
 
     def test_discarded_result_without_chain_releases_nothing(self, queue, mock_api_client):
         from lib.api_client import ResourceNotFoundError
@@ -644,3 +667,249 @@ class TestChainedResidueUpload:
         assert success == 1
         assert queue.count() == 0  # Nothing left to retry
         assert not list(queue.residues_dir.glob("residue_*"))
+
+
+class TestDiscardedChainCleanup:
+    """
+    What a queued result's chain must do when the result is dropped instead of
+    sent: release whatever was held for it, and take its residue copy with it.
+    """
+
+    def _residue_chain_result(self, queue, queue_dir):
+        residue = Path(queue_dir) / "stage1_batch.txt"
+        residue.write_text("METHOD=ECM; SIGMA=3:123; B1=110000000; N=99\n")
+        chain = {
+            "action": "residue_upload",
+            "residue_file": str(residue),
+            "client_id": "gpu-1",
+            "expiry_days": 7,
+            "work_id": "work-123",
+        }
+        filepath = queue.enqueue_result({"composite": "99", "work_id": "work-123"},
+                                        completion_chain=chain)
+        preserved = Path(json.loads(filepath.read_text())["completion_chain"]["residue_file"])
+        assert preserved.exists()
+        return filepath, preserved
+
+    def test_discarded_stage2_result_releases_the_residue_claim(self, queue, mock_api_client):
+        """
+        Stage 2 holds its claim while the result is queued. If the result is
+        dropped, nothing else releases it - the residue would stay 'claimed'
+        for 24h, and /ecm-work skips composites with claimed residues.
+        """
+        from lib.api_client import ResourceNotFoundError
+        mock_api_client.submit_result.side_effect = ResourceNotFoundError("unknown composite")
+        queue.enqueue_result(
+            {"composite": "123"},
+            completion_chain={"residue_id": 32225, "client_id": "worker-7"},
+        )
+
+        queue.drain(mock_api_client)
+
+        files = list(queue.completions_dir.glob("residue_abandon_*.json"))
+        assert len(files) == 1
+        assert json.loads(files[0].read_text())["payload"] == {
+            "residue_id": 32225, "client_id": "worker-7",
+        }
+
+    def test_discarded_stage1_result_drops_the_preserved_residue(self, queue, queue_dir, mock_api_client):
+        """The preserved copy is multi-hundred-MB and nothing else refers to it."""
+        from lib.api_client import ResourceNotFoundError
+        mock_api_client.submit_result.side_effect = ResourceNotFoundError("unknown composite")
+        filepath, preserved = self._residue_chain_result(queue, queue_dir)
+
+        queue.drain(mock_api_client)
+
+        assert not filepath.exists()
+        assert not preserved.exists()
+
+    def test_discarded_stage1_result_releases_the_assignment(self, queue, queue_dir, mock_api_client):
+        from lib.api_client import ResourceNotFoundError
+        mock_api_client.submit_result.side_effect = ResourceNotFoundError("unknown composite")
+        self._residue_chain_result(queue, queue_dir)
+
+        queue.drain(mock_api_client)
+
+        files = list(queue.completions_dir.glob("work_abandon_*.json"))
+        assert len(files) == 1
+        assert json.loads(files[0].read_text())["payload"] == {
+            "work_id": "work-123", "client_id": "gpu-1",
+        }
+
+    def test_duplicate_rejection_completes_instead_of_abandoning(self, queue, mock_api_client):
+        """
+        'Duplicate' means the server already has this result: the assignment is
+        fully accounted for, so abandoning would push a recorded composite back
+        into the pool for someone to redo.
+        """
+        mock_api_client.submit_result.side_effect = RuntimeError("Duplicate submission")
+        queue.enqueue_result({"composite": "123", "work_id": "work-123"})
+        queue.attach_work_completion("work-123", "worker-7")
+
+        queue.drain(mock_api_client)
+
+        assert list(queue.completions_dir.glob("work_abandon_*.json")) == []
+        files = list(queue.completions_dir.glob("work_complete_*.json"))
+        assert len(files) == 1
+        assert json.loads(files[0].read_text())["payload"] == {
+            "work_id": "work-123", "client_id": "worker-7",
+        }
+
+    def test_missing_resource_rejection_still_abandons(self, queue, mock_api_client):
+        mock_api_client.submit_result.side_effect = RuntimeError("composite not found")
+        queue.enqueue_result({"composite": "123", "work_id": "work-123"})
+        queue.attach_work_completion("work-123", "worker-7")
+
+        queue.drain(mock_api_client)
+
+        assert len(list(queue.completions_dir.glob("work_abandon_*.json"))) == 1
+        assert list(queue.completions_dir.glob("work_complete_*.json")) == []
+
+
+class TestStage1ChainCompletesWork:
+    """
+    Stage 1's assignment is held while its result is queued, and its chain is
+    the residue upload - so that chain has to close the assignment out too.
+    """
+
+    def _enqueue(self, queue, queue_dir, work_id: Optional[str] = "work-123"):
+        residue = Path(queue_dir) / "stage1_batch.txt"
+        residue.write_text("METHOD=ECM; SIGMA=3:123; B1=110000000; N=99\n")
+        chain = {
+            "action": "residue_upload",
+            "residue_file": str(residue),
+            "client_id": "gpu-1",
+            "expiry_days": 7,
+        }
+        if work_id:
+            chain["work_id"] = work_id
+        return queue.enqueue_result({"composite": "99", "work_id": work_id},
+                                    completion_chain=chain)
+
+    def test_completes_work_after_residue_upload(self, queue, queue_dir, mock_api_client):
+        self._enqueue(queue, queue_dir)
+
+        success, fail = queue.drain(mock_api_client)
+
+        assert (success, fail) == (1, 0)
+        mock_api_client.upload_residue.assert_called_once()
+        mock_api_client.complete_work.assert_called_once_with(
+            work_id="work-123", client_id="gpu-1",
+        )
+
+    def test_manual_stage1_without_work_id_completes_nothing(self, queue, queue_dir, mock_api_client):
+        self._enqueue(queue, queue_dir, work_id=None)
+
+        queue.drain(mock_api_client)
+
+        mock_api_client.complete_work.assert_not_called()
+
+    def test_has_pending_result_for_work(self, queue):
+        queue.enqueue_result({"composite": "123", "work_id": "work-123"})
+        assert queue.has_pending_result_for_work("work-123") is True
+        assert queue.has_pending_result_for_work("work-999") is False
+
+
+class TestQueueFileRobustness:
+    """Malformed or half-written files must never escape into the work loop."""
+
+    def test_non_object_json_is_skipped(self, queue, mock_api_client):
+        queue._ensure_dirs()
+        (queue.results_dir / "result_bad.json").write_text("[]")
+        queue.enqueue_result({"composite": "123", "work_id": "work-123"})
+
+        # Both the scan and the drain have to tolerate it.
+        assert queue.attach_work_completion("work-123", "worker-7") is True
+        assert queue.has_pending_result_for_work("work-123") is True
+        success, fail = queue.drain(mock_api_client)
+        assert success == 1
+
+    def test_invalid_utf8_is_skipped(self, queue, mock_api_client):
+        queue._ensure_dirs()
+        (queue.results_dir / "result_bad.json").write_bytes(b'{"type": "result", "p": "\xff\xfe')
+        queue.enqueue_result({"composite": "123", "work_id": "work-123"})
+
+        assert queue.attach_work_completion("work-123", "worker-7") is True
+        queue.drain(mock_api_client)
+
+    def test_rewrite_of_unserializable_item_fails_cleanly(self, queue):
+        filepath = queue.enqueue_result({"composite": "123"})
+        original = filepath.read_text()
+
+        assert queue._rewrite_item(filepath, {"bad": object()}) is False
+
+        assert filepath.read_text() == original  # Untouched
+        assert list(queue.results_dir.glob("*.tmp")) == []
+
+    def test_stale_tmp_sidecars_are_cleaned_up(self, queue, mock_api_client):
+        import os as _os
+        import time as _time
+        queue._ensure_dirs()
+        stale = queue.results_dir / "result_20260101_000000_000000.json.tmp"
+        stale.write_text("{}")
+        old = _time.time() - 7200
+        _os.utime(stale, (old, old))
+        fresh = queue.results_dir / "result_20260101_000001_000000.json.tmp"
+        fresh.write_text("{}")
+        queue.enqueue_result({"composite": "123"})
+
+        queue.drain(mock_api_client)
+
+        assert not stale.exists()
+        assert fresh.exists()  # A live rewrite in another process may own it
+
+    def test_failed_drain_persists_attempts_atomically(self, queue, mock_api_client):
+        """
+        The attempt bump runs on every drain of a queued result - up to
+        hundreds of times during an outage. A truncating in-place write that
+        died midway would leave the only copy of a multi-hour result as
+        unparseable JSON, so it goes through the same tmp+replace path the
+        chain attach uses.
+        """
+        mock_api_client.submit_result.return_value = None
+        filepath = queue.enqueue_result({"composite": "123"})
+
+        with patch.object(queue, "_rewrite_item", wraps=queue._rewrite_item) as rewrite:
+            queue.drain(mock_api_client)
+
+        rewrite.assert_called_once()
+        assert rewrite.call_args[0][0] == filepath
+        assert json.loads(filepath.read_text())["attempts"] == 1
+        assert list(queue.results_dir.glob("*.tmp")) == []
+
+
+class TestConcurrentDrainSafety:
+    """
+    Two clients (the documented stage1/stage2 split) share data/queue with no
+    other synchronization.
+    """
+
+    def test_attach_declines_when_another_process_holds_the_item(self, queue):
+        import fcntl
+        filepath = queue.enqueue_result({"composite": "123", "work_id": "work-123"})
+
+        fd = os.open(filepath, os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            # A concurrent drain owns this file and may be about to unlink it.
+            assert queue.attach_work_completion("work-123", "worker-7") is False
+        finally:
+            os.close(fd)
+
+        assert "completion_chain" not in json.loads(filepath.read_text())
+
+    def test_attach_does_not_resurrect_a_submitted_result(self, queue):
+        """An item unlinked by another process's drain must not come back."""
+        filepath = queue.enqueue_result({"composite": "123", "work_id": "work-123"})
+
+        real_iter = queue._iter_result_items
+
+        def unlink_then_iter(*args, **kwargs):
+            items = list(real_iter(*args, **kwargs))
+            filepath.unlink()  # The other process's drain accepted and removed it
+            return iter(items)
+
+        with patch.object(queue, "_iter_result_items", side_effect=unlink_then_iter):
+            assert queue.attach_work_completion("work-123", "worker-7") is False
+
+        assert not filepath.exists()

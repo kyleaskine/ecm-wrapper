@@ -586,6 +586,11 @@ class CompositeExecutionEngine:
         # Current t-level tracking
         current_t_level = start_t_level
 
+        # Set by the CPU thread when a per-batch submission fails and is queued.
+        # The caller needs it to avoid completing the assignment with no progress
+        # recorded (see FactorResult.submission_failed).
+        submit_failed = threading.Event()
+
         def gpu_producer() -> None:
             """GPU thread: Run stage 1 for each batch, put residues in queue."""
             self.logger.info("[GPU Thread] Starting production")
@@ -776,9 +781,14 @@ class CompositeExecutionEngine:
                             step_results['parametrization'] = 3
                             if work_id:
                                 step_results['work_id'] = work_id
-                            self.wrapper.submit_result(
+                            if not self.wrapper.submit_result(
                                 step_results, project, 'gmp-ecm-ecm'
-                            )
+                            ):
+                                submit_failed.set()
+                                self.logger.warning(
+                                    f"[CPU Thread] Failed to submit stage-1 factor "
+                                    f"results for B1={b1}"
+                                )
 
                         shutdown_event.set()
                         residue_queue.task_done()
@@ -857,9 +867,14 @@ class CompositeExecutionEngine:
                                     step_results['parametrization'] = 3
                                     if work_id:
                                         step_results['work_id'] = work_id
-                                    self.wrapper.submit_result(
+                                    if not self.wrapper.submit_result(
                                         step_results, project, 'gmp-ecm-ecm'
-                                    )
+                                    ):
+                                        submit_failed.set()
+                                        self.logger.warning(
+                                            "[CPU Thread] Failed to submit stage-2 "
+                                            f"factor results for B1={b1}"
+                                        )
                                 residue_queue.task_done()
                                 if residue_file.exists():
                                     residue_file.unlink()
@@ -884,6 +899,7 @@ class CompositeExecutionEngine:
                                 step_results, project, 'gmp-ecm-ecm'
                             )
                             if not submit_response:
+                                submit_failed.set()
                                 self.logger.warning(
                                     f"[CPU Thread] Failed to submit results for B1={b1}"
                                 )
@@ -964,6 +980,7 @@ class CompositeExecutionEngine:
         result.execution_time = time.time() - start_time
         result.success = len(all_factors) > 0
         result.interrupted = self.wrapper.interrupted
+        result.submission_failed = submit_failed.is_set()
 
         # Attach t-level info via extra attributes
         result.t_level_achieved = current_t_level  # type: ignore[attr-defined]

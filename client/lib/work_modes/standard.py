@@ -254,6 +254,16 @@ class StandardAutoWorkMode(WorkMode):
                     return True
                 self.logger.error("T-level mode ran zero curves, execution may have failed")
                 return False
+            if result.submission_failed:
+                # At least one B1 batch is sitting in the submission queue. The
+                # curves ran, so this is a submission failure, not an execution
+                # one: reporting success here would complete the assignment with
+                # no t-level progress recorded and /ecm-work would immediately
+                # hand the same composite to another client.
+                self.logger.warning(
+                    "T-level batch submission(s) failed and were queued for retry"
+                )
+                return False
             return True
 
         # B1/B2 modes need to submit here

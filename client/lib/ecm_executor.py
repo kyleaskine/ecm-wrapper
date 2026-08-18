@@ -300,6 +300,9 @@ class ECMWrapper(BaseWrapper):
         all_sigmas = []
         total_curves = 0
         curve_history = []  # Track B1 values and curves for t-level calculation
+        # Per-batch submissions happen inside this loop, so a failure here is the
+        # only signal the caller gets that the work was done but not reported.
+        submission_failed = False
 
         # Progressive loop: start from start_t_level (default 0) and work up to target
         current_t_level = config.start_t_level
@@ -476,6 +479,7 @@ class ECMWrapper(BaseWrapper):
                     program_name = 'gmp-ecm-ecm'
                     submit_response = self.submit_result(step_results, config.project, program_name)
                     if not submit_response:
+                        submission_failed = True
                         self.logger.warning(f"Failed to submit results for B1={b1}")
 
                 # Break if factor found
@@ -490,6 +494,7 @@ class ECMWrapper(BaseWrapper):
                     result.success = True
                     result.t_level_achieved = current_t_level  # Track achieved t-level
                     result.curve_summary = self._parse_curve_history(curve_history)
+                    result.submission_failed = submission_failed
                     return result
 
                 # Update current t-level after this batch
@@ -521,6 +526,7 @@ class ECMWrapper(BaseWrapper):
         result.t_level_achieved = current_t_level  # Track achieved t-level
         result.interrupted = self.interrupted  # Signal that execution was interrupted
         result.curve_summary = self._parse_curve_history(curve_history)
+        result.submission_failed = submission_failed
 
         return result
 

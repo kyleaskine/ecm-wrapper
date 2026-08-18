@@ -9,20 +9,43 @@ Queue directory structure:
     data/queue/residues/    - Preserved residue files + metadata for failed uploads
     data/queue/completions/ - Failed work/residue completion calls
 """
+import contextlib
 import datetime
+import errno
 import json
 import logging
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple, TYPE_CHECKING
 
 from .api_client import ResourceNotFoundError, PermanentUploadError
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platform
+    fcntl = None  # type: ignore[assignment]
+
 if TYPE_CHECKING:
     from .api_client import APIClient
 
 logger = logging.getLogger(__name__)
+
+# An item is discarded once it has been unsubmittable for this long. This used
+# to be a flat 200-attempt cap, but attempts are consumed by the work loop's
+# 30-second no-work poll rather than by elapsed time, so a server outage burned
+# through them in about two hours - far short of the server's 1-day assignment
+# expiry that holding a queued result is meant to ride out.
+MAX_QUEUE_ITEM_AGE = datetime.timedelta(days=7)
+
+# Fallback cap for items whose created_at is missing or unparseable (~2 days of
+# 30-second polling), so nothing can sit in the queue forever.
+MAX_QUEUE_ATTEMPTS = 5000
+
+# Rewrite sidecars older than this are leftovers from a rewrite that was killed
+# midway; a live one exists for microseconds.
+STALE_TMP_AGE_SECONDS = 3600
 
 
 class SubmissionQueue:
@@ -414,6 +437,19 @@ class SubmissionQueue:
                 return True
         return False
 
+    def has_pending_result_for_work(self, work_id: str) -> bool:
+        """
+        True if a queued result item belongs to this work assignment.
+
+        Stage 1 needs this rather than attach_work_completion: its results
+        already carry a residue_upload chain, which now completes the
+        assignment itself once the result and residue land.
+        """
+        for _, data in self._iter_result_items():
+            if (data.get("payload") or {}).get("work_id") == work_id:
+                return True
+        return False
+
     def _iter_result_items(
         self,
         newest_first: bool = False,
@@ -426,7 +462,10 @@ class SubmissionQueue:
         stat() (which would race a concurrent drain unlinking the file), and it
         cannot tie the way a coarse st_mtime can. Unreadable or half-written
         files are skipped rather than raising: callers run inside failure
-        handling, where an exception would escape into the work loop.
+        handling, where an exception would escape into the work loop. That
+        covers a truncated multi-byte read (UnicodeDecodeError) and a file whose
+        top-level JSON is not an object, both of which reach this loop from a
+        half-written or hand-edited file.
         """
         if not self.results_dir.exists():
             return
@@ -434,9 +473,9 @@ class SubmissionQueue:
             try:
                 with open(f, 'r') as fh:
                     data = json.load(fh)
-            except (json.JSONDecodeError, OSError):
+            except (ValueError, OSError):
                 continue
-            if data.get("type") != "result":
+            if not isinstance(data, dict) or data.get("type") != "result":
                 continue
             yield f, data
 
@@ -473,25 +512,118 @@ class SubmissionQueue:
         if newest is None:
             return False
 
-        path, item = newest
-        item["completion_chain"] = {
-            "action": "work_complete",
-            "work_id": work_id,
-            "client_id": client_id,
-        }
-        # Rewrite atomically: a truncating in-place write that dies midway would
-        # leave the only copy of a multi-hour result as unparseable JSON, which
-        # _iter_result_items and drain() both skip forever.
-        if not self._rewrite_item(path, item):
-            return False
+        path = newest[0]
+        # Re-read and rewrite under the item's lock: the scan above is
+        # unsynchronized, and a drain in another client process (the decoupled
+        # two-stage setup shares data/queue) may have submitted and unlinked
+        # this file since. Writing anyway would resurrect an accepted result for
+        # every future drain to re-POST.
+        with self._locked_item(path, blocking=False) as item:
+            if item is None:
+                # Gone, unreadable, or a concurrent drain owns it. Declining
+                # leaves the caller to abandon the assignment, which is safe.
+                self.logger.info(
+                    f"Could not attach work completion for {work_id}: "
+                    f"{path.name} is gone or locked by another process"
+                )
+                return False
+            if item.get("completion_chain"):
+                return False
+            item["completion_chain"] = {
+                "action": "work_complete",
+                "work_id": work_id,
+                "client_id": client_id,
+            }
+            # Rewrite atomically: a truncating in-place write that dies midway
+            # would leave the only copy of a multi-hour result as unparseable
+            # JSON, which _iter_result_items and drain() both skip forever.
+            if not self._rewrite_item(path, item):
+                return False
 
         self.logger.info(
             f"Attached work completion for {work_id} to queued result {path.name}"
         )
         return True
 
+    @staticmethod
+    def _lock_fd(fd: int, blocking: bool) -> bool:
+        """
+        Take an exclusive flock. False means someone else holds it.
+
+        A filesystem that does not support locking (or a platform without
+        fcntl) reports success: an unlocked queue is how this worked before,
+        and stalling every drain there would be worse than the race.
+        """
+        if fcntl is None:
+            return True
+        flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+        try:
+            fcntl.flock(fd, flags)
+            return True
+        except OSError as e:
+            if e.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
+                return False
+            return True
+
+    @contextlib.contextmanager
+    def _locked_item(
+        self,
+        path: Path,
+        blocking: bool = True,
+    ) -> Iterator[Optional[Dict[str, Any]]]:
+        """
+        Yield one parsed queue item with an exclusive lock held on its file.
+
+        Yields None (holding nothing) when the file is missing, unreadable, not
+        a queue item, or - with blocking=False - already locked elsewhere.
+
+        The lock matters because the documented decoupled two-stage setup runs
+        two clients from the same directory, sharing data/queue with no other
+        synchronization. Every read-modify-write here has to exclude a drain in
+        the other process: it can unlink the file the instant its POST is
+        accepted, and an os.replace landing after that would recreate an
+        already-submitted result. Checking st_nlink after acquiring the lock
+        catches the case where the unlink happened while we waited.
+
+        Callers may unlink the file inside the block; the lock goes away with
+        the descriptor either way.
+        """
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            yield None
+            return
+        try:
+            if not self._lock_fd(fd, blocking=blocking):
+                yield None
+                return
+            if os.fstat(fd).st_nlink == 0:
+                # Deleted while we waited for the lock - nothing left to act on.
+                yield None
+                return
+            try:
+                with open(fd, 'r', closefd=False) as fh:
+                    data = json.load(fh)
+            except (ValueError, OSError) as e:
+                self.logger.warning(
+                    f"Skipping unreadable queue item {path.name}: {e}"
+                )
+                yield None
+                return
+            if not isinstance(data, dict) or "type" not in data:
+                yield None
+                return
+            yield data
+        finally:
+            os.close(fd)
+
     def _rewrite_item(self, path: Path, item: Dict[str, Any]) -> bool:
-        """Replace a queue item file atomically. Returns False on I/O error."""
+        """
+        Replace a queue item file atomically. Returns False on any write error.
+
+        Callers hold the item's lock (see _locked_item), so the os.replace
+        cannot land on a file another process already submitted and unlinked.
+        """
         tmp = path.with_name(path.name + ".tmp")
         try:
             with open(tmp, 'w') as fh:
@@ -500,10 +632,65 @@ class SubmissionQueue:
                 os.fsync(fh.fileno())
             os.replace(tmp, path)
             return True
-        except OSError as e:
+        except Exception as e:
+            # Not just OSError: a json.dump TypeError from an unserializable
+            # payload would otherwise escape into the work loop through
+            # cleanup_on_failure and leave the sidecar behind.
             self.logger.error(f"Failed to rewrite queue item {path.name}: {e}")
-            tmp.unlink(missing_ok=True)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
             return False
+
+    def _cleanup_stale_tmp_files(self) -> None:
+        """
+        Remove *.json.tmp sidecars from a rewrite that was killed midway.
+
+        No glob in the queue matches them, so they would accumulate forever.
+        Only files older than STALE_TMP_AGE_SECONDS are touched: deleting a
+        live one would just make another process's os.replace fail.
+        """
+        cutoff = time.time() - STALE_TMP_AGE_SECONDS
+        for subdir in (self.results_dir, self.residues_dir, self.completions_dir):
+            if not subdir.exists():
+                continue
+            for tmp in subdir.glob("*.json.tmp"):
+                try:
+                    if tmp.stat().st_mtime < cutoff:
+                        tmp.unlink(missing_ok=True)
+                        self.logger.info(f"Removed stale queue temp file: {tmp.name}")
+                except OSError:
+                    continue
+
+    def _expiry_reason(self, item: Dict[str, Any]) -> Optional[str]:
+        """
+        Why this item should be discarded, or None to keep retrying it.
+
+        Age, not attempt count: the work loop polls for work every 30 seconds
+        while the server is down, and each poll drains the queue, so an attempt
+        counter measures polling frequency rather than how long the outage has
+        lasted. MAX_QUEUE_ITEM_AGE is deliberately longer than the server's
+        1-day assignment expiry, which is the backstop for held work.
+        """
+        created_raw = item.get("created_at")
+        created: Optional[datetime.datetime] = None
+        if isinstance(created_raw, str):
+            try:
+                created = datetime.datetime.fromisoformat(created_raw)
+            except ValueError:
+                created = None
+
+        if created is not None:
+            age = datetime.datetime.now() - created
+            if age > MAX_QUEUE_ITEM_AGE:
+                return f"{age.days} day(s) of failed retries"
+            return None
+
+        attempts = item.get("attempts", 0)
+        if isinstance(attempts, int) and attempts > MAX_QUEUE_ATTEMPTS:
+            return f"{attempts} failed attempts (item has no usable created_at)"
+        return None
 
     def _get_queue_files(self) -> List[Path]:
         """Get all queue item files sorted oldest-first."""
@@ -515,9 +702,12 @@ class SubmissionQueue:
                     try:
                         with open(f, 'r') as fh:
                             data = json.load(fh)
-                        if "type" in data:  # Only process queue item files
+                        # isinstance guard: a half-written or hand-edited file
+                        # whose top-level JSON is not an object must be skipped,
+                        # not crash the scan.
+                        if isinstance(data, dict) and "type" in data:
                             files.append(f)
-                    except (json.JSONDecodeError, OSError):
+                    except (ValueError, OSError):
                         continue
         # Sort by creation time (oldest first)
         files.sort(key=lambda p: p.stat().st_mtime)
@@ -536,6 +726,7 @@ class SubmissionQueue:
         Returns:
             Tuple of (success_count, fail_count)
         """
+        self._cleanup_stale_tmp_files()
         files = self._get_queue_files()
         if not files:
             return (0, 0)
@@ -546,46 +737,51 @@ class SubmissionQueue:
 
         for filepath in files:
             try:
-                with open(filepath, 'r') as f:
-                    item = json.load(f)
+                # The lock is held for the whole read-retry-write cycle so a
+                # drain in another client process cannot act on the same item.
+                with self._locked_item(filepath) as item:
+                    if item is None:
+                        continue
 
-                item_type = item.get("type", "unknown")
-                item["attempts"] = item.get("attempts", 0) + 1
+                    item_type = item.get("type", "unknown")
+                    item["attempts"] = item.get("attempts", 0) + 1
 
-                max_attempts = 200
-                if item["attempts"] > max_attempts:
-                    self.logger.warning(
-                        f"Discarding {item_type} after {item['attempts']} failed attempts: {filepath.name}"
-                    )
-                    filepath.unlink(missing_ok=True)
-                    if item_type == "residue_upload":
-                        residue_path = item.get("residue_file")
-                        if residue_path:
-                            Path(residue_path).unlink(missing_ok=True)
-                    self._release_chained_work(item)
-                    fail_count += 1
-                    continue
+                    expiry_reason = self._expiry_reason(item)
+                    if expiry_reason:
+                        self.logger.warning(
+                            f"Discarding {item_type} after {expiry_reason}: {filepath.name}"
+                        )
+                        filepath.unlink(missing_ok=True)
+                        if item_type == "residue_upload":
+                            residue_path = item.get("residue_file")
+                            if residue_path:
+                                Path(residue_path).unlink(missing_ok=True)
+                        self._discard_chained_followups(item)
+                        fail_count += 1
+                        continue
 
-                ok = self._retry_item(api_client, item)
+                    ok = self._retry_item(api_client, item)
 
-                if ok:
-                    success_count += 1
-                    self.logger.info(f"Queue drain: {item_type} succeeded ({filepath.name})")
-                    # Remove the queue file
-                    filepath.unlink(missing_ok=True)
-                    # If residue upload, also remove the preserved residue file
-                    if item_type == "residue_upload":
-                        residue_path = item.get("residue_file")
-                        if residue_path:
-                            Path(residue_path).unlink(missing_ok=True)
-                else:
-                    fail_count += 1
-                    self.logger.warning(
-                        f"Queue drain: {item_type} failed (attempt {item['attempts']}, {filepath.name})"
-                    )
-                    # Update attempt count in file
-                    with open(filepath, 'w') as f:
-                        json.dump(item, f, indent=2)
+                    if ok:
+                        success_count += 1
+                        self.logger.info(f"Queue drain: {item_type} succeeded ({filepath.name})")
+                        # Remove the queue file
+                        filepath.unlink(missing_ok=True)
+                        # If residue upload, also remove the preserved residue file
+                        if item_type == "residue_upload":
+                            residue_path = item.get("residue_file")
+                            if residue_path:
+                                Path(residue_path).unlink(missing_ok=True)
+                    else:
+                        fail_count += 1
+                        self.logger.warning(
+                            f"Queue drain: {item_type} failed (attempt {item['attempts']}, {filepath.name})"
+                        )
+                        # Persist the attempt count through the same atomic
+                        # rewrite the chain attach uses: a truncating in-place
+                        # write here runs on every drain of a multi-hour result,
+                        # and dying midway would destroy the only copy of it.
+                        self._rewrite_item(filepath, item)
 
             except Exception as e:
                 fail_count += 1
@@ -610,7 +806,9 @@ class SubmissionQueue:
         Dispatch a queued result's completion chain after a successful resubmit.
 
         - ``action == "residue_upload"`` (stage 1): upload the preserved residue,
-          linked to the attempt_id the resubmitted result returned.
+          linked to the attempt_id the resubmitted result returned, then close
+          out the assignment that was held while the result sat in the queue
+          (nothing else can complete it - this chain owns the result).
         - ``action == "work_complete"``: complete the work assignment that was
           held open while the result sat in the queue.
         - otherwise (stage 2): complete the residue with that attempt_id.
@@ -621,6 +819,8 @@ class SubmissionQueue:
         action = chain.get("action")
         if action == "residue_upload":
             self._chain_residue_upload(api_client, item, response)
+            if chain.get("work_id"):
+                self._chain_work_complete(api_client, item)
         elif action == "work_complete":
             self._chain_work_complete(api_client, item)
         else:
@@ -668,30 +868,80 @@ class SubmissionQueue:
             )
             self.enqueue_work_completion(work_id=work_id, client_id=client_id)
 
-    def _release_chained_work(self, item: Dict[str, Any]) -> None:
+    def _discard_chained_followups(
+        self,
+        item: Dict[str, Any],
+        result_landed: bool = False,
+    ) -> None:
         """
-        Release the assignment held for a result item that is being discarded.
+        Clean up after a queued result that is being dropped instead of sent.
 
-        A work_complete chain is the only thing that ever releases an assignment
-        the work loop deliberately held (see WorkMode.cleanup_on_failure). When
-        the result is dropped instead of submitted - a permanent rejection, or
-        the retry cap - that chain never runs, so the assignment would sit active
-        until the server expires it, consuming the client's active-work quota.
-        Queue an abandonment instead: the result is gone, so completing would be
-        a lie, and the composite should go back in the pool.
+        A result's completion_chain is the only thing that ever releases what
+        was held for it: a work assignment (WorkMode.cleanup_on_failure) or a
+        residue claim (Stage2ConsumerMode.cleanup_on_failure). When the result
+        is discarded - a permanent rejection, or the age cap - that chain never
+        runs, so the claim sits until the server expires it: a day of the
+        client's active-work quota for an assignment, or 24h during which
+        /ecm-work skips the whole composite because one of its residues is
+        still 'claimed'.
+
+        ``result_landed`` means the rejection itself says the server already
+        has this result (a duplicate). The assignment is then completed rather
+        than abandoned - abandoning would push a fully-recorded composite back
+        into the pool for someone to redo.
+
+        A stage-1 chain owns a preserved residue copy that nothing else
+        references. It is dropped here too, or it stays on disk (hundreds of MB
+        per GPU batch) with no metadata pointing at it.
         """
         chain = item.get("completion_chain") or {}
-        if chain.get("action") != "work_complete":
+        if not chain:
             return
-        work_id = chain.get("work_id")
+
+        residue_path = chain.get("residue_file")
+        if residue_path:
+            Path(residue_path).unlink(missing_ok=True)
+            self.logger.info(
+                f"Dropped preserved residue for discarded result: {residue_path}"
+            )
+
+        action = chain.get("action")
         client_id = chain.get("client_id")
-        if not work_id or not client_id:
+
+        # Both chain shapes that hold an assignment carry work_id: the plain
+        # work_complete chain, and stage 1's residue_upload chain.
+        work_id = chain.get("work_id")
+        if work_id and client_id:
+            if result_landed:
+                self.logger.warning(
+                    f"Queued result for work {work_id} was rejected as already "
+                    "submitted; completing the assignment held for it"
+                )
+                self.enqueue_work_completion(work_id=work_id, client_id=client_id)
+            else:
+                self.logger.warning(
+                    f"Queued result for work {work_id} was discarded; releasing the "
+                    "assignment that was held for it"
+                )
+                self.enqueue_work_abandonment(work_id=work_id, client_id=client_id)
+            return
+
+        if action in ("residue_upload", "work_complete"):
+            # Manual stage 1 (no assignment), or a chain missing its ids.
+            return
+
+        # Stage-2 shape: {residue_id, client_id}. There is no stage-2 attempt_id
+        # to complete the residue with once the result is gone, so release the
+        # claim - another client redoing stage 2 costs CPU, but leaving the
+        # residue 'claimed' locks the composite out of ECM work for 24h.
+        residue_id = chain.get("residue_id")
+        if residue_id is None or not client_id:
             return
         self.logger.warning(
-            f"Queued result for work {work_id} was discarded; releasing the "
-            "assignment that was held for it"
+            f"Queued result for residue {residue_id} was discarded; releasing "
+            "the residue claim that was held for it"
         )
-        self.enqueue_work_abandonment(work_id=work_id, client_id=client_id)
+        self.enqueue_residue_abandonment(residue_id=residue_id, client_id=client_id)
 
     def _chain_residue_upload(
         self,
@@ -927,26 +1177,32 @@ class SubmissionQueue:
                 f"Discarding {item_type} from queue: resource no longer exists on server "
                 f"(likely expired or already completed)"
             )
-            self._release_chained_work(item)
+            self._discard_chained_followups(item)
             return True  # Treat as success to remove from queue
 
         except PermanentUploadError as e:
             # 4xx residue upload rejection: composite factored, stage-1 attempt
             # gone, invalid file, etc. Retrying can never succeed, so discard.
             self.logger.warning(f"Discarding {item_type} from queue: {e}")
-            self._release_chained_work(item)
+            self._discard_chained_followups(item)
             return True  # Treat as success to remove from queue
 
         except Exception as e:
             error_str = str(e)
-            # Detect permanent failures that will never succeed on retry
-            if any(phrase in error_str for phrase in [
-                "Duplicate", "already exists", "checksum matches",
-                "not claimed by client", "not found"
-            ]):
+            # These rejections mean the server already has this submission: the
+            # work is recorded even though the queued copy is being dropped, so
+            # anything held for it should be completed, not abandoned.
+            landed_phrases = ["Duplicate", "already exists", "checksum matches"]
+            # These mean it never landed and never will.
+            missing_phrases = ["not claimed by client", "not found"]
+            if any(phrase in error_str for phrase in landed_phrases + missing_phrases):
+                landed = (
+                    item_type == "result"
+                    and any(phrase in error_str for phrase in landed_phrases)
+                )
                 self.logger.warning(
                     f"Discarding {item_type} from queue: permanent error: {error_str}"
                 )
-                self._release_chained_work(item)
+                self._discard_chained_followups(item, result_landed=landed)
                 return True  # Remove from queue
             raise  # Re-raise for transient errors

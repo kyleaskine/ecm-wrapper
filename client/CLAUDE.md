@@ -363,11 +363,12 @@ Supports: lowercase/uppercase e, decimals (2.6e8), explicit + sign (26e+7)
   holding on a crash would later mark a partially-executed assignment complete.
   The server's 1-day assignment expiry (`timeout_days` in `ecm_work.py`) is the
   backstop.
-- **Fix** (`lib/submission_queue.py`): `_release_chained_work()` queues a
-  `work_abandon` when a chained result is discarded (permanent rejection, or the
-  200-attempt cap). The chain is the only thing that releases a held assignment,
-  so dropping it silently would pin the composite until expiry and eat into the
-  server's `max_work_items_per_client` (12) quota.
+- **Fix** (`lib/submission_queue.py`): `_discard_chained_followups()` (was
+  `_release_chained_work()`) queues a `work_abandon` when a chained result is
+  discarded (permanent rejection, or the age cap). The chain is the only thing
+  that releases a held assignment, so dropping it silently would pin the
+  composite until expiry and eat into the server's `max_work_items_per_client`
+  (12) quota.
 - **Note**: the result submits fine either way — the server's `abandon_work`
   only sets `status='failed'`, and `_resolve_composite`/`_effective_work_id`
   look the assignment up by id without filtering on status. The bug costs
@@ -375,6 +376,77 @@ Supports: lowercase/uppercase e, decimals (2.6e8), explicit + sign (26e+7)
 - **Tests**: `tests/test_submission_queue.py` (`TestAttachWorkCompletion`,
   `TestChainedWorkCompletion`), `tests/test_work_modes.py`
   (`TestCleanupOnFailure`).
+
+### Hold-on-Submission-Failure Extended to Every Mode (2026-08)
+Follow-up review of the entry above: the hold was wired into exactly one of the
+paths that needed it, and the discard path only knew about work assignments.
+
+- **T-level mode never reported a failed submission** (`lib/work_modes/standard.py`):
+  t-level mode — the default for `ecm_client.py` — submits per B1 batch inside
+  `run_tlevel_v2`, and `submit_results()` returned `True` whenever
+  `curves_run > 0`. A queued batch therefore looked like success: `complete_work()`
+  marked the assignment done with **zero t-level progress recorded**, and
+  `/ecm-work` handed the same composite (`current_t < target_t`) straight back
+  out. `FactorResult.submission_failed` (set by `run_tlevel_v2` and by
+  `execution_engine.run_pipelined`, carried through `BatchResult`) now makes
+  `submit_results()` return `False`, which raises `SubmissionFailedError` and
+  holds the assignment.
+- **Stage 1 abandoned despite a queued result** (`lib/work_modes/stage1_producer.py`):
+  its `cleanup_on_failure()` override never consulted the queue, so a multi-hour
+  GPU batch released its composite even with the result and residue safely
+  queued. It now holds on `SubmissionFailedError` when
+  `has_pending_result_for_work()` is true. Stage 1 can't use
+  `attach_work_completion()` (its result already carries the `residue_upload`
+  chain), so the chain itself carries `work_id` and `_run_completion_chain`
+  completes the assignment after the residue upload. Its abandon-failure path
+  also queued a `work_complete` where every other mode queues a `work_abandon`.
+- **Adaptive stage 2 abandoned unconditionally** (`lib/work_modes/adaptive.py`):
+  the `_current_mode == 'stage2'` branch skipped the `has_pending_result_for_residue()`
+  hold that `Stage2ConsumerMode` has, releasing the residue for another client
+  to redo hours of stage 2 while the chained `complete_residue` fired against a
+  claim this client no longer held.
+- **Discarded results left residue claims held** (`lib/submission_queue.py`):
+  the discard path only handled `work_complete` chains, so a dropped stage-2
+  result left the residue `claimed` for the full 24h timeout — and `ecm_work.py`
+  excludes composites with claimed residues, blocking the whole composite for a
+  day. `_discard_chained_followups()` now covers all three chain shapes, and
+  also deletes the preserved stage-1 residue copy (hundreds of MB with nothing
+  left referencing it).
+- **"Duplicate" rejections abandoned work that had landed**: `Duplicate` /
+  `already exists` / `checksum matches` mean the server already has the result,
+  so the held assignment is now **completed** rather than abandoned; `not found`
+  / `not claimed by client` still abandon.
+- **Retry cap was measured in polls, not time**: 200 attempts sounds generous,
+  but the work loop drains the queue on every 30-second no-work poll, so an
+  outage burned through it in ~2 hours and destroyed the very result the hold
+  existed to protect. Discard is now age-based (`MAX_QUEUE_ITEM_AGE`, 7 days —
+  longer than the server's 1-day assignment expiry), with `MAX_QUEUE_ATTEMPTS`
+  as a fallback only for items with no usable `created_at`.
+- **`drain()` still truncated in place**: the attempt bump re-opened the file
+  with `open(filepath, 'w')` on every cycle — the exact hazard `_rewrite_item()`
+  was added to avoid, run hundreds of times per outage. It goes through
+  `_rewrite_item()` now.
+- **Cross-process safety**: the documented decoupled two-stage setup runs two
+  clients from the same directory sharing `data/queue` with no locking, so a
+  drain in one process could unlink a result between the other's read and its
+  `os.replace` — resurrecting an accepted result for every future drain to
+  re-POST. Every read-modify-write now runs under `_locked_item()` (per-file
+  `flock` + an `st_nlink` check after acquiring it); `attach_work_completion()`
+  takes it non-blocking and declines (falling back to abandoning) rather than
+  waiting on a drain.
+- **Robustness**: `_iter_result_items()`/`_get_queue_files()` skip files whose
+  top-level JSON isn't an object and tolerate `UnicodeDecodeError` (both escaped
+  into the work loop before); `_rewrite_item()` catches any exception, not just
+  `OSError`, so a serialization error can't unwind through `cleanup_on_failure`;
+  stray `*.json.tmp` sidecars (killed mid-rewrite, matched by no glob) are
+  cleaned up at drain start once they're an hour old.
+- **Tests**: `tests/test_submission_queue.py` (`TestDiscardedChainCleanup`,
+  `TestStage1ChainCompletesWork`, `TestQueueFileRobustness`,
+  `TestConcurrentDrainSafety`), `tests/test_work_modes.py`
+  (`TestStage1CleanupOnFailure`, `TestAdaptiveStage2CleanupOnFailure`,
+  `TestTLevelSubmissionFailure`). `MockWrapper.submission_queue` is now
+  `Mock(spec=SubmissionQueue)` — unspecced, it kept the cleanup tests passing
+  after a rename that broke the real client.
 
 ### Aliquot Terms Reconciled with Tracker/FactorDB Before Factoring (2026-07)
 - **Problem**: only the `--resume-factordb` resume term used FactorDB's known

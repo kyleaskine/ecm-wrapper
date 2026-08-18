@@ -15,7 +15,7 @@ from ..stage1_helpers import submit_stage1_complete_workflow
 from ..results_builder import results_for_stage1
 from ..arg_parser import resolve_gpu_settings
 from ..ecm_arg_helpers import parse_sigma_arg, resolve_param
-from .base import WorkMode, WorkLoopContext
+from .base import WorkMode, WorkLoopContext, SubmissionFailedError
 
 
 class Stage1ProducerMode(WorkMode):
@@ -281,9 +281,26 @@ class Stage1ProducerMode(WorkMode):
 
     def cleanup_on_failure(self, work: Optional[Dict[str, Any]], error: BaseException) -> None:
         if self.current_work_id:
-            if not self.wrapper.abandon_work(self.current_work_id, reason="stage1_failed"):
-                # Network likely down - queue completion so assignment gets released on reconnect
-                self.wrapper.submission_queue.enqueue_work_completion(
+            queue = self.wrapper.submission_queue
+            if isinstance(error, SubmissionFailedError) and \
+                    queue.has_pending_result_for_work(self.current_work_id):
+                # A multi-hour GPU batch ran; only reporting it failed, and the
+                # queue now holds the result plus a preserved copy of the
+                # residue. Hold the assignment so another GPU doesn't redo the
+                # batch - the queued result's residue_upload chain uploads the
+                # residue and completes the assignment when it drains, and the
+                # server's 1-day expiry is the backstop.
+                #
+                # This is why the hold can't go through attach_work_completion:
+                # the result already carries the stage-1 chain.
+                self.logger.info(
+                    f"Holding work {self.current_work_id} assignment - "
+                    "completed stage-1 result is queued for retry"
+                )
+            elif not self.wrapper.abandon_work(self.current_work_id, reason="stage1_failed"):
+                # Network likely down - queue abandonment so the assignment gets
+                # released on reconnect.
+                queue.enqueue_work_abandonment(
                     self.current_work_id, self.ctx.client_id
                 )
             self.current_work_id = None

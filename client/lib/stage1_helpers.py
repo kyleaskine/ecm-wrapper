@@ -61,6 +61,10 @@ def submit_stage1_complete_workflow(
     # returns its attempt_id, the preserved residue is uploaded and linked. The
     # residue is only needed when there's no factor and the caller wants it
     # uploaded; enqueue_result() copies the file into the queue at failure time.
+    # work_id rides along so the chain can also complete the assignment: the
+    # work loop holds it while the result is queued (see
+    # Stage1ProducerMode.cleanup_on_failure), and this chain owns the result, so
+    # nothing else is in a position to close the assignment out.
     completion_chain = None
     if upload_residue and not factor_found and residue_file.exists():
         completion_chain = {
@@ -69,6 +73,8 @@ def submit_stage1_complete_workflow(
             "client_id": client_id,
             "expiry_days": 7,
         }
+        if work_id:
+            completion_chain["work_id"] = work_id
 
     # Submit stage1 results to API
     submit_response = wrapper.submit_result(
