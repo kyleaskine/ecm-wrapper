@@ -16,6 +16,7 @@ from ....dependencies import verify_admin_key, get_composite_service
 from ....services.composites import CompositeService
 from ....utils.transactions import transaction_scope
 from ....utils.query_helpers import batch_fetch_attempts_by_composite
+from ....constants import PENDING_RESIDUE_STATUSES
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -439,7 +440,7 @@ def cleanup_orphaned_residues(
             # Get residues that should have files (not completed or expired)
             # Completed residues have their files deleted intentionally
             active_residues = db.query(ECMResidue).filter(
-                ECMResidue.status.in_(['available', 'claimed'])
+                ECMResidue.status.in_(PENDING_RESIDUE_STATUSES)
             ).all()
 
             orphaned: List[Dict[str, Any]] = []
@@ -456,7 +457,7 @@ def cleanup_orphaned_residues(
                     # rather than overwritten back to 'expired'.
                     old_status = residue.status
                     if not transition_residue_status(
-                            db, residue.id, ['available', 'claimed'],
+                            db, residue.id, PENDING_RESIDUE_STATUSES,
                             'expired', clear_claim=True):
                         continue
 

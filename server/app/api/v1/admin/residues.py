@@ -17,6 +17,7 @@ from ....services.residue_manager import ResidueManager
 from ....utils.errors import get_or_404
 from ....utils.file_cleanup import stage_residue_file_deletion
 from ....utils.transactions import transaction_scope
+from ....constants import PENDING_RESIDUE_STATUSES
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -218,7 +219,7 @@ def reconcile_residues(
             .exists()
         )
         stuck_residues = db.query(ECMResidue).filter(
-            ECMResidue.status.in_(['available', 'claimed']),
+            ECMResidue.status.in_(PENDING_RESIDUE_STATUSES),
             has_linked_attempt
         ).all()
 

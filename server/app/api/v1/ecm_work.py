@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
-from sqlalchemy.orm import Session, defer
+from sqlalchemy.orm import Session, Query, defer
 from sqlalchemy import and_, or_, case, func
 from sqlalchemy.exc import IntegrityError
 from typing import Optional, Dict, Any
@@ -20,7 +20,7 @@ from ...services.t_level_calculator import TLevelCalculator
 from ...services.work_assignment import pick_and_lock_composite, UNIQUE_ACTIVE_WORK_MARKERS
 from ...utils.transactions import transaction_scope, is_unique_violation
 from ...config import get_settings
-from ...constants import ECM_BOUNDS, OPTIMAL_B1_TABLE, get_b1_above_tlevel, ACTIVE_WORK_STATUSES
+from ...constants import ECM_BOUNDS, OPTIMAL_B1_TABLE, get_b1_above_tlevel, ACTIVE_WORK_STATUSES, PENDING_RESIDUE_STATUSES
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -49,6 +49,24 @@ def _no_work_response(message: str, include_p1_fields: bool = False) -> Response
         data["pm1_b1"] = None
         data["pp1_b1"] = None
     return _json_response(data)
+
+
+def _exclude_busy_composites(db: Session, query: Query) -> Query:
+    """
+    Filter out composites that are already being worked on: an active work
+    assignment, or a pending residue (stage 1 done, stage 2 available or
+    claimed). Shared by /ecm-work and /p1-work so both honor the same claims;
+    pick_and_lock_composite(check_residues=True) mirrors these under lock.
+    """
+    # NOT EXISTS is faster than NOT IN
+    query = query.filter(~db.query(WorkAssignment.id).filter(
+        WorkAssignment.composite_id == Composite.id,
+        WorkAssignment.status.in_(ACTIVE_WORK_STATUSES)
+    ).correlate(Composite).exists())
+    return query.filter(~db.query(ECMResidue.id).filter(
+        ECMResidue.composite_id == Composite.id,
+        ECMResidue.status.in_(PENDING_RESIDUE_STATUSES)
+    ).correlate(Composite).exists())
 
 
 @router.get("/ecm-work")
@@ -155,18 +173,7 @@ def get_ecm_work(
                 Project, Project.id == ProjectComposite.project_id
             ).filter(Project.name == project)
 
-        # Exclude composites with active work assignments (NOT EXISTS is faster than NOT IN)
-        query = query.filter(~db.query(WorkAssignment.id).filter(
-            WorkAssignment.composite_id == Composite.id,
-            WorkAssignment.status.in_(ACTIVE_WORK_STATUSES)
-        ).correlate(Composite).exists())
-
-        # Exclude composites with pending residues (stage 1 done, stage 2 not yet completed)
-        # This prevents duplicate stage 1 work when residues are waiting to be processed
-        query = query.filter(~db.query(ECMResidue.id).filter(
-            ECMResidue.composite_id == Composite.id,
-            ECMResidue.status.in_(['available', 'claimed'])
-        ).correlate(Composite).exists())
+        query = _exclude_busy_composites(db, query)
 
         # Apply sorting strategy based on work_type
         if work_type == "progressive":
@@ -363,6 +370,10 @@ def get_p1_work(
     since PM1/PP1 sweeps are valuable even on composites that have reached
     their ECM target.
 
+    Exclusions (same as /ecm-work):
+    - Composites with active work assignments
+    - Composites with pending residues (status='available' or 'claimed')
+
     Args:
         client_id: Unique identifier for the requesting client
         method: Which methods to check - "pm1" (P-1 only), "pp1" (P+1 only),
@@ -410,7 +421,8 @@ def get_p1_work(
             )
 
         # Build candidate query - no ecm_progress filter (PM1/PP1 valuable regardless)
-        query = db.query(Composite).filter(
+        # Defer the large `number` column - only `current_composite` is needed
+        query = db.query(Composite).options(defer(Composite.number)).filter(
             and_(
                 Composite.is_active == True,
                 Composite.is_fully_factored == False,
@@ -438,11 +450,11 @@ def get_p1_work(
                 Project, Project.id == ProjectComposite.project_id
             ).filter(Project.name == project)
 
-        # Exclude composites with active work assignments (NOT EXISTS is faster than NOT IN)
-        query = query.filter(~db.query(WorkAssignment.id).filter(
-            WorkAssignment.composite_id == Composite.id,
-            WorkAssignment.status.in_(ACTIVE_WORK_STATUSES)
-        ).correlate(Composite).exists())
+        # Same claims as /ecm-work: active assignments and pending residues.
+        # A factor found by P-1 doesn't stop a stage 2 worker that already
+        # holds the residue (nothing notifies it, and the residue is only
+        # expired by an admin cleanup), so wait for stage 2 to finish.
+        query = _exclude_busy_composites(db, query)
 
         # Build SQL CASE expression: map target_t_level -> required B1
         # (one step above target in the optimal B1 table)
@@ -476,9 +488,9 @@ def get_p1_work(
             )
 
         # Lock the chosen row and re-verify it is still free (the NOT EXISTS
-        # filter above can be stale when a concurrent request commits
+        # filters above can be stale when a concurrent request commits
         # mid-query - see pick_and_lock_composite)
-        assigned_composite = pick_and_lock_composite(db, query, check_residues=False)
+        assigned_composite = pick_and_lock_composite(db, query, check_residues=True)
 
         if not assigned_composite:
             return _no_work_response(

@@ -12,7 +12,7 @@ from ..models.work_assignments import WorkAssignment
 from ..models.residues import ECMResidue
 from ..schemas.work import WorkRequest, WorkResponse
 from .t_level_calculator import TLevelCalculator
-from ..constants import ECM_BOUNDS, ACTIVE_WORK_STATUSES
+from ..constants import ECM_BOUNDS, ACTIVE_WORK_STATUSES, PENDING_RESIDUE_STATUSES
 from ..utils.transactions import is_unique_violation
 
 logger = logging.getLogger(__name__)
@@ -197,7 +197,8 @@ def pick_and_lock_composite(
         ordered_query: Filtered and ordered Composite query (must already
             exclude busy composites; the recheck mirrors those exclusions)
         check_residues: Also re-check for pending residues (stage 1 done,
-            stage 2 pending) - used by /ecm-work but not /p1-work
+            stage 2 pending) - used by /ecm-work and /p1-work, not the
+            legacy /work service
         max_attempts: Candidates to try before giving up (bounds lock
             accumulation within one request)
 
@@ -220,7 +221,7 @@ def pick_and_lock_composite(
         if not conflict and check_residues:
             conflict = db.query(ECMResidue.id).filter(
                 ECMResidue.composite_id == candidate.id,
-                ECMResidue.status.in_(['available', 'claimed'])
+                ECMResidue.status.in_(PENDING_RESIDUE_STATUSES)
             ).first() is not None
 
         if not conflict:

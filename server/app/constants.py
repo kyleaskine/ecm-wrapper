@@ -12,6 +12,11 @@ from typing import List, Tuple
 # for assignments that should block new work or count as "active".
 ACTIVE_WORK_STATUSES = ['assigned', 'claimed', 'running']
 
+# Residue statuses that mean stage 2 is still outstanding: the file is waiting
+# for a consumer, or one is processing it. Blocks new work on the composite
+# (/ecm-work, /p1-work) and marks the residue as still in play.
+PENDING_RESIDUE_STATUSES = ['available', 'claimed']
+
 # ECM parameter table based on Paul Zimmerman's GMP-ECM 7 recommendations
 # Source: https://www.rieselprime.de/ziki/Elliptic_curve_method
 # Format: (max_digits, b1, b2, typical_curves)

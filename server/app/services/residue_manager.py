@@ -26,6 +26,7 @@ from ..models.composites import Composite
 from ..models.attempts import ECMAttempt
 from ..models.projects import Project, ProjectComposite
 from ..config import get_settings
+from ..constants import PENDING_RESIDUE_STATUSES
 from ..utils.file_cleanup import stage_residue_file_deletion
 from ..utils.transactions import is_unique_violation
 from .t_level_calculator import TLevelCalculator
@@ -1019,14 +1020,14 @@ class ResidueManager:
                 Composite.is_fully_factored == True,  # noqa: E712
                 Composite.is_complete == True,  # noqa: E712
             ),
-            ECMResidue.status.in_(['available', 'claimed'])
+            ECMResidue.status.in_(PENDING_RESIDUE_STATUSES)
         ).all()
 
         count = 0
         for residue in residues_to_cleanup:
             try:
                 if not transition_residue_status(
-                        db, residue.id, ['available', 'claimed'], 'expired'):
+                        db, residue.id, PENDING_RESIDUE_STATUSES, 'expired'):
                     continue
 
                 # Defer deletion to after commit (consistent with

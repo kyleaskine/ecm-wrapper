@@ -9,7 +9,7 @@ from typing import Optional, Any, List, Dict
 from sqlalchemy import and_, desc, func, distinct, ColumnElement
 from sqlalchemy.orm import Session, defer, joinedload
 
-from ..constants import ACTIVE_WORK_STATUSES
+from ..constants import ACTIVE_WORK_STATUSES, PENDING_RESIDUE_STATUSES
 
 
 @dataclass
@@ -733,7 +733,7 @@ def get_residues_filtered(
     # Apply filters
     filters: List[ColumnElement[bool]] = []
     if status_filter == 'available+claimed':
-        filters.append(ECMResidue.status.in_(['available', 'claimed']))
+        filters.append(ECMResidue.status.in_(PENDING_RESIDUE_STATUSES))
     elif status_filter:
         filters.append(ECMResidue.status == status_filter)
     if client_id:

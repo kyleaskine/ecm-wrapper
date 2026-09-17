@@ -138,6 +138,13 @@ Discovered factors with discovery methods:
 - Filters out composites that already have PM1/PP1 at the required B1 level
   - Uses SQL `NOT EXISTS` subqueries against `ecm_attempts` (hits composite_id,method index)
   - No `ecm_progress < 1.0` filter — PM1/PP1 valuable even after ECM target reached
+- Skips busy composites exactly like `/ecm-work` (shared `_exclude_busy_composites`):
+  active work assignments **and** pending residues (`available`/`claimed`).
+  A factor found by P-1 doesn't stop a stage 2 worker that already holds the
+  residue: factored composites are only skipped for *new* claims
+  (`get_available_work`/`claim_residue`), and the residue itself is expired
+  only when an admin runs `cleanup_factored_composites`. So P-1 there would
+  just race that worker
 - B1 lookup: `get_b1_above_tlevel()` in `app/constants.py`
 
 ### Residue Endpoints (`app/api/v1/residues.py`)
@@ -196,7 +203,7 @@ Discovered factors with discovery methods:
   no EvalPlanQual recheck fires — B assigns the composite again.
 - **Fix (code)**: `pick_and_lock_composite()` (`app/services/work_assignment.py`) —
   after locking the candidate, re-check active assignments (and pending
-  residues for `/ecm-work`) with *fresh statements*. Every assignment writer
+  residues for `/ecm-work` and `/p1-work`) with *fresh statements*. Every assignment writer
   holds the composite row lock until commit, so once we hold the lock a fresh
   snapshot is guaranteed to see a committed competitor; on conflict move to the
   next candidate. Used by `/ecm-work`, `/p1-work`, and the legacy `/work`

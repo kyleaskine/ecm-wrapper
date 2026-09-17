@@ -55,7 +55,9 @@ class ECMResidue(Base, TimestampMixin):
 
     # Timing
     # expires_at is only set when claimed (claim timeout). None = no time-based expiration.
-    # Residues are cleaned up when their composite is factored, not by time.
+    # An unclaimed residue never expires on its own: it lives until stage 2
+    # completes it, or an admin cleanup expires it (residues on factored
+    # composites are skipped for new claims in the meantime).
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     claimed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     claimed_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # Client ID of stage 2 worker

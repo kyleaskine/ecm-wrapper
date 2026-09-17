@@ -38,6 +38,21 @@ def _make_assignment(composite_id: int, work_id: str, status: str = "assigned") 
     )
 
 
+def _add_residue(db, composite_id: int, status: str) -> None:
+    db.add(ECMResidue(
+        composite_id=composite_id,
+        client_id="gpu-client",
+        b1=110000000,
+        parametrization=3,
+        curve_count=5376,
+        storage_path=f"/tmp/residue-test-{composite_id}.txt",
+        file_size_bytes=1234,
+        checksum=f"{composite_id:064x}",
+        status=status,
+    ))
+    db.commit()
+
+
 class TestUniqueActiveAssignmentIndex:
     """The partial unique index is the database-level backstop."""
 
@@ -111,27 +126,16 @@ class TestPickAndLockRecheck:
     def test_pending_residue_rejected_when_checked(self, db_session):
         has_residue = create_composite("1" * 60 + "3", target_t_level=20.0)
         free = create_composite("2" * 60 + "3", target_t_level=25.0)
-        db_session.add(ECMResidue(
-            composite_id=has_residue["id"],
-            client_id="gpu-client",
-            b1=110000000,
-            parametrization=3,
-            curve_count=5376,
-            storage_path="/tmp/residue-test-1.txt",
-            file_size_bytes=1234,
-            checksum="a" * 64,
-            status="available",
-        ))
-        db_session.commit()
+        _add_residue(db_session, has_residue["id"], "available")
 
-        # /ecm-work path: pending residue blocks stage 1 duplication
+        # /ecm-work and /p1-work: pending residue marks the composite busy
         picked = pick_and_lock_composite(
             db_session, self._ordered_query(db_session), check_residues=True
         )
         assert picked is not None
         assert picked.id == free["id"]
 
-        # /p1-work path: pending residues are irrelevant for PM1/PP1
+        # Legacy /work service does not check residues
         picked = pick_and_lock_composite(
             db_session, self._ordered_query(db_session), check_residues=False
         )
@@ -162,6 +166,15 @@ class TestEcmWorkEndpoint:
         data = response.json()
         assert data["work_id"] is None
 
+    def test_skips_composite_with_pending_residue(self, client, db_session):
+        pending = create_composite("1" * 60 + "3", target_t_level=20.0)
+        free = create_composite("2" * 60 + "3", target_t_level=25.0)
+        _add_residue(db_session, pending["id"], "available")
+
+        data = client.get("/api/v1/ecm-work", params={"client_id": "test-gpu"}).json()
+        assert data["work_id"] is not None
+        assert data["composite_id"] == free["id"]
+
     def test_two_sequential_requests_get_different_composites(self, client):
         create_composite("1" * 60 + "3", target_t_level=20.0)
         create_composite("2" * 60 + "3", target_t_level=25.0)
@@ -172,3 +185,74 @@ class TestEcmWorkEndpoint:
         assert first["work_id"] is not None
         assert second["work_id"] is not None
         assert first["composite_id"] != second["composite_id"]
+
+
+class TestP1WorkEndpoint:
+    """/p1-work honors the same claims as /ecm-work."""
+
+    def test_skips_composite_with_active_assignment(self, client):
+        busy = create_composite("1" * 60 + "3", target_t_level=20.0)
+        free = create_composite("2" * 60 + "3", target_t_level=25.0)
+        create_work_assignment(busy["id"], "other-client", work_id="wa-busy")
+
+        data = client.get("/api/v1/p1-work", params={"client_id": "p1-client"}).json()
+        assert data["work_id"] is not None
+        assert data["composite_id"] == free["id"]
+
+    @pytest.mark.parametrize("residue_status", ["available", "claimed"])
+    def test_skips_composite_with_pending_residue(self, client, db_session, residue_status):
+        pending = create_composite("1" * 60 + "3", target_t_level=20.0)
+        free = create_composite("2" * 60 + "3", target_t_level=25.0)
+        _add_residue(db_session, pending["id"], residue_status)
+
+        data = client.get("/api/v1/p1-work", params={"client_id": "p1-client"}).json()
+        assert data["work_id"] is not None
+        assert data["composite_id"] == free["id"]
+
+    def test_finished_residue_does_not_block(self, client, db_session):
+        done = create_composite("1" * 60 + "3", target_t_level=20.0)
+        _add_residue(db_session, done["id"], "completed")
+
+        data = client.get("/api/v1/p1-work", params={"client_id": "p1-client"}).json()
+        assert data["composite_id"] == done["id"]
+
+    def test_no_work_when_only_residue_pending(self, client, db_session):
+        pending = create_composite("1" * 60 + "3", target_t_level=20.0)
+        _add_residue(db_session, pending["id"], "available")
+
+        data = client.get("/api/v1/p1-work", params={"client_id": "p1-client"}).json()
+        assert data["work_id"] is None
+
+
+class TestStaleFilterFallsBackToLock:
+    """
+    The busy-composite filter is a snapshot read; correctness rests on the
+    recheck under the row lock. Patching the filter out simulates a
+    competitor committing mid-query: both endpoints must still refuse the
+    busy composite, which only holds while they pass check_residues=True.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _stale_filter(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.api.v1.ecm_work._exclude_busy_composites",
+            lambda db, query: query,
+        )
+
+    @pytest.mark.parametrize("endpoint", ["/api/v1/ecm-work", "/api/v1/p1-work"])
+    def test_pending_residue_still_skipped(self, client, db_session, endpoint):
+        pending = create_composite("1" * 60 + "3", target_t_level=20.0)
+        free = create_composite("2" * 60 + "3", target_t_level=25.0)
+        _add_residue(db_session, pending["id"], "available")
+
+        data = client.get(endpoint, params={"client_id": "late-client"}).json()
+        assert data["composite_id"] == free["id"]
+
+    @pytest.mark.parametrize("endpoint", ["/api/v1/ecm-work", "/api/v1/p1-work"])
+    def test_active_assignment_still_skipped(self, client, endpoint):
+        busy = create_composite("1" * 60 + "3", target_t_level=20.0)
+        free = create_composite("2" * 60 + "3", target_t_level=25.0)
+        create_work_assignment(busy["id"], "other-client", work_id="wa-busy")
+
+        data = client.get(endpoint, params={"client_id": "late-client"}).json()
+        assert data["composite_id"] == free["id"]
