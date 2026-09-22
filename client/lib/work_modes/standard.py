@@ -126,7 +126,7 @@ class StandardAutoWorkMode(WorkMode):
         tlevel_progress_interval = (
             resolve_stage2_progress_interval(self.args)
             if self.args.two_stage
-            else self.args.progress_interval
+            else (self.args.progress_interval or 0)
         )
         config = TLevelConfig(
             composite=composite,
@@ -212,7 +212,7 @@ class StandardAutoWorkMode(WorkMode):
                 parametrization=param if param else 3,
                 method=self.args.method,
                 verbose=self.args.verbose,
-                progress_interval=self.args.progress_interval,
+                progress_interval=self.args.progress_interval or 0,
                 pin_threads=resolve_pin_threads(self.args)
             )
             result = self.wrapper.run_multiprocess_v2(mp_config)
@@ -230,7 +230,7 @@ class StandardAutoWorkMode(WorkMode):
                 parametrization=param if param else 3,
                 method=self.args.method,
                 verbose=self.args.verbose,
-                progress_interval=self.args.progress_interval,
+                progress_interval=self.args.progress_interval or 0,
                 maxmem=self.args.maxmem,
             )
             result = self.wrapper.run_ecm_v2(ecm_config)

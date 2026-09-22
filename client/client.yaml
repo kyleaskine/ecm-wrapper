@@ -42,7 +42,13 @@ programs:
     gpu_curves: null
     workers: 8  # Parallel workers (multiprocess ECM, stage2 threads)
     stage2_max_b1: null  # Max B1 for stage 2 residues (limits RAM usage; null = no limit)
-    max_batch: null  # Max curves per GPU batch in two-stage mode (null = no limit)
+    # Max curves per GPU stage-1 batch in two-stage mode. This is what makes
+    # the pipeline a pipeline: with no limit the whole t-level step runs as one
+    # multi-hour stage 1 and stage 2 does not start until it finishes, which is
+    # strictly worse than plain sequential two-stage mode. 3072 is GMP-ECM's
+    # own GPU batch size on a typical card, so chunking there costs nothing
+    # beyond one ~2s prime-batch-product recompute per chunk.
+    max_batch: 3072
     pm1_b1: 2900000000
     pp1_b1: 2900000000
 

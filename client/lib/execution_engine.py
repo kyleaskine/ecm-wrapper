@@ -455,9 +455,15 @@ class CompositeExecutionEngine:
         return (resume_file, actual_b1, None)
 
     def _create_residue_path_for_two_stage(
-        self, composite: str, save_residues: Optional[str]
+        self, composite: str, save_residues: Optional[str], suffix: str = ""
     ) -> Path:
-        """Create residue file path for two-stage mode."""
+        """
+        Create residue file path for two-stage mode.
+
+        suffix disambiguates batches produced within the same second (the
+        timestamp alone is only 1-second resolution, which pipelined mode can
+        collide on when batches are small).
+        """
         if save_residues:
             return Path(save_residues)
 
@@ -467,7 +473,7 @@ class CompositeExecutionEngine:
         residue_dir.mkdir(parents=True, exist_ok=True)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         composite_hash = hashlib.md5(composite.encode()).hexdigest()[:8]
-        return residue_dir / f"stage1_{composite_hash}_{timestamp}.txt"
+        return residue_dir / f"stage1_{composite_hash}_{timestamp}{suffix}.txt"
 
     def _stage1_result_to_batch_result(
         self, prim_result: ECMPrimitiveResult, start_time: float
@@ -571,7 +577,9 @@ class CompositeExecutionEngine:
         start_time = time.time()
 
         # Shared state between threads
-        residue_queue: queue.Queue[Any] = queue.Queue(maxsize=2)
+        # Depth 3 lets the GPU stay up to three batches ahead of stage 2, so a
+        # slow stage 2 pass does not immediately stall stage 1 production.
+        residue_queue: queue.Queue[Any] = queue.Queue(maxsize=3)
         shutdown_event = threading.Event()
         self.wrapper.stop_event.clear()
         self.wrapper.interrupted = False
@@ -591,9 +599,108 @@ class CompositeExecutionEngine:
         # recorded (see FactorResult.submission_failed).
         submit_failed = threading.Event()
 
+        # Stage 1 batches that finished but never got a stage 2 pass (interrupt,
+        # or queue drain). Their residues stay on disk so the GPU hours can be
+        # recovered with --stage2-only instead of being thrown away.
+        preserved_lock = threading.Lock()
+        preserved_residues: List[Tuple[Path, int]] = []
+
+        # Set as soon as any factor is found. A factor ends this composite, so
+        # residues still in flight describe a number that is now factored -
+        # spent work, not recoverable work.
+        factor_found_event = threading.Event()
+
+        def discard_residue(residue_file: Path) -> None:
+            """Delete a residue whose work is spent. Never raises."""
+            try:
+                if residue_file.exists():
+                    residue_file.unlink()
+            except OSError as e:
+                self.logger.warning(
+                    f"Could not remove residue {residue_file}: {e}"
+                )
+
+        def residue_has_work(residue_file: Path) -> bool:
+            """True if the file holds at least one usable stage 1 curve.
+
+            A batch killed mid-write leaves a zero-byte or truncated -save
+            file; recommending --stage2-only on one of those just fails later.
+            """
+            try:
+                if not residue_file.exists() or residue_file.stat().st_size == 0:
+                    return False
+                info = self.wrapper._parse_residue_file(residue_file)
+                return int(info.get('curve_count', 0) or 0) > 0
+            except Exception as e:
+                self.logger.warning(
+                    f"Residue {residue_file} is unusable ({e}); discarding"
+                )
+                return False
+
+        def preserve_residue(residue_file: Path, b2_planned: int, reason: str) -> bool:
+            """Keep an unprocessed stage 1 residue. Returns True if kept."""
+            if factor_found_event.is_set():
+                discard_residue(residue_file)
+                return False
+            if not residue_has_work(residue_file):
+                discard_residue(residue_file)
+                return False
+            with preserved_lock:
+                preserved_residues.append((residue_file, b2_planned))
+            self.logger.warning(
+                f"Preserved unprocessed stage 1 residue ({reason}): {residue_file}"
+            )
+            return True
+
+        def drain_queue(reason: str) -> int:
+            """Empty the queue, keeping (or discarding) each finished batch."""
+            drained = 0
+            while True:
+                try:
+                    item = residue_queue.get_nowait()
+                except queue.Empty:
+                    return drained
+                try:
+                    if item is None:
+                        continue
+                    rf = item.get('residue_file')
+                    if rf:
+                        preserve_residue(
+                            Path(rf),
+                            item.get('b2', 0),
+                            f"{reason}, {item.get('curves', 0)} curves "
+                            f"at B1={item.get('b1')}",
+                        )
+                    drained += 1
+                finally:
+                    residue_queue.task_done()
+
         def gpu_producer() -> None:
             """GPU thread: Run stage 1 for each batch, put residues in queue."""
             self.logger.info("[GPU Thread] Starting production")
+            try:
+                gpu_produce_loop()
+            except BaseException as e:
+                # next_batch() shells out to the t-level binary and the residue
+                # path touches the filesystem, both outside the per-batch try.
+                # If either blew up here the consumer would block on an empty
+                # queue forever and cpu_thread.join() would never return.
+                self.logger.error(f"[GPU Thread] Producer failed: {e}")
+                shutdown_event.set()
+            finally:
+                try:
+                    # Wake the consumer. It may already be gone, so never block
+                    # forever on a queue nobody is reading.
+                    residue_queue.put(None, timeout=10)
+                except queue.Full:
+                    shutdown_event.set()
+                    self.logger.warning(
+                        "[GPU Thread] Could not signal CPU thread (queue full)"
+                    )
+
+        def gpu_produce_loop() -> None:
+            """Body of the GPU thread; exceptions are handled by its caller."""
+            batch_index = 0
 
             while True:
                 # Check for shutdown
@@ -614,10 +721,13 @@ class CompositeExecutionEngine:
                     f"at B1={batch.b1} (target t{step_target:.1f})"
                 )
 
-                # Create residue file
-                residue_file = Path(
-                    f"/tmp/tlevel_residue_{int(time.time() * 1000)}.txt"
+                # Create residue file under the configured residue_dir rather
+                # than /tmp, so an unprocessed batch survives both an interrupt
+                # and anything that clears /tmp.
+                residue_file = self._create_residue_path_for_two_stage(
+                    composite, None, suffix=f"_p{os.getpid()}_b{batch_index}"
                 )
+                batch_index += 1
 
                 # Run stage 1
                 stage1_start = time.time()
@@ -646,13 +756,19 @@ class CompositeExecutionEngine:
                     else:
                         actual_curves = batch.curves
 
-                    # Check for shutdown before queuing
+                    # Check for shutdown before queuing. Stage 1 has already
+                    # finished at this point, so the residue is completed work -
+                    # keep it for a later --stage2-only run.
                     if shutdown_event.is_set():
                         self.logger.info(
-                            "[GPU Thread] Shutdown detected after stage 1, discarding batch"
+                            "[GPU Thread] Shutdown detected after stage 1, "
+                            f"batch not queued ({actual_curves} curves at B1={batch.b1})"
                         )
-                        if residue_file.exists():
-                            residue_file.unlink()
+                        preserve_residue(
+                            residue_file,
+                            b2_for_step,
+                            f"interrupted before stage 2, {actual_curves} curves at B1={batch.b1}",
+                        )
                         break
 
                     # Extract factor info from stage1_result
@@ -670,7 +786,6 @@ class CompositeExecutionEngine:
                         'stage1_factor': stage1_factor,
                         'all_factors': all_stage1_factors,
                         'stage1_time': stage1_time,
-                        'stage1_output': stage1_result.get('raw_output', ''),
                         'step_target': step_target,
                         'stage1_success': stage1_result.get('success', False),
                     })
@@ -693,16 +808,13 @@ class CompositeExecutionEngine:
 
                 except Exception as e:
                     self.logger.error(f"[GPU Thread] Error in stage 1: {e}")
+                    # Stage 1 may still have written curves before failing.
+                    preserve_residue(
+                        residue_file, b2_for_step, f"stage 1 raised {type(e).__name__}"
+                    )
                     break
 
-            # Send sentinel
-            if not shutdown_event.is_set():
-                self.logger.info("[GPU Thread] All batches complete, signaling CPU thread")
-                residue_queue.put(None)
-            else:
-                self.logger.info(
-                    "[GPU Thread] All batches complete, CPU already stopped"
-                )
+            self.logger.info("[GPU Thread] All batches complete")
 
         def cpu_consumer() -> None:
             """CPU thread: Process stage 2 from residue queue."""
@@ -725,6 +837,10 @@ class CompositeExecutionEngine:
                         self.logger.info(
                             "[CPU Thread] Shutdown detected while waiting for work"
                         )
+                        # Tell the GPU thread too, so a batch finishing after
+                        # this point is preserved instead of queued into a
+                        # queue that no longer has a consumer.
+                        shutdown_event.set()
                         break
                     try:
                         work_item = residue_queue.get(timeout=1.0)
@@ -741,6 +857,12 @@ class CompositeExecutionEngine:
                     residue_queue.task_done()
                     break
 
+                # task_done() lives in the finally below so it runs exactly
+                # once per get(), whichever branch or exception exits the body.
+                # It used to be called inline before work that can still raise
+                # (unlink, submit_result); a raise there reached the handler,
+                # which called it a second time, and the resulting ValueError
+                # killed the thread before it could drain the queue.
                 try:
                     residue_file = work_item['residue_file']
                     b1 = work_item['b1']
@@ -751,6 +873,11 @@ class CompositeExecutionEngine:
                     stage1_time = work_item['stage1_time']
                     step_target = work_item['step_target']
                     stage1_success = work_item['stage1_success']
+                    preserved_this_batch = False
+                    # Bound here because the interrupt check below runs after
+                    # the if/else, and the else branch never enters stage 2.
+                    stage2_ran = False
+                    curves_completed = 0
 
                     # Handle stage 1 factor
                     if stage1_factor:
@@ -790,14 +917,14 @@ class CompositeExecutionEngine:
                                     f"results for B1={b1}"
                                 )
 
+                        factor_found_event.set()
                         shutdown_event.set()
-                        residue_queue.task_done()
-                        if residue_file.exists():
-                            residue_file.unlink()
+                        discard_residue(residue_file)
                         break
 
                     # Run stage 2
                     if stage1_success and residue_file.exists():
+                        stage2_ran = True
                         self.logger.info(
                             f"[CPU Thread] Starting stage 2: {curves} curves "
                             f"at B1={b1}, B2={b2}"
@@ -830,6 +957,7 @@ class CompositeExecutionEngine:
                                 all_sigmas.extend(
                                     [sigma] * len(all_stage2_factors)
                                 )
+                                factor_found_event.set()
                                 self.logger.info(
                                     f"[CPU Thread] Factor found in stage 2: "
                                     f"{all_stage2_factors}"
@@ -875,9 +1003,7 @@ class CompositeExecutionEngine:
                                             "[CPU Thread] Failed to submit stage-2 "
                                             f"factor results for B1={b1}"
                                         )
-                                residue_queue.task_done()
-                                if residue_file.exists():
-                                    residue_file.unlink()
+                                discard_residue(residue_file)
                                 break
 
                         # Submit no-factor results
@@ -907,34 +1033,60 @@ class CompositeExecutionEngine:
                         self.logger.warning(
                             "[CPU Thread] Stage 1 failed or no residue file"
                         )
+                        # Stage 1 reported failure but left a residue behind
+                        # (e.g. terminated mid-run): keep whatever completed.
+                        preserved_this_batch = preserve_residue(
+                            residue_file, b2, f"stage 1 did not complete, B1={b1}"
+                        )
 
-                    # Clean up residue file
-                    if residue_file.exists():
-                        residue_file.unlink()
+                    # Stage 2 stopped early (Ctrl+C terminates its workers),
+                    # so curves in this residue never got a stage 2 pass. The
+                    # completed ones were just submitted, so a recovery run
+                    # repeats them - duplicated effort, but far cheaper than
+                    # discarding the GPU hours behind the rest.
+                    if (not preserved_this_batch
+                            and stage2_ran
+                            and curves_completed < curves
+                            and (self.wrapper.interrupted
+                                 or shutdown_event.is_set())):
+                        preserved_this_batch = preserve_residue(
+                            residue_file, b2,
+                            f"stage 2 interrupted after {curves_completed}/"
+                            f"{curves} curves at B1={b1}; re-running repeats "
+                            f"the {curves_completed} already submitted",
+                        )
 
-                    residue_queue.task_done()
+                    # Clean up residue file - stage 2 ran and results were
+                    # submitted, so the residue has no further use.
+                    if not preserved_this_batch:
+                        discard_residue(residue_file)
+
                     self.logger.info(
                         "[CPU Thread] Batch complete, looping for next work item"
                     )
 
                 except Exception as e:
                     self.logger.error(f"[CPU Thread] Error processing batch: {e}")
-                    residue_queue.task_done()
+                    # Stage 2 blew up, so this batch's stage 1 work is still
+                    # unspent. Read the path off work_item rather than the
+                    # locals, which may not be bound yet.
+                    rf = work_item.get('residue_file')
+                    if rf:
+                        preserve_residue(
+                            Path(rf),
+                            work_item.get('b2', 0),
+                            f"stage 2 raised {type(e).__name__}, "
+                            f"{work_item.get('curves', 0)} curves at "
+                            f"B1={work_item.get('b1')}",
+                        )
                     continue
-
-            # Drain queue to prevent GPU thread from blocking on put()
-            drained = 0
-            while True:
-                try:
-                    item = residue_queue.get_nowait()
-                    if item is not None:
-                        rf = item.get('residue_file')
-                        if rf and Path(rf).exists():
-                            Path(rf).unlink()
-                        drained += 1
+                finally:
                     residue_queue.task_done()
-                except queue.Empty:
-                    break
+
+            # Drain queue to prevent the GPU thread from blocking on put().
+            # Everything still queued is finished stage 1 work, so keep it -
+            # unless a factor ended the composite, in which case it is spent.
+            drained = drain_queue("queued but unprocessed at shutdown")
             if drained > 0:
                 self.logger.info(
                     f"[CPU Thread] Drained {drained} unprocessed items from queue"
@@ -968,8 +1120,22 @@ class CompositeExecutionEngine:
                                 p.terminate()
                             except OSError:
                                 pass
-            gpu_thread.join(timeout=5)
-            cpu_thread.join(timeout=5)
+            gpu_thread.join(timeout=30)
+            # The consumer has to terminate its stage 2 workers and may still
+            # be submitting a batch, so give it room. Anything it preserves
+            # after this point would miss the report below.
+            cpu_thread.join(timeout=120)
+            if cpu_thread.is_alive():
+                self.logger.warning(
+                    "[CPU Thread] Still running after shutdown; the preserved "
+                    "residue list below may be incomplete - check "
+                    f"{self.wrapper.typed_config.execution.residue_dir}"
+                )
+
+        # Backstop drain: both threads are done, so anything still queued is
+        # finished stage 1 work that no consumer will ever pick up. Keep it
+        # regardless of which exit path the threads took.
+        drain_queue("left in queue at shutdown")
 
         # Build result
         result = BatchResult()
@@ -990,6 +1156,20 @@ class CompositeExecutionEngine:
             f"Pipelined t-level execution complete: {total_curves} curves, "
             f"t{current_t_level:.2f} achieved"
         )
+
+        with preserved_lock:
+            kept = list(preserved_residues)
+        if kept:
+            self.logger.warning(
+                f"{len(kept)} stage 1 residue(s) completed but never ran stage 2. "
+                f"Finish them with:"
+            )
+            for residue_path, b2_planned in kept:
+                self.logger.warning(
+                    f"  python3 ecm_wrapper.py --stage2-only {residue_path} "
+                    f"--b2 {b2_planned} --workers {stage2_workers} --submit"
+                )
+        result.preserved_residues = kept
 
         return result
 

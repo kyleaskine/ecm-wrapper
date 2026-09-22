@@ -57,7 +57,12 @@ def build_ecm_command(
         gpu_curves: Curves per GPU batch (-gpucurves)
         residue_save: Path for -save flag
         residue_load: Path for -resume flag
-        verbose: Enable -v flag
+        verbose: Enable -v flag. GPU ECM always gets -v regardless, because
+            GMP-ECM gates its GPU stage 1 progress/ETA output behind
+            OUTPUT_VERBOSE (cgbn_stage1.cu) - without -v a multi-hour batch
+            prints nothing at all. GMP-ECM self-throttles those lines
+            ("5 early + 5 per 10s + 5 per 100s + every 1000s"), so this costs
+            roughly a dozen lines per invocation however long it runs.
         param: Parametrization value (-param, ECM only)
         sigma: Sigma value (-sigma, ECM only)
         one: Stop after first factor (-one)
@@ -91,8 +96,9 @@ def build_ecm_command(
     if residue_load:
         cmd.extend(["-resume", str(residue_load)])
 
-    # 4. Verbose
-    if verbose:
+    # 4. Verbose. GPU stage 1 progress is OUTPUT_VERBOSE-gated upstream, and
+    # GMP-ECM already rate-limits it, so always ask for it on GPU runs.
+    if verbose or (use_gpu and method == "ecm"):
         cmd.append("-v")
 
     # 5. Parametrization (ECM only)

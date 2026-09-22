@@ -6,7 +6,7 @@ reducing function argument counts and improving code maintainability.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any, TypedDict
+from typing import Optional, List, Dict, Any, Tuple, TypedDict
 from pathlib import Path
 
 
@@ -249,6 +249,11 @@ class FactorResult:
     # progress recorded and the composite is handed straight back out.
     submission_failed: bool = False
 
+    # (residue path, planned B2) for stage 1 batches that finished but never
+    # ran stage 2. Carried out of pipelined runs so callers - not just the
+    # log - can see what is still sitting in residue_dir.
+    preserved_residues: List[Tuple[Path, int]] = field(default_factory=list)
+
     def add_factor(self, factor: str, sigma: Optional[str] = None):
         """Add a discovered factor with its sigma."""
         self.factors.append(factor)
@@ -421,6 +426,9 @@ class BatchResult:
     raw_output: Optional[str] = None
     interrupted: bool = False
     submission_failed: bool = False  # A per-batch submission failed and was queued
+    # (residue path, planned B2) for stage 1 batches that finished but never
+    # ran stage 2 - kept on disk so they can be finished with --stage2-only.
+    preserved_residues: List[Tuple[Path, int]] = field(default_factory=list)
 
     def to_factor_result(self) -> FactorResult:
         """Convert to FactorResult for API compatibility."""
@@ -433,4 +441,5 @@ class BatchResult:
         result.raw_output = self.raw_output
         result.interrupted = self.interrupted
         result.submission_failed = self.submission_failed
+        result.preserved_residues = list(self.preserved_residues)
         return result

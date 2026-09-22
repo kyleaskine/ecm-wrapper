@@ -162,10 +162,10 @@ def _add_work_filter_options(parser: argparse.ArgumentParser) -> None:
 def _add_behavior_options(parser: argparse.ArgumentParser) -> None:
     """Add behavior options: verbose, progress-interval, continue-after-factor, maxmem."""
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output')
-    parser.add_argument('--progress-interval', type=int, default=0,
+    parser.add_argument('--progress-interval', type=int, default=None,
                        help='Show progress updates every N completed curves '
-                            '(0 = disabled; --two-stage/--stage2-only default to 50 '
-                            'unless -v is set without --progress-interval)')
+                            '(0 = disabled; --two-stage/--stage2-only default to 50). '
+                            'Use 1 for a line per curve.')
     parser.add_argument('--continue-after-factor', action='store_true',
                        help='Continue processing all curves even after finding a factor')
     parser.add_argument('--maxmem', type=int,
@@ -547,18 +547,25 @@ def resolve_gpu_settings(args: ArgsLike, config: 'AppConfig') -> tuple[bool, Opt
 def resolve_stage2_progress_interval(args: ArgsLike) -> int:
     """Effective progress_interval for stage 2 output (--two-stage / --stage2-only).
 
-    Stage 2 emits a "Step X took Yms" line per curve, which can be thousands per
-    composite. Default to a periodic summary so the console stays readable:
+    Stage 2 emits a "Step X took Yms" line per curve (OUTPUT_NORMAL upstream,
+    so -v does not control it), which can be thousands per composite. Default
+    to a periodic summary so the console stays readable:
 
-    - Explicit --progress-interval N (N > 0): use N.
-    - -v without --progress-interval: 0 (stream every line).
-    - Neither: 50 (concise default).
+    - Explicit --progress-interval N (including 0 to disable): use N.
+    - Not given at all: 50 (concise default).
+
+    The flag defaults to None rather than 0 so "unset" stays distinguishable
+    from "explicitly 0"; with a 0 default the documented way to silence stage 2
+    was unreachable, because 0 fell through to the 50 below.
+
+    -v deliberately has no say here. It used to force 0, which -- combined with
+    a missing "> 0" test in stage2_executor -- logged one line per curve per
+    worker. Use --progress-interval 1 if that is what you want. Stage 1 progress
+    no longer needs -v either: GPU runs always request it (see build_ecm_command).
     """
-    pi = getattr(args, 'progress_interval', None) or 0
-    if pi > 0:
-        return pi
-    if getattr(args, 'verbose', False):
-        return 0
+    pi = getattr(args, 'progress_interval', None)
+    if pi is not None:
+        return max(0, pi)
     return 50
 
 

@@ -218,15 +218,26 @@ def run_tlevel_mode(wrapper, args, output: UserOutput, params: ResolvedParams) -
             if args.two_stage
             else (args.progress_interval or 0)
         )
+        tlevel_workers = (
+            params.workers
+            if (args.two_stage or getattr(args, 'multiprocess', False))
+            else 1
+        )
         config = TLevelConfig(
             composite=current_composite,
             target_t_level=target_t_level,
             start_t_level=current_t_level,
             b1_strategy='optimal',
             parametrization=args.param or (3 if args.two_stage else 1),
-            threads=args.workers or 1,
+            # params.workers is the resolved value (--workers > config
+            # programs.gmp_ecm.workers); reading args.workers directly here
+            # ignored the config and ran stage 2 single-threaded. Gate it the
+            # way ecm_client does (work_modes/standard.py): threads > 1 is what
+            # selects multiprocess in run_tlevel_v2, so a plain CPU t-level run
+            # must stay single-process unless it was actually asked for.
+            threads=tlevel_workers,
             verbose=args.verbose or False,
-            workers=args.workers or 1,
+            workers=tlevel_workers,
             use_two_stage=args.two_stage or False,
             progress_interval=tlevel_progress_interval,
             max_batch_curves=params.max_batch,
@@ -316,7 +327,7 @@ def run_tlevel_mode(wrapper, args, output: UserOutput, params: ResolvedParams) -
 def run_multiprocess_mode(wrapper, args, output: UserOutput, params: ResolvedParams) -> FactorResult:
     """Multiprocess Mode - parallel CPU workers."""
     output.mode_header("Multiprocess Mode", {
-        "Workers": args.workers or "auto",
+        "Workers": params.workers,
         "Composite": args.composite,
         "B1": params.b1,
         "B2": args.b2 or "default"
@@ -328,7 +339,11 @@ def run_multiprocess_mode(wrapper, args, output: UserOutput, params: ResolvedPar
         b2=args.b2,
         total_curves=args.curves or 1000,
         curves_per_process=100,
-        num_processes=args.workers,
+        # Resolved value (--workers > programs.gmp_ecm.workers), matching the
+        # other modes. Passing args.workers straight through left this None
+        # without the flag, so MultiprocessConfig auto-detected the CPU count
+        # and the configured worker count was ignored.
+        num_processes=params.workers,
         parametrization=args.param or 1,
         method=args.method or 'ecm',
         verbose=args.verbose or False,

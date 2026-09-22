@@ -309,6 +309,74 @@ class TestTLevelModeProgressive:
         assert len(result.curve_summary) == 3
         assert set(result.factors) == {"2", "3", "5", "7"}  # 7 is prime cofactor
 
+    def test_workers_falls_back_to_config_when_flag_omitted(self):
+        """Without --workers, the resolved config value must reach stage 2.
+
+        run_tlevel_mode used to read args.workers directly and default to 1,
+        throwing away programs.gmp_ecm.workers and running stage 2 serially.
+        """
+        args = _default_args(tlevel=60.0, two_stage=True, workers=None)  # --two-stage earns them
+        params = _default_params(workers=8)  # resolved from config
+        wrapper = Mock()
+        wrapper.run_tlevel_v2.return_value = _make_factor_result(
+            t_level_achieved=60.0, curves_run=100
+        )
+
+        run_tlevel_mode(wrapper, args, Mock(), params)
+
+        config = wrapper.run_tlevel_v2.call_args[0][0]
+        assert config.threads == 8, "stage 2 worker count ignored the config"
+        assert config.workers == 8
+
+    def test_workers_flag_overrides_config(self):
+        args = _default_args(tlevel=60.0, two_stage=True, workers=12)
+        params = _default_params(workers=12)  # resolved: flag wins over config
+        wrapper = Mock()
+        wrapper.run_tlevel_v2.return_value = _make_factor_result(
+            t_level_achieved=60.0, curves_run=100
+        )
+
+        run_tlevel_mode(wrapper, args, Mock(), params)
+
+        config = wrapper.run_tlevel_v2.call_args[0][0]
+        assert config.threads == 12
+        assert config.workers == 12
+
+    def test_plain_cpu_tlevel_stays_single_process(self):
+        """run_tlevel_v2 selects multiprocess on `config.threads > 1`, so a
+        plain CPU t-level run must not inherit the configured worker count
+        and silently fan out to 8 processes. Matches ecm_client's gate in
+        work_modes/standard.py.
+        """
+        args = _default_args(
+            tlevel=45.0, two_stage=False, multiprocess=False, workers=None
+        )
+        params = _default_params(workers=8)
+        wrapper = Mock()
+        wrapper.run_tlevel_v2.return_value = _make_factor_result(
+            t_level_achieved=45.0, curves_run=100
+        )
+
+        run_tlevel_mode(wrapper, args, Mock(), params)
+
+        config = wrapper.run_tlevel_v2.call_args[0][0]
+        assert config.threads == 1
+
+    def test_multiprocess_tlevel_uses_config_workers(self):
+        args = _default_args(
+            tlevel=45.0, two_stage=False, multiprocess=True, workers=None
+        )
+        params = _default_params(workers=8)
+        wrapper = Mock()
+        wrapper.run_tlevel_v2.return_value = _make_factor_result(
+            t_level_achieved=45.0, curves_run=100
+        )
+
+        run_tlevel_mode(wrapper, args, Mock(), params)
+
+        config = wrapper.run_tlevel_v2.call_args[0][0]
+        assert config.threads == 8
+
     def test_tlevel_config_passed_correctly(self):
         """TLevelConfig passed to wrapper has correct field values."""
         args = _default_args(
@@ -323,7 +391,11 @@ class TestTLevelModeProgressive:
             submit=True,
             project="test-project",
         )
-        params = _default_params(max_batch=500, b2_dictionary={50000: 25000000}, gpu_device=0, gpu_curves=2048)
+        params = _default_params(
+            workers=8,  # ecm_wrapper resolves this from args.workers
+            max_batch=500, b2_dictionary={50000: 25000000},
+            gpu_device=0, gpu_curves=2048,
+        )
         output = Mock()
         wrapper = Mock()
 
@@ -422,6 +494,34 @@ class TestMultiprocessMode:
 
         config = wrapper.run_multiprocess_v2.call_args[0][0]
         assert config.total_curves == 1000
+
+    def test_workers_falls_back_to_config_when_flag_omitted(self):
+        """Without --workers, programs.gmp_ecm.workers must reach the pool.
+
+        num_processes used to receive args.workers directly, so omitting the
+        flag left it None and MultiprocessConfig auto-detected the CPU count,
+        ignoring the configured value entirely.
+        """
+        args = _default_args(composite="12345", workers=None)
+        params = _default_params(workers=8)  # resolved from config
+        wrapper = Mock()
+        wrapper.run_multiprocess_v2.return_value = _make_factor_result()
+
+        run_multiprocess_mode(wrapper, args, Mock(), params)
+
+        config = wrapper.run_multiprocess_v2.call_args[0][0]
+        assert config.num_processes == 8, "configured worker count was ignored"
+
+    def test_workers_flag_overrides_config(self):
+        args = _default_args(composite="12345", workers=12)
+        params = _default_params(workers=12)  # resolved: flag wins
+        wrapper = Mock()
+        wrapper.run_multiprocess_v2.return_value = _make_factor_result()
+
+        run_multiprocess_mode(wrapper, args, Mock(), params)
+
+        config = wrapper.run_multiprocess_v2.call_args[0][0]
+        assert config.num_processes == 12
 
 
 class TestTwoStageMode:

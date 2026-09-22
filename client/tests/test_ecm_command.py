@@ -115,6 +115,28 @@ class TestVerboseFlag:
         cmd = build_ecm_command("/usr/bin/ecm", 50000, verbose=False)
         assert "-v" not in cmd
 
+    def test_gpu_ecm_always_verbose(self):
+        """GPU stage 1 progress is OUTPUT_VERBOSE-gated upstream, so without -v
+        a multi-hour batch prints nothing at all."""
+        cmd = build_ecm_command("/usr/bin/ecm", 50000, use_gpu=True, verbose=False)
+        assert "-v" in cmd
+
+    def test_gpu_ecm_verbose_not_duplicated(self):
+        cmd = build_ecm_command("/usr/bin/ecm", 50000, use_gpu=True, verbose=True)
+        assert cmd.count("-v") == 1
+
+    def test_cpu_ecm_still_respects_verbose_off(self):
+        """CPU ECM prints per-curve detail under -v, so it must stay opt-in."""
+        cmd = build_ecm_command("/usr/bin/ecm", 50000, use_gpu=False, verbose=False)
+        assert "-v" not in cmd
+
+    def test_gpu_flag_ignored_for_pm1_does_not_force_verbose(self):
+        cmd = build_ecm_command(
+            "/usr/bin/ecm", 50000, method="pm1", use_gpu=True, verbose=False
+        )
+        assert "-gpu" not in cmd
+        assert "-v" not in cmd
+
 
 class TestParametrization:
     """Test -param flag (ECM only)."""

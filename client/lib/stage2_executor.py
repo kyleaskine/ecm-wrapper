@@ -326,6 +326,7 @@ class Stage2Executor:
         """Stream output from worker with progress tracking."""
         full_output = ""
         last_progress_report = 0
+        curves_completed = 0
 
         if not process.stdout:
             return full_output
@@ -345,10 +346,18 @@ class Stage2Executor:
 
             # Check for curve completion and progress reporting
             if "Step 2 took" in line:
-                curves_completed = full_output.count("Step 2 took")
+                # Incremented, not recounted: full_output.count(...) rescanned
+                # the whole accumulated transcript once per curve, which is
+                # quadratic in a worker's output and burns the same cores
+                # stage 2 is using.
+                curves_completed += 1
 
-                # Report progress at intervals
-                if curves_completed - last_progress_report >= progress_interval:
+                # Report progress at intervals. The > 0 test matters: with
+                # progress_interval == 0 the difference test alone is always
+                # true, which logged a line for every single curve instead of
+                # disabling reporting as documented above.
+                if (progress_interval > 0
+                        and curves_completed - last_progress_report >= progress_interval):
                     if total_lines > 0:
                         percentage = (curves_completed / total_lines) * 100
                         self.logger.info(f"Worker {worker_id}: {curves_completed}/{total_lines} curves ({percentage:.1f}%)")

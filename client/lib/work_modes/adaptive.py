@@ -50,7 +50,8 @@ class AdaptiveCPUMode(WorkMode):
         self._max_tlevel = user_max if user_max is not None else get_max_tlevel_for_workers(self._workers)
 
         # Default progress_interval to 100 to avoid spamming console with thousands of lines
-        self._progress_interval = self.args.progress_interval if self.args.progress_interval > 0 else 100
+        _pi = self.args.progress_interval or 0  # flag defaults to None
+        self._progress_interval = _pi if _pi > 0 else 100
 
         # Current work type tracking
         self._current_mode: Optional[str] = None  # 'stage2' or 'ecm'

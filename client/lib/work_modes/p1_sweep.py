@@ -115,7 +115,7 @@ class P1WorkMode(WorkMode):
                 method='pm1',
                 parametrization=1,
                 verbose=self.args.verbose,
-                progress_interval=self.args.progress_interval,
+                progress_interval=self.args.progress_interval or 0,
             )
             self._pm1_result = self.wrapper.run_ecm_v2(pm1_config)
             combined_result.curves_run += self._pm1_result.curves_run
@@ -138,7 +138,7 @@ class P1WorkMode(WorkMode):
                 method='pp1',
                 parametrization=1,
                 verbose=self.args.verbose,
-                progress_interval=self.args.progress_interval,
+                progress_interval=self.args.progress_interval or 0,
             )
             self._pp1_result = self.wrapper.run_ecm_v2(pp1_config)
             combined_result.curves_run += self._pp1_result.curves_run

@@ -32,7 +32,7 @@ from lib.ecm_modes import (
     run_standard_mode,
     submit_ecm_result,
 )
-from lib.arg_parser import create_ecm_parser, resolve_gpu_settings, get_workers_default, get_max_batch_default, validate_ecm_args, load_b2_dictionary
+from lib.arg_parser import create_ecm_parser, resolve_gpu_settings, resolve_worker_count, get_max_batch_default, validate_ecm_args, load_b2_dictionary
 from lib.user_output import UserOutput
 
 
@@ -75,8 +75,11 @@ def main():
     # Resolve GPU settings from args + config (uses existing helper)
     use_gpu, gpu_device, gpu_curves = resolve_gpu_settings(args, wrapper.typed_config)
 
-    # Get workers default from config
-    workers = args.workers if args.workers else get_workers_default(wrapper.typed_config)
+    # --workers > programs.gmp_ecm.workers > CPU count. get_workers_default()
+    # short-circuits to 4 when the config value is unset, which would silently
+    # shrink an unconfigured machine's pool; resolve_worker_count keeps the
+    # documented fallback and matches what ecm_client.py uses.
+    workers = resolve_worker_count(args, wrapper.typed_config)
 
     # Get max_batch default from config (for two-stage GPU batching)
     max_batch = getattr(args, 'max_batch', None) or get_max_batch_default(wrapper.typed_config)
