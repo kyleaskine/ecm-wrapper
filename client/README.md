@@ -96,6 +96,22 @@ python3 ecm_client.py --stage1-only --b1 110000000 --curves 3000
 python3 ecm_client.py --stage2-only --b2 11000000000000 --workers 8
 ```
 
+Stage-1 assignments and stage-2 residue claims share B1-based defaults: one day
+below 850e6, two days from 850e6, and five days from 2.9e9. The stage-1 client
+identifies its mode and any explicit `--b1` override so the server can use the
+bound it will run; automatic stage-1 B1 is derived from the current t-level.
+Stage-2 deadlines use the assigned residue's B1.
+
+This policy requires both client and server updates; existing assignments and
+claims keep their original deadlines. Explicit `timeout_days` (ECM work) and
+`claim_timeout_hours` (residue work) API values remain exact overrides, including
+the one-day values sent by older clients. For residue API callers that omit the
+timeout, the previous flat 72-hour default changes to the tiers above. Passing
+a deadline does not automatically release a residue: the admin residue-cleanup
+action releases expired claims. Claims have no automatic renewal; these durations
+are scheduling defaults, not guarantees that every batch will finish before its
+deadline.
+
 ### `ecm_wrapper.py` - Local/Manual ECM Factorization
 Local factorization with explicit composite input - for manual/batch processing.
 
@@ -133,6 +149,24 @@ python3 ecm_wrapper.py --composite "123456789012345" --stage1-only --b1 11000000
 # Stage 2 only - load residue from local file
 python3 ecm_wrapper.py --stage2-only --residue-file /path/to/residue.txt --b2 11000000000000
 ```
+
+Use `--b2-dictionary example_b2_dictionary.txt` for B1-specific bounds in
+two-stage, stage-2-only, or adaptive mode. Matching entries override `--b2`;
+the example leaves `k` automatic. Choose the worker count for the bound and
+available RAM:
+
+- Through B1=850e6, local measurements use `--workers 12` on an RTX 5070 /
+  Ryzen 7 9800X3D.
+- At B1=2.9e9, the provisional B2=2e13 trial uses `--workers 8`. Even eight
+  workers used about **60 GiB resident** on a 364-digit input; twelve exceeded
+  the machine's 76.7 GiB available to WSL. Eight workers is not a low-memory
+  preset, and smaller-memory machines need fewer workers or a lower B2.
+- The 7.6e9 and 25e9 entries retain uncalibrated original bounds. Their lower
+  B2 values do not establish a balanced progression from the 2.9e9 trial.
+
+All entries meet the service's `B2 >= 100 * B1` minimum, which makes some small
+bounds take longer on the CPU. See [B2 tuning notes](B2_TUNING.md) for measured
+times, memory observations, and provisional values.
 
 ### `yafu_wrapper.py` - YAFU Multi-Method Factorization
 Wrapper for YAFU with support for multiple factorization methods:

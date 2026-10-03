@@ -17,6 +17,7 @@ import logging
 
 from ...database import get_db, SessionLocal
 from ...dependencies import get_residue_manager
+from ...constants import MAX_RESIDUE_CLAIM_TIMEOUT_HOURS, RESIDUE_CLAIM_TIMEOUT_DESCRIPTION
 from ...models.attempts import ECMAttempt
 from ...models.residues import ECMResidue
 from ...models.composites import Composite
@@ -153,7 +154,10 @@ def get_residue_work(
     min_b1: Optional[int] = Query(None, ge=1, description="Minimum B1 bound of residue"),
     max_b1: Optional[int] = Query(None, ge=1, description="Maximum B1 bound of residue"),
     project: Optional[str] = Query(None, description="Project name filter (if not set, all projects)"),
-    claim_timeout_hours: int = Query(72, ge=1, le=336, description="Hours until claim expires (default 72h/3 days)"),
+    claim_timeout_hours: Optional[int] = Query(
+        None, ge=1, le=MAX_RESIDUE_CLAIM_TIMEOUT_HOURS,
+        description=RESIDUE_CLAIM_TIMEOUT_DESCRIPTION
+    ),
     db: Session = Depends(get_db),
     residue_manager: ResidueManager = Depends(get_residue_manager)
 ):
@@ -170,7 +174,9 @@ def get_residue_work(
         min_priority: Minimum composite priority filter
         min_b1: Minimum B1 bound of residue
         max_b1: Maximum B1 bound of residue
-        claim_timeout_hours: Hours until claim expires (default 72h/3 days, max 14 days)
+        claim_timeout_hours: Optional expiration override; otherwise use the
+            selected residue's B1-based default. See the parameter description
+            for the tiers and allowed range.
         db: Database session
 
     Returns:

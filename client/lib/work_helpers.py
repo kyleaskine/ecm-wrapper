@@ -131,6 +131,8 @@ def request_ecm_work(api_client, client_id: str, args: WorkArgs,
         max_target_tlevel=args.max_target_tlevel,
         # If client specifies --tlevel, filter out composites already past that level
         max_current_tlevel=args.tlevel,
+        stage1_only=args.stage1_only,
+        requested_b1=args.b1,
         priority=args.priority,
         min_digits=args.min_digits,
         max_digits=args.max_digits,

@@ -1445,7 +1445,7 @@ class TestClaimSelectionContention:
         real_claim = ResidueManager.claim_residue
         state = {}
 
-        def flaky_claim(self, db, residue_id, client_id, claim_timeout_hours=72):
+        def flaky_claim(self, db, residue_id, client_id, claim_timeout_hours=None):
             # The top-priority candidate is permanently contended (another
             # consumer holds it). Without the exclusion set the loop re-picks
             # it every iteration and exhausts its budget -> false "no work".

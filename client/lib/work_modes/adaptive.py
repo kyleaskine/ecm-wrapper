@@ -119,7 +119,6 @@ class AdaptiveCPUMode(WorkMode):
             client_id=self.ctx.client_id,
             min_b1=self.args.min_b1,
             max_b1=max_b1,
-            claim_timeout_hours=24,
             project=self.args.project
         )
 
@@ -172,8 +171,12 @@ class AdaptiveCPUMode(WorkMode):
 
         b1 = work['b1']
 
-        # Determine B2
-        if self.args.b2 is not None:
+        # Use the same dictionary precedence as standalone stage-2 mode.
+        k = 0
+        if 'b2_from_dict' in work:
+            b2 = work['b2_from_dict']
+            k = work.get('k_from_dict', 0)
+        elif self.args.b2 is not None:
             b2 = self.args.b2
         elif self.args.b2_multiplier is not None:
             b2 = int(b1 * self.args.b2_multiplier)
@@ -182,7 +185,7 @@ class AdaptiveCPUMode(WorkMode):
             b2 = work.get('suggested_b2', b1 * 500)
 
         self._s2_b2 = b2
-        self._s2_k = None
+        self._s2_k = k if k > 0 else None
         b2_display = "GMP-ECM default" if b2 == -1 else str(b2)
 
         print_work_header(

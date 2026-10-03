@@ -130,6 +130,16 @@ Discovered factors with discovery methods:
 - `POST /work/{work_id}/complete` - Mark work complete
 - `DELETE /work/{work_id}` - Release/abandon work
 
+`/ecm-work` and residue claims share `ECM_CLAIM_TIMEOUT_TIERS` in
+`app/constants.py`: one day below B1=850e6, two days from 850e6, five days from
+2.9e9. `/ecm-work` accepts `stage1_only` and `requested_b1` as timing hints:
+an explicit B1 takes precedence; automatic stage-1 selection matches the client's
+current-t-level lookup, rather than the server's general ECM suggestion. Other
+ECM requests use the suggested B1 when no override is supplied. `timeout_days`
+is optional and remains an exact override when present (including older clients'
+one-day value). Existing assignments retain their deadlines; there is no renewal.
+P-1/P+1 assignment defaults remain one day.
+
 ### P-1/P+1 Work (2026-02)
 - `GET /p1-work` in `app/api/v1/ecm_work.py`
   - Query params: `client_id`, `method` (pm1/pp1/p1), `priority`, `min_target_tlevel`, `max_target_tlevel`, `work_type`
@@ -237,9 +247,14 @@ Discovered factors with discovery methods:
 - Factor found: Always accepted
 - No factor: Must complete at least 75% of assigned curves
 - Invalid completions: rejected (400) with the claim left in place; it
-  expires via `cleanup_expired_claims` rather than being released in the same
+  can be explicitly released, or released after its deadline by the admin
+  cleanup action via `cleanup_expired_claims`, rather than in the same
   transaction (the rejection rolls that transaction back, so an in-band
   release would be undone while the response claimed success)
+- Default claim durations are defined in `app/constants.py` from the actual
+  residue B1. Explicit `claim_timeout_hours` values remain exact overrides;
+  older clients requesting 24 hours do not opt into the new defaults. Existing
+  claims retain their deadlines, and there is no automatic renewal or cleanup.
 - Implementation: `app/services/residue_manager.py:complete_residue()`
 
 ### Testing Status Page Improvements

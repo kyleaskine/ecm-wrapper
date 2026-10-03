@@ -289,7 +289,7 @@ class Stage1ProducerMode(WorkMode):
                 # residue. Hold the assignment so another GPU doesn't redo the
                 # batch - the queued result's residue_upload chain uploads the
                 # residue and completes the assignment when it drains, and the
-                # server's 1-day expiry is the backstop.
+                # server's B1-based assignment deadline is the backstop.
                 #
                 # This is why the hold can't go through attach_work_completion:
                 # the result already carries the stage-1 chain.

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, TYPE_CHECKING
 from sqlalchemy import String, BigInteger, DateTime, ForeignKey, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -66,11 +66,6 @@ class ECMResidue(Base, TimestampMixin):
     # Relationships
     composite: Mapped["Composite"] = relationship("Composite")
     stage1_attempt: Mapped[Optional["ECMAttempt"]] = relationship("ECMAttempt", foreign_keys=[stage1_attempt_id])
-
-    @classmethod
-    def default_claim_timeout(cls) -> datetime:
-        """Default claim timeout: 3 days from now."""
-        return datetime.utcnow() + timedelta(days=3)
 
     # Indexes for common queries
     __table_args__ = (

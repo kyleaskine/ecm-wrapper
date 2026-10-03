@@ -328,9 +328,11 @@ class APIClient:
         priority: Optional[int] = None,
         min_digits: Optional[int] = None,
         max_digits: Optional[int] = None,
-        timeout_days: int = 1,
+        timeout_days: Optional[int] = None,
         work_type: str = "standard",
-        project: Optional[str] = None
+        project: Optional[str] = None,
+        stage1_only: bool = False,
+        requested_b1: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Request ECM work assignment from server.
@@ -340,8 +342,10 @@ class APIClient:
             min_target_tlevel: Minimum target t-level (filter by difficulty)
             max_target_tlevel: Maximum target t-level (filter by difficulty)
             priority: Minimum priority filter (optional)
-            timeout_days: Work assignment expiration in days (default: 1)
+            timeout_days: Explicit expiration in days, or omit for the server's B1-based default
             work_type: Work assignment strategy - "standard" (smallest first) or "progressive" (least ECM done first)
+            stage1_only: Use stage-1 B1 selection for the default claim duration
+            requested_b1: Client B1 override for calculating the default duration
 
         Returns:
             Work assignment dictionary with keys:
@@ -357,7 +361,13 @@ class APIClient:
         url = f"{self.api_endpoint}/ecm-work"
 
         # Build query parameters
-        params = {'client_id': client_id, 'timeout_days': timeout_days, 'work_type': work_type}
+        params: Dict[str, Any] = {'client_id': client_id, 'work_type': work_type}
+        if timeout_days is not None:
+            params['timeout_days'] = timeout_days
+        if stage1_only:
+            params['stage1_only'] = True
+        if requested_b1 is not None:
+            params['requested_b1'] = requested_b1
         if min_target_tlevel is not None:
             params['min_target_tlevel'] = min_target_tlevel
         if max_target_tlevel is not None:
@@ -674,7 +684,7 @@ class APIClient:
         min_priority: Optional[int] = None,
         min_b1: Optional[int] = None,
         max_b1: Optional[int] = None,
-        claim_timeout_hours: int = 24,
+        claim_timeout_hours: Optional[int] = None,
         project: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
@@ -687,7 +697,8 @@ class APIClient:
             min_priority: Minimum composite priority
             min_b1: Minimum B1 bound of residue
             max_b1: Maximum B1 bound of residue
-            claim_timeout_hours: Hours until claim expires
+            claim_timeout_hours: Optional hours until expiration. Omit to let
+                the server choose the default from the assigned residue's B1.
 
         Returns:
             Dictionary with residue work info (residue_id, composite, b1, download_url, etc.)
@@ -696,7 +707,9 @@ class APIClient:
         url = f"{self.api_endpoint}/residues/work"
 
         headers = {'X-Client-ID': client_id}
-        params: Dict[str, Any] = {'claim_timeout_hours': claim_timeout_hours}
+        params: Dict[str, Any] = {}
+        if claim_timeout_hours is not None:
+            params['claim_timeout_hours'] = claim_timeout_hours
         if min_target_tlevel is not None:
             params['min_target_tlevel'] = min_target_tlevel
         if max_target_tlevel is not None:

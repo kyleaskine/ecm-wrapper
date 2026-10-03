@@ -180,7 +180,7 @@ class WorkMode(ABC):
         failed, so the result is already in the queue. Abandoning then would
         release the composite for another client to re-run work we have
         finished, so the assignment is held instead and a work_complete is
-        chained onto the queued result. The server's assignment expiry (1 day)
+        chained onto the queued result. The server's assignment deadline
         is the backstop if this client never returns. Every other failure -
         an execution error, a Ctrl+C - abandons as before, even if an unrelated
         result for this assignment happens to be sitting in the queue (t-level

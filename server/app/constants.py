@@ -17,6 +17,41 @@ ACTIVE_WORK_STATUSES = ['assigned', 'claimed', 'running']
 # (/ecm-work, /p1-work) and marks the residue as still in play.
 PENDING_RESIDUE_STATUSES = ['available', 'claimed']
 
+# Shared by ECM work assignments and stage-2 residue claims.
+# Ascending (minimum B1, default claim hours). Explicit API overrides remain
+# exact durations; these tiers apply only when the client omits a timeout.
+ECM_CLAIM_TIMEOUT_TIERS = (
+    (0, 24),
+    (850_000_000, 48),
+    (2_900_000_000, 120),
+)
+MAX_RESIDUE_CLAIM_TIMEOUT_HOURS = 14 * 24
+RESIDUE_CLAIM_TIMEOUT_DESCRIPTION = (
+    f"Hours until claim expires. Default {ECM_CLAIM_TIMEOUT_TIERS[0][1]}h; "
+    + "; ".join(
+        f"{hours}h for B1 >= {min_b1:,}"
+        for min_b1, hours in ECM_CLAIM_TIMEOUT_TIERS[1:]
+    )
+    + ". Explicit overrides are honored."
+)
+ECM_WORK_TIMEOUT_DESCRIPTION = (
+    f"Days until assignment expires. Default {ECM_CLAIM_TIMEOUT_TIERS[0][1] // 24}; "
+    + "; ".join(
+        f"{hours // 24} days for B1 >= {min_b1:,}"
+        for min_b1, hours in ECM_CLAIM_TIMEOUT_TIERS[1:]
+    )
+    + ". Explicit overrides are honored."
+)
+
+
+def default_ecm_claim_timeout_hours(b1: int) -> int:
+    """Choose the same B1-based claim duration for either stage of ECM."""
+    for min_b1, hours in reversed(ECM_CLAIM_TIMEOUT_TIERS):
+        if b1 >= min_b1:
+            return hours
+    return ECM_CLAIM_TIMEOUT_TIERS[0][1]
+
+
 # ECM parameter table based on Paul Zimmerman's GMP-ECM 7 recommendations
 # Source: https://www.rieselprime.de/ziki/Elliptic_curve_method
 # Format: (max_digits, b1, b2, typical_curves)
@@ -62,6 +97,15 @@ OPTIMAL_B1_TABLE: List[Tuple[int, int]] = [
     (75, 7600000000),
     (80, 25000000000),
 ]
+
+
+def get_stage1_b1(current_t_level: float) -> int:
+    """Match Stage1ProducerMode's automatic B1 selection for claim timing."""
+    target_for_b1 = max(20, int(current_t_level) + 1)
+    for t_level, b1 in OPTIMAL_B1_TABLE:
+        if target_for_b1 <= t_level:
+            return max(250_000, b1)
+    return OPTIMAL_B1_TABLE[-1][1]
 
 
 def get_b1_above_tlevel(target_t_level: float) -> int:

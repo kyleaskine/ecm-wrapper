@@ -164,6 +164,13 @@ class WorkMode(ABC):
 - `complete_residue()` - Mark stage 2 complete, supersede stage 1
 - `abandon_residue()` - Release residue claim
 
+Stage-1 requests send `stage1_only=true` and, when provided, `requested_b1`
+from `--b1`. `get_ecm_work()` omits `timeout_days` by default so the server can
+choose the same one/two/five-day B1 tiers as stage-2 claims. Without an override,
+the server matches `Stage1ProducerMode`'s current-t-level B1 selection; keep these
+selectors in sync. Explicit API timeouts still override the defaults. Both
+client and server need the update; existing assignments are not extended.
+
 ## P-1/P+1 Sweep Mode (2026-02)
 
 **New design** (`P1WorkMode` in `lib/work_modes.py`):
@@ -361,8 +368,8 @@ Supports: lowercase/uppercase e, decimals (2.6e8), explicit + sign (26e+7)
   step alone), not for execution errors or Ctrl+C — t-level mode submits per B1
   batch, so an unrelated queued result for the same `work_id` is common, and
   holding on a crash would later mark a partially-executed assignment complete.
-  The server's 1-day assignment expiry (`timeout_days` in `ecm_work.py`) is the
-  backstop.
+  The server's assignment deadline (`timeout_days` in `ecm_work.py`, with
+  B1-based defaults for ECM) is the backstop.
 - **Fix** (`lib/submission_queue.py`): `_discard_chained_followups()` (was
   `_release_chained_work()`) queues a `work_abandon` when a chained result is
   discarded (permanent rejection, or the age cap). The chain is the only thing
@@ -407,9 +414,11 @@ paths that needed it, and the discard path only knew about work assignments.
   claim this client no longer held.
 - **Discarded results left residue claims held** (`lib/submission_queue.py`):
   the discard path only handled `work_complete` chains, so a dropped stage-2
-  result left the residue `claimed` for the full 24h timeout — and `ecm_work.py`
-  excludes composites with claimed residues, blocking the whole composite for a
-  day. `_discard_chained_followups()` now covers all three chain shapes, and
+  result left the residue `claimed`, blocking the whole composite because
+  `ecm_work.py` excludes composites with claimed residues. Current default claim
+  durations are one, two, or five days by B1; an expired claim still waits for
+  admin cleanup or an explicit release. `_discard_chained_followups()` now covers
+  all three chain shapes, and
   also deletes the preserved stage-1 residue copy (hundreds of MB with nothing
   left referencing it).
 - **"Duplicate" rejections abandoned work that had landed**: `Duplicate` /
@@ -420,7 +429,7 @@ paths that needed it, and the discard path only knew about work assignments.
   but the work loop drains the queue on every 30-second no-work poll, so an
   outage burned through it in ~2 hours and destroyed the very result the hold
   existed to protect. Discard is now age-based (`MAX_QUEUE_ITEM_AGE`, 7 days —
-  longer than the server's 1-day assignment expiry), with `MAX_QUEUE_ATTEMPTS`
+  longer than the default residue claim durations), with `MAX_QUEUE_ATTEMPTS`
   as a fallback only for items with no usable `created_at`.
 - **`drain()` still truncated in place**: the attempt bump re-opened the file
   with `open(filepath, 'w')` on every cycle — the exact hazard `_rewrite_item()`

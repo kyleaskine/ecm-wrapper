@@ -74,7 +74,6 @@ class Stage2ConsumerMode(WorkMode):
             min_priority=self.args.priority,
             min_b1=self.args.min_b1,
             max_b1=max_b1,
-            claim_timeout_hours=24,
             project=self.args.project
         )
 

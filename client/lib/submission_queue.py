@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # An item is discarded once it has been unsubmittable for this long. This used
 # to be a flat 200-attempt cap, but attempts are consumed by the work loop's
 # 30-second no-work poll rather than by elapsed time, so a server outage burned
-# through them in about two hours - far short of the server's 1-day assignment
+# through them in about two hours - far short of the server's default assignment
 # expiry that holding a queued result is meant to ride out.
 MAX_QUEUE_ITEM_AGE = datetime.timedelta(days=7)
 
@@ -671,7 +671,7 @@ class SubmissionQueue:
         while the server is down, and each poll drains the queue, so an attempt
         counter measures polling frequency rather than how long the outage has
         lasted. MAX_QUEUE_ITEM_AGE is deliberately longer than the server's
-        1-day assignment expiry, which is the backstop for held work.
+        default assignment deadlines (up to five days), the backstop for held work.
         """
         created_raw = item.get("created_at")
         created: Optional[datetime.datetime] = None

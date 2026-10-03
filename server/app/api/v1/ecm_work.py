@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import Query as QueryParam
 from fastapi.responses import Response
 from sqlalchemy.orm import Session, Query, defer
 from sqlalchemy import and_, or_, case, func
@@ -21,6 +22,7 @@ from ...services.work_assignment import pick_and_lock_composite, UNIQUE_ACTIVE_W
 from ...utils.transactions import transaction_scope, is_unique_violation
 from ...config import get_settings
 from ...constants import ECM_BOUNDS, OPTIMAL_B1_TABLE, get_b1_above_tlevel, ACTIVE_WORK_STATUSES, PENDING_RESIDUE_STATUSES
+from ...constants import ECM_WORK_TIMEOUT_DESCRIPTION, default_ecm_claim_timeout_hours, get_stage1_b1
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -78,9 +80,11 @@ def get_ecm_work(
     max_current_tlevel: Optional[float] = None,
     min_digits: Optional[int] = None,
     max_digits: Optional[int] = None,
-    timeout_days: int = 1,
+    timeout_days: Optional[int] = QueryParam(default=None, ge=1, description=ECM_WORK_TIMEOUT_DESCRIPTION),
     work_type: str = "standard",
     project: Optional[str] = None,
+    stage1_only: bool = QueryParam(default=False, description="Use GPU stage-1 B1 selection for the default claim duration"),
+    requested_b1: Optional[int] = QueryParam(default=None, ge=1, description="Client B1 override, used to select the default claim duration"),
     db: Session = Depends(get_db),
     t_level_calc: TLevelCalculator = Depends(get_t_level_calculator)
 ):
@@ -100,9 +104,11 @@ def get_ecm_work(
         priority: Minimum priority level (filters for priority >= this value)
         min_target_tlevel: Minimum target t-level (filters for target_t_level >= this value)
         max_target_tlevel: Maximum target t-level (filters for target_t_level <= this value)
-        timeout_days: Work assignment expiration in days (default: 1)
+        timeout_days: Explicit expiration in days, or a B1-based default if omitted
         work_type: Work assignment strategy - "standard" (easiest/lowest target t-level first) or "progressive" (least ECM done first)
         project: Optional project name to filter composites by (if not set, all projects)
+        stage1_only: Match the stage-1 producer's B1 selection using current t-level
+        requested_b1: Client's explicit B1 override for calculating the default duration
         db: Database session
 
     Returns:
@@ -226,7 +232,17 @@ def get_ecm_work(
 
         # Create work assignment
         work_id = str(uuid.uuid4())
-        expires_at = datetime.utcnow() + timedelta(days=timeout_days)
+        # The GPU producer selects B1 from current t-level, independently of
+        # the suggestion above. Its explicit --b1 takes precedence as well.
+        claim_b1 = requested_b1
+        if claim_b1 is None:
+            claim_b1 = get_stage1_b1(composite.current_t_level or 0.0) if stage1_only else b1
+        duration = (
+            timedelta(days=timeout_days) if timeout_days is not None
+            else timedelta(hours=default_ecm_claim_timeout_hours(claim_b1))
+        )
+        now = datetime.utcnow()
+        expires_at = now + duration
 
         work_assignment = WorkAssignment(
             id=work_id,
@@ -236,6 +252,7 @@ def get_ecm_work(
             b1=b1,
             b2=b2,
             curves_requested=curves,
+            assigned_at=now,
             expires_at=expires_at,
             status='assigned'
         )

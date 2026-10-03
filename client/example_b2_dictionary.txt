@@ -1,14 +1,33 @@
-# Sample file from Oliver. Thanks Oliver!
-      11000       2453232 1 # B2 ~= 223.02 * B1
-      50000      10062372 1 # B2 ~= 201.24 * B1
-     250000      41016372 4 # B2 ~= 164.07 * B1
-    1000000     172811740 4 # B2 ~= 172.81 * B1
-    3000000     524765022 3 # B2 ~= 174.92 * B1
-   11000000    2862945550 4 # B2 ~= 260.27 * B1
-   43000000   35165553160 3 # B2 ~= 817.80 * B1
-  110000000  192463531276 4 # B2 ~= 1749.67 * B1
-  260000000  388330987600 2 # B2 ~= 1493.58 * B1
-  850000000 1572102932416 2 # B2 ~= 1849.53 * B1
- 2900000000  797402956366 1 # B2 ~= 274.96 * B1
- 7600000000  802104453166 1 # B2 ~= 105.54 * B1
-25000000000 3203202802816 1 # B2 ~= 128.12 * B1
+# GPU stage 1 / CPU stage 2 starting points, updated 2026-10-01.
+# Target: similar elapsed time for the same number of curves on an RTX 5070
+# and Ryzen 7 9800X3D with 12 stage-2 workers, mostly ~250-digit inputs.
+# At 2.9e9: 8 workers used ~60 GiB resident on a 364-digit input; 12 exceeded
+# 76.7 GiB of WSL RAM. Use fewer workers/lower B2 if needed; k stays automatic.
+# Small bounds use the service minimum, even where CPU stage 2 takes longer.
+# Format: B1 B2. Deliberately omit k so GMP-ECM selects its stage-2 blocks.
+# See B2_TUNING.md for measurements, estimates, and uncalibrated bounds.
+# Use --b2-dictionary example_b2_dictionary.txt. The measured bounds through
+# 850e6 used 12 workers; the 2.9e9 trial uses 8. Choose workers to fit RAM.
+# A few extra seconds of stage 2 at small B1 are acceptable.
+# Without a factor, the service requires B2 >= 100 * B1 to complete a residue;
+# every entry meets that threshold. See the notes for faster local-only bounds.
+# Original example contributed by Oliver. Thanks Oliver!
+
+# Standard B1 ladder; digit labels are target factor sizes, not input sizes.
+       11000       1100000 # 20 digits; service minimum; ~5s CPU / 3072 curves
+       50000       5000000 # 25 digits; service minimum; ~11s CPU / 3072 curves
+      250000      25000000 # 30 digits; service minimum; four paired runs CPU 2.67-3.01x GPU
+     1000000     100000000 # 35 digits; service minimum; three paired runs CPU 1.51-1.67x GPU
+     3000000     300000000 # 40 digits; four paired runs CPU 0.91-1.07x GPU
+    11000000    1100000000 # 45 digits; service minimum; three 146-218 digit batches completed
+    43000000   10000000000 # 50 digits; same 3072 curves: 26.1min CPU / 28.4min GPU
+   110000000   88000000000 # 55 digits; same 3072 curves: 77.3min CPU / 72.7min GPU
+   260000000  260000000000 # 60 digits; completed 2304 curves in 2h23m CPU; see GPU comparison
+   850000000 1572102932416 # 65 digits; two completed runs ~9h CPU / 3072 curves; see notes
+ 2900000000 20000000000000 # 70 digits; provisional; testing with 8 workers for memory; see notes
+
+# Higher B2 bounds retained from the original example, without k overrides.
+# These are NOT calibrated for equal stage times; measure before increasing.
+# Their B2 values are lower than the 2.9e9 trial; this is not a tuned progression.
+ 7600000000  802104453166 # 75 digits; no local GPU timing or B2 calibration
+25000000000 3203202802816 # 80 digits; no local GPU timing or B2 calibration

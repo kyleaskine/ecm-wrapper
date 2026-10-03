@@ -26,7 +26,7 @@ from ..models.composites import Composite
 from ..models.attempts import ECMAttempt
 from ..models.projects import Project, ProjectComposite
 from ..config import get_settings
-from ..constants import PENDING_RESIDUE_STATUSES
+from ..constants import PENDING_RESIDUE_STATUSES, default_ecm_claim_timeout_hours
 from ..utils.file_cleanup import stage_residue_file_deletion
 from ..utils.transactions import is_unique_violation
 from .t_level_calculator import TLevelCalculator
@@ -462,7 +462,7 @@ class ResidueManager:
         db: Session,
         residue_id: int,
         client_id: str,
-        claim_timeout_hours: int = 72  # 3 days default for large stage 2 work
+        claim_timeout_hours: Optional[int] = None
     ) -> ECMResidue:
         """
         Claim a residue for stage 2 processing.
@@ -471,7 +471,8 @@ class ResidueManager:
             db: Database session
             residue_id: ID of residue to claim
             client_id: ID of claiming client
-            claim_timeout_hours: Hours until claim expires (default 72h/3 days)
+            claim_timeout_hours: Explicit hours until expiration, or None for
+                the residue's B1-based default from app.constants.
 
         Returns:
             Updated ECMResidue record
@@ -504,11 +505,14 @@ class ResidueManager:
                 f"Residue {residue_id}'s composite is fully factored or gone"
             )
 
+        now = datetime.utcnow()
         residue.status = 'claimed'
-        residue.claimed_at = datetime.utcnow()
+        residue.claimed_at = now
         residue.claimed_by = client_id
-        # Update expiration to claim timeout
-        residue.expires_at = datetime.utcnow() + timedelta(hours=claim_timeout_hours)
+        # Select the default from the actual residue, not the request filters.
+        if claim_timeout_hours is None:
+            claim_timeout_hours = default_ecm_claim_timeout_hours(residue.b1)
+        residue.expires_at = now + timedelta(hours=claim_timeout_hours)
 
         logger.info(f"Residue {residue_id} claimed by {client_id}")
         return residue
