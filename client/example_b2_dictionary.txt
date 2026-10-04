@@ -1,13 +1,13 @@
-# GPU stage 1 / CPU stage 2 starting points, updated 2026-10-01.
+# GPU stage 1 / CPU stage 2 starting points, updated 2026-10-03.
 # Target: similar elapsed time for the same number of curves on an RTX 5070
 # and Ryzen 7 9800X3D with 12 stage-2 workers, mostly ~250-digit inputs.
-# At 2.9e9: 8 workers used ~60 GiB resident on a 364-digit input; 12 exceeded
-# 76.7 GiB of WSL RAM. Use fewer workers/lower B2 if needed; k stays automatic.
+# At 2.9e9 / B2=20e12: 8 workers used ~60 GiB resident; 12 exceeded 76.7 GiB
+# of WSL RAM. The reduced B2=15e12 is untested; keep k automatic and allow for RAM.
 # Small bounds use the service minimum, even where CPU stage 2 takes longer.
 # Format: B1 B2. Deliberately omit k so GMP-ECM selects its stage-2 blocks.
 # See B2_TUNING.md for measurements, estimates, and uncalibrated bounds.
 # Use --b2-dictionary example_b2_dictionary.txt. The measured bounds through
-# 850e6 used 12 workers; the 2.9e9 trial uses 8. Choose workers to fit RAM.
+# 850e6 used 12 workers; the completed 2.9e9 run used 8. Choose workers to fit RAM.
 # A few extra seconds of stage 2 at small B1 are acceptable.
 # Without a factor, the service requires B2 >= 100 * B1 to complete a residue;
 # every entry meets that threshold. See the notes for faster local-only bounds.
@@ -24,10 +24,10 @@
    110000000   88000000000 # 55 digits; same 3072 curves: 77.3min CPU / 72.7min GPU
    260000000  260000000000 # 60 digits; completed 2304 curves in 2h23m CPU; see GPU comparison
    850000000 1572102932416 # 65 digits; two completed runs ~9h CPU / 3072 curves; see notes
- 2900000000 20000000000000 # 70 digits; provisional; testing with 8 workers for memory; see notes
+ 2900000000 15000000000000 # 70 digits; provisional reduction from measured 20e12; awaiting a residue test
 
 # Higher B2 bounds retained from the original example, without k overrides.
 # These are NOT calibrated for equal stage times; measure before increasing.
-# Their B2 values are lower than the 2.9e9 trial; this is not a tuned progression.
+# Their B2 values are lower than the 2.9e9 entry; this is not a tuned progression.
  7600000000  802104453166 # 75 digits; no local GPU timing or B2 calibration
 25000000000 3203202802816 # 80 digits; no local GPU timing or B2 calibration

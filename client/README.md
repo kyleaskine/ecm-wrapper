@@ -157,12 +157,15 @@ available RAM:
 
 - Through B1=850e6, local measurements use `--workers 12` on an RTX 5070 /
   Ryzen 7 9800X3D.
-- At B1=2.9e9, the provisional B2=2e13 trial uses `--workers 8`. Even eight
-  workers used about **60 GiB resident** on a 364-digit input; twelve exceeded
-  the machine's 76.7 GiB available to WSL. Eight workers is not a low-memory
-  preset, and smaller-memory machines need fewer workers or a lower B2.
+- At B1=2.9e9, the example now uses **B2=15e12, provisional and untested**.
+  The measured B2=20e12 run completed 2,304 curves in **48h 12m** with
+  `--workers 8`, slower than the historical GPU reference at equal curve counts.
+  At that larger bound, eight workers used about **60 GiB resident** on a
+  364-digit input; twelve exceeded the machine's 76.7 GiB available to WSL.
+  Keep eight workers for the next test on this machine; memory at 15e12 is
+  unmeasured. Smaller-memory machines may need fewer workers or a lower B2.
 - The 7.6e9 and 25e9 entries retain uncalibrated original bounds. Their lower
-  B2 values do not establish a balanced progression from the 2.9e9 trial.
+  B2 values do not establish a balanced progression from the 2.9e9 entry.
 
 All entries meet the service's `B2 >= 100 * B1` minimum, which makes some small
 bounds take longer on the CPU. See [B2 tuning notes](B2_TUNING.md) for measured

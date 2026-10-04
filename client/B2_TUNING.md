@@ -3,11 +3,14 @@
 `example_b2_dictionary.txt` targets similar GPU stage-1 and CPU stage-2 elapsed
 times for equal curve counts on an RTX 5070 and Ryzen 7 9800X3D with **12 CPU
 workers**, subject to the service's minimum B2 of 100 times B1. It covers all 13
-standard B1 sizes, including the small bounds. The provisional B1=2.9 billion
-trial uses eight workers because twelve exceeded the available RAM; even eight
-used about 60 GiB resident on its 364-digit input. The service's B2 minimum makes CPU stage 2
-slower than GPU stage 1 at some small bounds. The measurements
-below use GMP-ECM 7.0.7 and local logs through October 1, 2026.
+standard B1 sizes, including the small bounds. At B1=2.9 billion, the example
+now uses a provisional B2=15 trillion, reduced from the measured 20 trillion.
+That completed run used eight workers because twelve exceeded the available
+RAM; even eight used about 60 GiB resident on its 364-digit input. Timing and
+memory at 15 trillion remain untested. The service's B2 minimum makes CPU stage 2
+slower than GPU stage 1 at some small bounds. The measurements below use
+GMP-ECM 7.0.7 and local logs through October 2, 2026; the reduction was selected
+on October 3.
 
 The dictionary contains only `B1 B2`; leaving out the optional `k` column lets
 GMP-ECM choose its stage-2 block count. Block count affects time and memory; see
@@ -260,15 +263,59 @@ support retaining the current B2 as a locally measured starting point. Run
 metadata and submission evidence are saved locally under the ignored directory
 `data/benchmarks/b2_20260930/`.
 
-The **B1=2.9 billion** entry now uses a **provisional B2=20 trillion (2e13)**,
-increased from 797,402,956,366. This is an extrapolation for a full service test,
-not a measured stage-2 result. Two historical GPU batches, each with 3,072
-curves, establish the target:
+### B1=2.9 billion: measured reference and provisional reduction
+
+The **B1=2.9 billion, B2=20 trillion (2e13)** run completed all **2,304 curves**
+of residue **76119** on a **364-digit input**, using **eight CPU workers** and
+automatic `k`. From the first worker start on September 30 at 12:21:15.172 EDT
+to the last finish on October 2 at 12:32:56.654 EDT, stage 2 took
+**173,501.482 seconds (48h 11m 41s)**. Each worker completed 288 curves without
+a factor. The server accepted attempt **371853** at 12:33:00 with
+`residue_completed=True` and t-level **65.254**. Its reported duration was
+173,501.5 seconds, matching the local elapsed time.
+
+All eight saved worker transcripts confirm the input, bounds, and curve counts.
+The public residue and submission records also confirm completion at B2=20
+trillion. Stage 1 was attempt 356129; the residue headers identify its producer
+as Kyle-PC running GMP-ECM 7.0.6. Its service record has no elapsed time.
+The local August 27 stage-1 start on this same input was interrupted and cannot
+supply a matching GPU timing.
+Verification metadata is saved locally in
+`data/benchmarks/b2_20261003/completed_user_work_76119.json`.
+
+Scaling the completed CPU run to 3,072 curves gives **64.26 hours**. Two
+historical local GPU batches, each with 3,072 curves, provide a reference:
 
 | GPU batch start | Input digits | GPU stage-1 seconds | Hours |
 | --- | ---: | ---: | ---: |
 | June 24, 2026 | 344 | 147,728.608 | 41.04 |
 | August 2, 2026 | 311 | 145,594.288 | 40.44 |
+
+CPU stage 2 is **57.7% slower** than the mean of those GPU times after matching
+curve counts. These are different inputs and runs under observed background
+load, not a measurement on the same curves. B2=20 trillion is now a completed
+service measurement, but **does not establish equal stage times with eight
+workers**. Twelve workers could not be measured to completion because of
+memory pressure.
+
+On October 3, the example was reduced to **B2=15 trillion (15e12)** as a
+provisional setting, retaining **eight workers and automatic `k`** as the
+planned test configuration. Applying the earlier rough `time ∝ B2^p` scaling,
+with `p=0.5–0.575`, to the completed 48.2-hour run estimates **41–42 hours for
+2,304 curves** on the same input with eight workers. This is about 13–15% less
+time, not a 25% runtime reduction. The historical GPU reference scaled to
+2,304 curves is about **30.6 hours**, so the reduced bound may still leave CPU
+stage 2 slower.
+
+These are estimates, not measurements at 15 trillion. The GPU inputs differ,
+and automatic block/polynomial choices can change time and memory abruptly.
+Memory use at the reduced bound is also unmeasured; the 60 GiB observation
+above applies to 20 trillion. There is no further residue available for a test
+as of October 3. Verify elapsed time and memory on the next available residue;
+the completed 20-trillion run remains the measured reference.
+
+The original choice of B2=20 trillion, increased from 797,402,956,366, was an
+extrapolation for twelve workers:
 
 The completed 260-million and 850-million CPU runs above give 3.18 and 8.95
 hours per 3,072 curves at B2=260 billion and 1.572 trillion, respectively, on
@@ -283,13 +330,13 @@ take longer.
 
 The original extrapolation was **roughly 32–40 hours per 3,072 curves with 12
 workers**, not a guaranteed range. That scaled to about 24–30 hours for 2,304
-curves or 56–70 hours for 5,376 curves. The new B2 is about 25 times the old
+curves or 56–70 hours for 5,376 curves. B2=20 trillion is about 25 times the old
 entry; that does not imply 25 times the CPU runtime.
 
-The first actual test, residue 76119, contains 2,304 curves on a **364-digit
-input**. The 12-worker run started at 12:13:41 on September 30 and exceeded the
-available RAM: WSL had 76.7 GiB total, about 20 GiB of system swap in use, and
-only 1.7–2.9 GiB available during inspection. The user stopped it at 12:20:03,
+The initial 12-worker run of residue 76119 started at 12:13:41 on September 30
+and exceeded the available RAM: WSL had 76.7 GiB total, about 20 GiB of system
+swap in use, and only 1.7–2.9 GiB available during inspection. The user stopped
+it at 12:20:03,
 before any curve completed, and the client released the residue successfully.
 It supplies memory evidence but no completed-curve timing.
 
@@ -297,24 +344,18 @@ The user restarted the same residue with **8 workers** at 12:21:15, retaining
 B2=20 trillion and automatic `k`. At 12:27:49 the eight ECM processes used
 59.8 GiB resident with zero process swap; 13.5 GiB remained available and recent
 memory-pressure averages were zero. This is one snapshot, not a peak-memory
-guarantee. The 12-worker time estimate does **not** establish this run's ETA;
-use measured progress rather than assuming a linear worker-count penalty.
-The example remains provisional pending the completed run. Memory snapshots
-are saved locally in `data/benchmarks/b2_20260930/in_progress_user_work_76119.jsonl`.
+guarantee. The twelve-worker estimate does not describe the completed
+eight-worker run, and worker-count scaling should not be assumed linear.
+Memory snapshots are saved locally in
+`data/benchmarks/b2_20260930/in_progress_user_work_76119.jsonl`.
 
-By October 1 at 05:20–05:27 EDT, all eight workers had reported **100/288
-curves**. Their first 50 curves took a median of 9.00 hours; the next 50 took
-7.997–8.080 hours (median 8.052), about 9.6–9.7 minutes per curve per worker.
-Extrapolating each worker's latest interval to 288 curves puts the last finish
-at approximately **October 2, 11:50 EDT**, or **47.5 hours total** for the
-2,304-curve assignment. As of October 1 at 10:10 EDT, that is about **25.7
-hours remaining**. Using each worker's average since the restart instead gives
-a more conservative finish near 13:36 EDT. Both are projections assuming the
-observed pace continues, not completed-run measurements. Progress evidence and
-per-worker calculations are saved locally in
-`data/benchmarks/b2_20261001/in_progress_user_work_76119.json`.
+The October 1 projection from each worker's latest 50-curve interval predicted
+an October 2 finish near 11:50 EDT; the actual last finish was about 43 minutes
+later. The original progress calculations remain saved locally in
+`data/benchmarks/b2_20261001/in_progress_user_work_76119.json` for comparison.
 
-For this large-bound service test, use eight workers from `client/`:
+When another residue is available, test the revised **B2=15 trillion** entry
+on hardware with sufficient RAM using eight workers from `client/`:
 
 ```bash
 python3 ecm_client.py --stage2-only --min-b1 2.9e9 --max-b1 2.9e9 \
@@ -324,20 +365,19 @@ python3 ecm_client.py --stage2-only --min-b1 2.9e9 --max-b1 2.9e9 \
 
 This uses automatic `k` and submits the completed work normally. Progress every
 10 curves per worker should provide an early throughput estimate, before the
-full assignment finishes. Replace the extrapolation with the measured result
-after that run.
+full assignment finishes.
 
 The B1=7.6 billion and 25 billion entries retain the original B2 values with
 `k` removed. They remain **uncalibrated**, including their smaller B2 values
-relative to the new 2.9-billion trial. Their uneven progression is not a
+relative to the provisional 2.9-billion entry. Their uneven progression is not a
 measured throughput optimum.
 
 ## Using and refining the example
 
 From `client/`, pass `--b2-dictionary example_b2_dictionary.txt --workers 12`
 to a local two-stage or service stage-2-only run at the measured smaller bounds.
-The 2.9-billion trial uses eight workers because of memory pressure, as described
-above. The dictionary does not set the worker count. The separate local
+The completed 2.9-billion run used eight workers because of memory pressure,
+as described above. The dictionary does not set the worker count. The separate local
 `b2_dictionary.txt` is not changed by editing the example.
 
 For service `--stage2-only` work, completing a residue without finding a factor
