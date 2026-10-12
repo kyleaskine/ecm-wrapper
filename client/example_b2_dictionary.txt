@@ -1,11 +1,18 @@
-# GPU stage 1 / CPU stage 2 starting points, updated 2026-10-03.
+# GPU stage 1 / CPU stage 2 starting points, updated 2026-10-11.
 # Target: similar elapsed time for the same number of curves on an RTX 5070
 # and Ryzen 7 9800X3D with 12 stage-2 workers, mostly ~250-digit inputs.
+# Every B2 is GMP-ECM's *effective* B2: stage 2 always runs to the end of its
+# last whole block, past the requested B2, but GMP prints (and the client
+# reports) the requested value. Each entry is that block end for the bound we
+# chose, so the reported B2 is the tested B2. Requesting it gives the same GMP
+# stage-2 layout, time and memory as the original round bound (verified
+# 2026-10-11 with GMP-ECM 7.0.7). To change a bound, use GMP's effective value;
+# see B2_TUNING.md.
 # At 2.9e9 / B2=20e12: 8 workers used ~60 GiB resident; 12 exceeded 76.7 GiB
-# of WSL RAM. The reduced B2=15e12 is untested; keep k automatic and allow for RAM.
-# Small bounds use the service minimum, even where CPU stage 2 takes longer.
-# Format: B1 B2. Deliberately omit k so GMP-ECM selects its stage-2 blocks.
-# See B2_TUNING.md for measurements, estimates, and uncalibrated bounds.
+# of WSL RAM. The reduced bound is untested; keep k automatic and allow for RAM.
+# Small bounds use the service minimum rounded up to GMP's block end, even
+# where CPU stage 2 takes longer.
+# Format: B1 B2. Deliberately omit k; GMP's automatic k reproduces each layout.
 # Use --b2-dictionary example_b2_dictionary.txt. The measured bounds through
 # 850e6 used 12 workers; the completed 2.9e9 run used 8. Choose workers to fit RAM.
 # A few extra seconds of stage 2 at small B1 are acceptable.
@@ -14,20 +21,20 @@
 # Original example contributed by Oliver. Thanks Oliver!
 
 # Standard B1 ladder; digit labels are target factor sizes, not input sizes.
-       11000       1100000 # 20 digits; service minimum; ~5s CPU / 3072 curves
-       50000       5000000 # 25 digits; service minimum; ~11s CPU / 3072 curves
-      250000      25000000 # 30 digits; service minimum; four paired runs CPU 2.67-3.01x GPU
-     1000000     100000000 # 35 digits; service minimum; three paired runs CPU 1.51-1.67x GPU
-     3000000     300000000 # 40 digits; four paired runs CPU 0.91-1.07x GPU
-    11000000    1100000000 # 45 digits; service minimum; three 146-218 digit batches completed
-    43000000   10000000000 # 50 digits; same 3072 curves: 26.1min CPU / 28.4min GPU
-   110000000   88000000000 # 55 digits; same 3072 curves: 77.3min CPU / 72.7min GPU
-   260000000  260000000000 # 60 digits; completed 2304 curves in 2h23m CPU; see GPU comparison
-   850000000 1572102932416 # 65 digits; two completed runs ~9h CPU / 3072 curves; see notes
- 2900000000 15000000000000 # 70 digits; provisional reduction from measured 20e12; awaiting a residue test
+       11000        1233552 # 20 digits; service minimum, block end; ~5s CPU / 3072 curves
+       50000        5058912 # 25 digits; service minimum, block end; ~11s CPU / 3072 curves
+      250000       30769212 # 30 digits; service minimum, block end; four paired runs CPU 2.67-3.01x GPU
+     1000000      129756910 # 35 digits; service minimum, block end; three paired runs CPU 1.51-1.67x GPU
+     3000000      350524032 # 40 digits; four paired runs CPU 0.91-1.07x GPU
+    11000000     1436143810 # 45 digits; service minimum, block end; three 146-218 digit batches completed
+    43000000    11454315610 # 50 digits; same 3072 curves: 26.1min CPU / 28.4min GPU
+   110000000    96275279116 # 55 digits; same 3072 curves: 77.3min CPU / 72.7min GPU
+   260000000   288801663166 # 60 digits; completed 2304 curves in 2h23m CPU; see GPU comparison
+   850000000  1589950362016 # 65 digits; two completed runs ~9h CPU / 3072 curves; see notes
+  2900000000 15894682303516 # 70 digits; provisional reduction from measured 20e12; awaiting a residue test
 
 # Higher B2 bounds retained from the original example, without k overrides.
 # These are NOT calibrated for equal stage times; measure before increasing.
 # Their B2 values are lower than the 2.9e9 entry; this is not a tuned progression.
- 7600000000  802104453166 # 75 digits; no local GPU timing or B2 calibration
-25000000000 3203202802816 # 80 digits; no local GPU timing or B2 calibration
+  7600000000   977817348700 # 75 digits; no local GPU timing or B2 calibration
+ 25000000000  3203299799716 # 80 digits; no local GPU timing or B2 calibration

@@ -152,12 +152,15 @@ python3 ecm_wrapper.py --stage2-only --residue-file /path/to/residue.txt --b2 11
 
 Use `--b2-dictionary example_b2_dictionary.txt` for B1-specific bounds in
 two-stage, stage-2-only, or adaptive mode. Matching entries override `--b2`;
-the example leaves `k` automatic. Choose the worker count for the bound and
-available RAM:
+the example leaves `k` automatic. Its B2 values are GMP-ECM's effective bounds:
+stage 2 always runs to the end of its last block, past a requested B2, so each
+entry is that block end and the B2 reported to the server is the B2 tested.
+Choose the worker count for the bound and available RAM:
 
 - Through B1=850e6, local measurements use `--workers 12` on an RTX 5070 /
   Ryzen 7 9800X3D.
-- At B1=2.9e9, the example now uses **B2=15e12, provisional and untested**.
+- At B1=2.9e9, the example now uses **B2=15,894,682,303,516** (GMP's effective
+  bound for a 15e12 request), **provisional and untested**.
   The measured B2=20e12 run completed 2,304 curves in **48h 12m** with
   `--workers 8`, slower than the historical GPU reference at equal curve counts.
   At that larger bound, eight workers used about **60 GiB resident** on a

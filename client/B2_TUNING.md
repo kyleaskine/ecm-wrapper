@@ -4,7 +4,8 @@
 times for equal curve counts on an RTX 5070 and Ryzen 7 9800X3D with **12 CPU
 workers**, subject to the service's minimum B2 of 100 times B1. It covers all 13
 standard B1 sizes, including the small bounds. At B1=2.9 billion, the example
-now uses a provisional B2=15 trillion, reduced from the measured 20 trillion.
+now uses a provisional B2 of 15.9 trillion (GMP's effective bound for a
+15-trillion request), reduced from the measured 20 trillion.
 That completed run used eight workers because twelve exceeded the available
 RAM; even eight used about 60 GiB resident on its 364-digit input. Timing and
 memory at 15 trillion remain untested. The service's B2 minimum makes CPU stage 2
@@ -17,6 +18,88 @@ GMP-ECM choose its stage-2 block count. Block count affects time and memory; see
 the [GMP-ECM README](https://github.com/sethtroisi/gmp-ecm/blob/main/README).
 These bounds are local starting points, not universal ECM optima. Lower B2
 reduces work per curve as well as elapsed time.
+
+## Effective B2
+
+GMP-ECM never stops stage 2 at exactly the requested B2. `bestD()` in
+`bestd.c` picks a block layout (`dF`, `k`, `d`, `d2`, `i0`) that covers the
+request, and stage 2 then evaluates every block in full, ending at the
+effective bound B2' = (i1 - d2 + 1) * d + d2 - 1. GMP still prints the
+requested B2 on its `Using B1=..., B2=...` line, and the client reports that
+value to the service. Until October 11 the example therefore tested 1.01 to
+1.31 times the B2 it reported. **Measurements elsewhere in these notes quote
+the requested B2; the work actually ran to the effective bound below.**
+
+Each example entry is now its own effective bound. Requesting B2' gives the
+same layout as the old round value, so time and memory are unchanged; only the
+reported B2 changes. GMP-ECM uses NTT below 30 limbs (about 578 digits), and
+the layout then depends only on B1, B2 and `k`, not on the input.
+
+| B1 | Old request | Effective B2 (new entry) | Ratio | dF | k | d |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 11,000 | 1,100,000 | 1,233,552 | 1.121 | 256 | 2 | 2,310 |
+| 50,000 | 5,000,000 | 5,058,912 | 1.012 | 512 | 2 | 4,620 |
+| 250,000 | 25,000,000 | 30,769,212 | 1.231 | 1,024 | 3 | 9,240 |
+| 1,000,000 | 100,000,000 | 129,756,910 | 1.298 | 2,048 | 3 | 19,110 |
+| 3,000,000 | 300,000,000 | 350,524,032 | 1.168 | 4,096 | 2 | 39,270 |
+| 11,000,000 | 1,100,000,000 | 1,436,143,810 | 1.306 | 8,192 | 2 | 79,170 |
+| 43,000,000 | 10,000,000,000 | 11,454,315,610 | 1.145 | 16,384 | 4 | 158,340 |
+| 110,000,000 | 88,000,000,000 | 96,275,279,116 | 1.094 | 65,536 | 2 | 690,690 |
+| 260,000,000 | 260,000,000,000 | 288,801,663,166 | 1.111 | 65,536 | 6 | 690,690 |
+| 850,000,000 | 1,572,102,932,416 | 1,589,950,362,016 | 1.011 | 262,144 | 2 | 2,852,850 |
+| 2,900,000,000 | 15,000,000,000,000 | 15,894,682,303,516 | 1.060 | 524,288 | 5 | 5,705,700 |
+| 7,600,000,000 | 802,104,453,166 | 977,817,348,700 | 1.219 | 131,072 | 5 | 1,345,890 |
+| 25,000,000,000 | 3,203,202,802,816 | 3,203,299,799,716 | 1.000 | 262,144 | 4 | 2,852,850 |
+
+The service's t-level calculation already credited the effective bound for
+most of the old requests. At B1=1 million and 43 million it credited less
+than was tested: 2,560 curves at 43 million scored t44.89 instead of t44.98.
+
+To pick a new bound, read GMP's layout for one curve with stage 1 skipped, then
+compute B2' from it:
+
+```bash
+echo N | ecm -v -param 3 -sigma 3:12345 -c 1 B1-B1 B2   # stop after the dF= line
+```
+
+With j = k*dF + i0 - ceil(i0/d2) and i1 = floor(j/(d2-1))*d2 + (j mod (d2-1)),
+B2' = (i1 - d2 + 1)*d + d2 - 1. Request B2' and confirm the layout line is
+unchanged.
+
+### Comparison with Oliver's original bounds
+
+Oliver's original example pinned `k` and chose B2 values that were already
+exact block ends (every entry except 850 million). On October 11 both sets
+were measured on service residues with eight workers, two alternating rounds
+per setting on the same curves. Times are GMP's reported stage-2 seconds per
+curve; the benchmarks used `-v`, which adds about one CPU-second per curve of
+probability tables at 110 million and above.
+
+| B1 | Input digits | B2: example / Oliver | Stage 2 s/curve | RSS per worker | Oliver: CPU per target | Oliver: curves per target |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 11 million | 200 | 1.436e9 / 2.863e9 | 0.90 / 1.38 | 53 / 53 MB | +33% (t45) | -14% |
+| 43 million | 167 | 1.145e10 / 3.517e10 | 3.06 / 5.39 | 83 / 164 MB | +41% (t50) | -20% |
+| 110 million | 278 | 9.628e10 / 1.925e11 | 16.7 / 25.1 | 487 / 487 MB | +31% (t55) | -12% |
+| 260 million | 238 | 2.888e11 / 3.883e11 | 27.6 / 39.6 | 430 / 814 MB | +31% (t60) | -9% |
+
+Oliver's larger bounds cost 31-41% more CPU per unit of t-level and need
+9-20% fewer GPU stage-1 curves. They win when CPU workers are waiting for
+residues; this example wins when residues are waiting for CPU workers, as 91
+were on October 11.
+
+At each of Oliver's bounds, his forced `k` and automatic `k` produced the
+identical layout, with times 1-5% apart in both directions, which is noise. His
+`k` changes the layout only for the `k=1` entries at 2.9 billion and above.
+
+The benchmarked residues were then completed at the effective bounds through
+the normal client with eight workers. Each was accepted with
+`residue_completed=True` and no factor:
+
+| B1 | Residue | Curves | Stage-2 elapsed | Peak RSS, all workers | Attempt |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 11 million | 80680 | 1,408 | 161 s | 422 MB | 375342 |
+| 43 million | 80591 | 2,560 | 985 s | 644 MB | 375361 |
+| 110 million | 80622 | 1,792 | 3,596 s | 3.77 GB | 375413 |
 
 ## Completed service work
 
