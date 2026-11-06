@@ -10,8 +10,37 @@ and B2 handling.
 This is a standalone function (no class) so it remains pickleable
 for multiprocessing workers.
 """
+import subprocess
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
+
+
+_gpu_stage2_cache: Dict[str, bool] = {}
+
+
+def gpu_stage2_supported(ecm_path: str) -> bool:
+    """
+    Whether the GMP-ECM binary at ecm_path can run stage 2 on the GPU.
+
+    GPU stage 2 builds (2026-10+) accept -resume together with -gpu (older
+    builds reject that combination outright) and run stage 2 on the GPU by
+    default with -gpu. They advertise -cpustage2 in their usage text, which is
+    the only reliable marker: the version string did not change (still 7.0.6).
+
+    Cached per path once the binary answers, so the probe runs once per
+    process. A probe that could not run (binary briefly missing, timeout) is
+    not cached: a long-running client retries it on the next call.
+    """
+    if ecm_path in _gpu_stage2_cache:
+        return _gpu_stage2_cache[ecm_path]
+    try:
+        proc = subprocess.run([ecm_path, "-h"], capture_output=True, text=True,
+                              timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    supported = "-cpustage2" in (proc.stdout + proc.stderr)
+    _gpu_stage2_cache[ecm_path] = supported
+    return supported
 
 
 def build_ecm_command(
@@ -59,8 +88,8 @@ def build_ecm_command(
         residue_load: Path for -resume flag
         verbose: Enable -v flag. GPU ECM always gets -v regardless, because
             GMP-ECM gates its GPU stage 1 progress/ETA output behind
-            OUTPUT_VERBOSE (cgbn_stage1.cu) - without -v a multi-hour batch
-            prints nothing at all. GMP-ECM self-throttles those lines
+            OUTPUT_VERBOSE - without -v a multi-hour batch prints nothing
+            at all. GMP-ECM self-throttles those lines
             ("5 early + 5 per 10s + 5 per 100s + every 1000s"), so this costs
             roughly a dozen lines per invocation however long it runs.
         param: Parametrization value (-param, ECM only)

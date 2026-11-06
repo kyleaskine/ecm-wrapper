@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Stage 2 Consumer mode: download residues from server, run CPU stage 2.
+Stage 2 Consumer mode: download residues from server, run stage 2
+(CPU worker pool, or one GPU process with --gpu).
 """
 
 from pathlib import Path
@@ -10,7 +11,11 @@ import time
 
 from ..ecm_config import FactorResult
 from ..work_helpers import print_work_header
-from ..arg_parser import get_workers_default, resolve_pin_threads, resolve_stage2_progress_interval
+from ..arg_parser import (
+    get_workers_default, resolve_gpu_settings, resolve_pin_threads, resolve_use_gpu,
+    resolve_stage2_progress_interval,
+)
+from ..stage2_executor import GPUStage2Executor, create_stage2_executor
 from ..api_client import ResourceNotFoundError
 from ..cleanup_helpers import handle_shutdown
 from .base import WorkMode, WorkLoopContext
@@ -32,6 +37,12 @@ class Stage2ConsumerMode(WorkMode):
 
     def __init__(self, ctx: WorkLoopContext):
         super().__init__(ctx)
+        # GPU stage 2 only on an explicit --gpu (resolve_use_gpu never reads
+        # gpu_enabled): a stage 2 consumer commonly runs beside a
+        # --stage1-only GPU producer that must keep the card.
+        self._use_gpu: bool = resolve_use_gpu(ctx.args)
+        if self._use_gpu:
+            self.mode_name = "Stage 2 Consumer (GPU)"
         self._b2: Optional[int] = None
         self._k: Optional[int] = None
         self.local_residue_file: Optional[Path] = None
@@ -42,9 +53,6 @@ class Stage2ConsumerMode(WorkMode):
         self._found_factor: bool = False
         self._raw_output: str = ""  # Aggregated ECM output from workers
         self._primary_submission_failed: bool = False
-        # Import here to avoid circular dependency
-        from ..stage2_executor import Stage2Executor
-        self.Stage2Executor = Stage2Executor
 
     def _cleanup_local_residue(self) -> None:
         """Clean up local residue file if it exists."""
@@ -159,18 +167,23 @@ class Stage2ConsumerMode(WorkMode):
         # Get workers count
         workers = self.args.workers or get_workers_default(self.wrapper.typed_config)
 
-        # Run stage 2
-        print(f"Running stage 2 with {workers} workers...")
-        executor = self.Stage2Executor(
-            self.wrapper,
-            self.local_residue_file,
-            work['b1'],
-            self._b2,
-            self._k,
-            workers,
-            self.args.verbose,
-            pin_threads=resolve_pin_threads(self.args)
+        # Run stage 2. GPU stage 2 only batches -param 3 residues (what GPU
+        # stage 1 produces); others would run one at a time on a single core
+        # inside the GPU process, so they go to the CPU worker pool instead.
+        param = work.get('parametrization', 3)
+        use_gpu = self._use_gpu and param == 3
+        if self._use_gpu and not use_gpu:
+            print(f"Residue is -param {param}, not 3: running stage 2 on CPU workers")
+        _, gpu_device, gpu_curves = resolve_gpu_settings(self.args, self.wrapper.typed_config)
+        # Falls back to CPU workers if the binary has no GPU stage 2
+        executor = create_stage2_executor(
+            self.wrapper, self.local_residue_file, work['b1'], self._b2,
+            self._k, workers, self.args.verbose,
+            pin_threads=resolve_pin_threads(self.args),
+            use_gpu=use_gpu, gpu_device=gpu_device, gpu_curves=gpu_curves,
         )
+        print("Running stage 2 on the GPU..." if isinstance(executor, GPUStage2Executor)
+              else f"Running stage 2 with {workers} workers...")
 
         factor, all_factors, curves, exec_time, sigma = executor.execute(
             early_termination=not self.args.continue_after_factor,
@@ -179,13 +192,24 @@ class Stage2ConsumerMode(WorkMode):
 
         # Build FactorResult
         result = FactorResult()
-        result.success = True
         result.curves_run = curves
         result.execution_time = exec_time
-
-        if all_factors:
-            for f in all_factors:
-                result.add_factor(f, sigma)
+        result.success = not executor.failed
+        result.error_message = executor.error_message
+        for f, s in executor.factor_sigmas:
+            result.add_factor(f, s)
+        if result.success and curves == 0 and not executor.factor_sigmas:
+            # Nothing ran (e.g. Ctrl+C before stage 2 started): don't submit
+            # an empty stage 2 attempt for this residue.
+            result.success = False
+            result.error_message = "Stage 2 ran no curves"
+        if executor.b2_used is not None:
+            # Report the B2 the GPU actually ran (rounded up, or the
+            # 100*B1 baby-step giant-step default), not the one asked for
+            if executor.b2_used != self._b2:
+                print(f"GPU stage 2 ran B2={executor.b2_used} (requested "
+                      f"{'default' if self._b2 == -1 else self._b2})")
+            self._b2 = executor.b2_used
 
         # Store for submit_results and complete_work
         self._work = work

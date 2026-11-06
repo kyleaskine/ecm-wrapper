@@ -4,14 +4,16 @@ import time
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple, Union, Callable
 from lib.base_wrapper import BaseWrapper
-from lib.parsing_utils import ECMPatterns
+from lib.parsing_utils import (
+    count_completed_curves, count_gpu_stage1_curves, parse_b2_used,
+)
 from lib.residue_manager import ResidueFileManager
 from lib.result_processor import ResultProcessor
 from lib.ecm_config import ECMConfig, TwoStageConfig, MultiprocessConfig, TLevelConfig, FactorResult, ExecutionBatch, ECMPrimitiveResult
 from lib.execution_engine import CompositeExecutionEngine, TLevelBatchProducer
 from lib.ecm_command import build_ecm_command
 from lib.ecm_math import (
-    trial_division, is_probably_prime, OPTIMAL_B1_TABLE
+    trial_division, is_probably_prime, split_into_distinct_primes, OPTIMAL_B1_TABLE
 )
 from lib.api_client import PermanentUploadError
 
@@ -90,7 +92,15 @@ class ECMWrapper(BaseWrapper):
                 maxmem=config.maxmem,
             )
 
-            return FactorResult.from_primitive_result(prim_result, time.time() - start_time)
+            result = FactorResult.from_primitive_result(prim_result, time.time() - start_time)
+            if config.use_gpu and not config.save_residues and result.factors:
+                # A GPU batch can report a composite factor (two curves of a
+                # batch finding different primes, or one curve finding both);
+                # split it as the CPU paths do, keeping each factor's sigma.
+                result.factors, result.sigmas = split_into_distinct_primes(
+                    result.factors, result.sigmas,
+                    lambda f: self._fully_factor_found_result(f, quiet=True))
+            return result
 
         # For CPU mode without residues, delegate to multiprocess for proper handling
         mp_config = MultiprocessConfig(
@@ -289,6 +299,16 @@ class ECMWrapper(BaseWrapper):
         from lib.ecm_math import (get_optimal_b1_for_tlevel, calculate_tlevel,
                                   calculate_curves_to_target_direct, TLEVEL_TRANSITION_CACHE)
 
+        if config.use_gpu:
+            from lib.ecm_command import gpu_stage2_supported
+            ecm_path = self.typed_config.programs.gmp_ecm.path
+            if gpu_stage2_supported(ecm_path):
+                self.logger.info("GPU mode: both stages on the GPU, one B1 step at a time")
+            else:
+                self.logger.warning(
+                    f"GMP-ECM at {ecm_path} has no GPU stage 2: each step runs GPU "
+                    "stage 1 then single-threaded CPU stage 2. Consider --two-stage.")
+
         if config.start_t_level > 0:
             self.logger.info(f"Starting progressive ECM with target t{config.target_t_level:.1f} (starting from t{config.start_t_level:.2f})")
         else:
@@ -322,8 +342,10 @@ class ECMWrapper(BaseWrapper):
         # Run ECM at each step
         try:
             for step_target in step_targets:
-                # Check for interruption at start of each step
-                if self.interrupted or self.shutdown_level >= 1:
+                # Check for interruption at start of each step (auto-work's
+                # second Ctrl+C sets graceful_shutdown_requested only)
+                if (self.interrupted or self.shutdown_level >= 1
+                        or self.graceful_shutdown_requested is True):
                     self.logger.info("T-level execution interrupted, returning partial results")
                     break
 
@@ -395,6 +417,25 @@ class ECMWrapper(BaseWrapper):
                         project=config.project,
                         no_submit=True  # T-level mode handles its own submissions
                     ))
+                elif config.use_gpu:
+                    # GPU mode: one `ecm -gpu` process runs both stages with
+                    # GMP-ECM's default B2. That is the CPU default only for
+                    # the polynomial GPU stage 2; its baby-step giant-step
+                    # fallback uses 100*B1, so the B2 that ran is parsed from
+                    # the output below. GMP-ECM rounds curves up to whole GPU
+                    # batches; t-level is computed from the curves that ran.
+                    step_result = self.run_ecm_v2(ECMConfig(
+                        composite=config.composite,
+                        b1=b1,
+                        curves=curves,
+                        parametrization=config.parametrization,
+                        threads=1,
+                        verbose=config.verbose,
+                        progress_interval=config.progress_interval,
+                        use_gpu=True,
+                        gpu_device=config.gpu_device,
+                        gpu_curves=config.gpu_curves,
+                    ))
                 elif config.threads > 1:
                     # Multiprocess mode (CPU only)
                     self.logger.info(f"Using multiprocess mode with {config.threads} workers")
@@ -419,8 +460,47 @@ class ECMWrapper(BaseWrapper):
                         progress_interval=config.progress_interval
                     ))
 
-                # Check for interruption after execution
-                if self.interrupted or self.shutdown_level >= 1:
+                step_b2: Optional[int] = None
+                if config.use_gpu:
+                    step_b2 = step_result.b2_used
+                    if (not step_result.interrupted
+                            and (step_result.exit_code == 1
+                                 or (step_result.exit_code or 0) < 0
+                                 or (step_result.curves_run == 0 and not step_result.factors))):
+                        # Failed GPU run (out of GPU memory, device error...):
+                        # nothing is credited or submitted for this step.
+                        tail = "\n".join((step_result.raw_output or "").splitlines()[-10:])
+                        self.logger.error(
+                            f"GPU step at B1={b1} failed (exit code {step_result.exit_code}, "
+                            f"{step_result.curves_run} curves completed); stopping t-level run. "
+                            f"Last output:\n{tail}")
+                        all_factors.extend(step_result.factors)
+                        all_sigmas.extend(step_result.sigmas)
+                        break
+                    if step_b2 is not None:
+                        self.logger.info(f"GPU ran B2={step_b2} at B1={b1}")
+
+                def history_entry(n: int) -> str:
+                    """curves@b1[,b2],p=param for the t-level binary.
+
+                    Two-stage uses B1 * multiplier and GPU mode the B2 GMP-ECM
+                    reported, which can give less t-level per curve than GMP's
+                    default B2, so B2 must be included to avoid overestimating
+                    progress. Example: 100@11e6,p=3 -> t33.9 (wrong!),
+                    100@11e6,11e8,p=3 -> t32.2 (correct). Otherwise B2 is
+                    omitted and the t-level binary uses GMP's default.
+                    """
+                    if config.use_two_stage:
+                        return f"{n}@{b1},{config.get_b2_for_b1(b1)},p=3"
+                    if step_b2 is not None:
+                        return f"{n}@{b1},{step_b2},p={config.parametrization}"
+                    return f"{n}@{b1},p={config.parametrization}"
+
+                # Check for interruption after execution: a step stopped by
+                # Ctrl+C ends the run (otherwise every remaining step would
+                # start a process only to have it interrupted at once)
+                if (self.interrupted or self.shutdown_level >= 1 or step_result.interrupted
+                        or self.graceful_shutdown_requested is True):
                     self.logger.info("T-level execution interrupted after ECM run, returning partial results")
                     # Still accumulate results from this batch
                     all_factors.extend(step_result.factors)
@@ -429,12 +509,7 @@ class ECMWrapper(BaseWrapper):
 
                     # Track partial curves in history for accurate t-level
                     if step_result.curves_run > 0:
-                        effective_param = 3 if config.use_two_stage else config.parametrization
-                        if config.use_two_stage:
-                            actual_b2 = config.get_b2_for_b1(b1)
-                            curve_history.append(f"{step_result.curves_run}@{b1},{actual_b2},p={effective_param}")
-                        else:
-                            curve_history.append(f"{step_result.curves_run}@{b1},p={effective_param}")
+                        curve_history.append(history_entry(step_result.curves_run))
                         try:
                             current_t_level = calculate_tlevel(curve_history, base_tlevel=config.start_t_level)
                             self.logger.info(f"T-level after partial run: {current_t_level:.2f}")
@@ -451,23 +526,17 @@ class ECMWrapper(BaseWrapper):
                 # Two-stage mode uses GPU (p=3) for stage 1, but the full curve credit is for the combined run
                 # For t-level calculation purposes, two-stage effectively uses p=3 parametrization
                 effective_param = 3 if config.use_two_stage else config.parametrization
+                if step_result.curves_run > 0:
+                    curve_history.append(history_entry(step_result.curves_run))
 
-                # CRITICAL: Calculate actual B2 used for accurate t-level tracking
-                # Two-stage mode uses B1 * multiplier, which gives less t-level per curve
-                # than GMP's default B2. Must include B2 in curve history to prevent overestimating progress.
-                # Example: 100@11e6,p=3 → t33.9 (wrong!), 100@11e6,11e8,p=3 → t32.2 (correct)
-                if config.use_two_stage:
-                    actual_b2 = config.get_b2_for_b1(b1)
-                    # Format B2 as integer (no decimals) for t-level binary compatibility
-                    curve_history.append(f"{step_result.curves_run}@{b1},{actual_b2},p={effective_param}")
-                else:
-                    # Standard mode: omit B2 to let t-level binary use GMP default
-                    curve_history.append(f"{step_result.curves_run}@{b1},p={effective_param}")
-
-                # Submit this batch's results if enabled
-                if not config.no_submit and step_result.curves_run > 0:
-                    # Calculate B2 for submission (two-stage uses B1*multiplier, else use GMP default)
-                    submission_b2 = config.get_b2_for_b1(b1) if config.use_two_stage else None
+                # Submit this batch's results if enabled. A GPU batch that
+                # found a factor in stage 1 credits 0 curves (it skipped stage
+                # 2), but its factor must still be submitted.
+                if not config.no_submit and (step_result.curves_run > 0 or step_result.factors):
+                    # B2 for submission: two-stage uses B1*multiplier, GPU mode
+                    # what GMP-ECM reported, else None (GMP default)
+                    submission_b2 = (config.get_b2_for_b1(b1) if config.use_two_stage
+                                     else step_b2)
 
                     step_results = step_result.to_dict(config.composite, 'ecm')
                     step_results['b1'] = b1
@@ -692,8 +761,11 @@ class ECMWrapper(BaseWrapper):
             exit_code = process.returncode
             raw_output = '\n'.join(output_lines)
 
-            # Check for interruption
-            interrupted = self.interrupted or exit_code == -15  # SIGTERM
+            # Check for interruption: our own Ctrl+C handling (level 2 SIGINTs
+            # the process group; without a save file GMP-ECM dies of the
+            # signal) or an external SIGTERM.
+            interrupted = (self.interrupted or exit_code in (-2, -15)
+                           or self.graceful_shutdown_requested)
 
             # Parse factors
             from lib.parsing_utils import parse_ecm_output_multiple
@@ -715,16 +787,28 @@ class ECMWrapper(BaseWrapper):
             # Determine success
             success = exit_code in [0, 8, 14] and not interrupted
 
-            # Count curves completed (extract from GPU output, fallback to requested)
-            curves_completed = curves  # Default fallback
-            if use_gpu:
-                # GPU mode: extract actual curve count from output
-                # Use findall to capture ALL batches (GPU may run multiple batches)
-                # Each batch prints "(N curves)" - sum them all for total
-                curve_matches = ECMPatterns.CURVE_COUNT.findall(raw_output)
-                if curve_matches:
-                    curves_completed = sum(int(m) for m in curve_matches)
-                    self.logger.debug(f"GPU completed {curves_completed} curves across {len(curve_matches)} batch(es) (requested {curves})")
+            # Count curves completed (CPU: requested; GPU: from output).
+            # build_ecm_command only passes -gpu for ECM: P-1/P+1 with
+            # use_gpu set still run on the CPU.
+            ran_on_gpu = use_gpu and method == 'ecm'
+            curves_completed = curves
+            b2_used: Optional[int] = None
+            if ran_on_gpu:
+                # GMP-ECM rounds curves up to whole GPU batches, so count what
+                # finished, from completion lines only: the "(N curves)" on a
+                # batch's Using line is printed before any work, and a failed
+                # or interrupted batch must not be credited.
+                stage1_only = residue_save is not None or b2 == 0
+                if stage1_only:
+                    curves_completed = count_gpu_stage1_curves(raw_output)
+                else:
+                    curves_completed = count_completed_curves(raw_output)
+                self.logger.debug(f"GPU completed {curves_completed} curves "
+                                  f"(requested {curves}, exit code {exit_code})")
+                if not stage1_only:
+                    # The GPU's B2 can differ from the one asked for (rounded
+                    # up, or the 100*B1 baby-step giant-step default).
+                    b2_used = parse_b2_used(raw_output)
 
             return {
                 'success': success,
@@ -734,7 +818,8 @@ class ECMWrapper(BaseWrapper):
                 'raw_output': raw_output,
                 'parametrization': parametrization_extracted,
                 'exit_code': exit_code,
-                'interrupted': interrupted
+                'interrupted': interrupted,
+                'b2_used': b2_used,
             }
 
         except KeyboardInterrupt:
@@ -750,7 +835,8 @@ class ECMWrapper(BaseWrapper):
                 'raw_output': 'Interrupted by user',
                 'parametrization': param if param is not None else 3,
                 'exit_code': -2,
-                'interrupted': True
+                'interrupted': True,
+                'b2_used': None,
             }
 
         except Exception as e:
@@ -763,7 +849,8 @@ class ECMWrapper(BaseWrapper):
                 'raw_output': str(e),
                 'parametrization': param if param is not None else 3,
                 'exit_code': -1,
-                'interrupted': False
+                'interrupted': False,
+                'b2_used': None,
             }
 
     def _run_stage1_primitive(

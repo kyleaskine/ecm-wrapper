@@ -11,11 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict, Tuple
 
-from .arg_parser import resolve_stage2_progress_interval
+from .arg_parser import resolve_gpu_both, resolve_stage2_progress_interval
 from .ecm_config import ECMConfig, TwoStageConfig, MultiprocessConfig, TLevelConfig, FactorResult
 from .ecm_math import calculate_target_tlevel, is_probably_prime
 from .results_builder import results_for_stage1
 from .stage1_helpers import submit_stage1_complete_workflow
+from .stage2_executor import residue_params
 from .user_output import UserOutput
 
 
@@ -57,7 +58,7 @@ def run_stage2_only_mode(wrapper, args, output: UserOutput, params: ResolvedPara
         "Residue": args.stage2_only,
         "Composite": composite_from_residue[:40] + "..." if len(composite_from_residue) > 40 else composite_from_residue,
         "B2": args.b2,
-        "Workers": params.workers
+        "Stage 2 on": "GPU" if params.use_gpu else f"CPU ({params.workers} workers)",
     })
 
     if b1 == 0:
@@ -73,6 +74,10 @@ def run_stage2_only_mode(wrapper, args, output: UserOutput, params: ResolvedPara
         verbose=args.verbose or False,
         progress_interval=resolve_stage2_progress_interval(args),
         resume_file=residue_path,
+        # Explicit --gpu only (resolve_gpu_settings never reads gpu_enabled)
+        stage2_use_gpu=params.use_gpu,
+        gpu_device=params.gpu_device,
+        gpu_curves=params.gpu_curves,
     )
 
     result = batch_result.to_factor_result()
@@ -239,6 +244,8 @@ def run_tlevel_mode(wrapper, args, output: UserOutput, params: ResolvedParams) -
             verbose=args.verbose or False,
             workers=tlevel_workers,
             use_two_stage=args.two_stage or False,
+            # GPU for both stages, sequential (never pipelined)
+            use_gpu=resolve_gpu_both(args, params.use_gpu),
             progress_interval=tlevel_progress_interval,
             max_batch_curves=params.max_batch,
             b2_multiplier=getattr(args, 'b2_multiplier', None) or 500.0,
@@ -375,7 +382,7 @@ def run_two_stage_mode(wrapper, args, output: UserOutput, params: ResolvedParams
         two_stage_b2 = None  # Use GMP-ECM default
 
     output.mode_header("Two-stage Mode", {
-        "Pipeline": "GPU stage 1 + CPU stage 2",
+        "Pipeline": f"{'GPU' if params.use_gpu else 'CPU'} stage 1 + CPU stage 2",
         "Composite": args.composite,
         "B1": params.b1,
         "B2": two_stage_b2 if two_stage_b2 is not None else "default"
@@ -387,7 +394,7 @@ def run_two_stage_mode(wrapper, args, output: UserOutput, params: ResolvedParams
         b2=two_stage_b2,
         stage1_curves=args.curves or 100,  # Use --curves for stage 1
         stage2_curves_per_residue=1000,     # Default for stage 2
-        stage1_device="GPU",  # Two-stage always uses GPU for stage 1
+        stage1_device="GPU" if params.use_gpu else "CPU",  # GPU unless --no-gpu
         stage2_device="CPU",
         stage1_parametrization=args.param or 3,
         stage2_parametrization=1,
@@ -434,6 +441,22 @@ def run_standard_mode(wrapper, args, output: UserOutput, params: ResolvedParams)
     return wrapper.run_ecm_v2(config)
 
 
+def _parametrization_run(args, params: ResolvedParams) -> int:
+    """The -param the dispatched mode ran (mirrors each run_*_mode)."""
+    if getattr(args, 'stage2_only', None):
+        # Stage 2 continues the residues' own parametrization
+        found = residue_params(Path(args.stage2_only))
+        if len(found) == 1:
+            return found.pop()
+    if args.param:
+        return args.param
+    if getattr(args, 'multiprocess', False) and not getattr(args, 'stage1_only', False):
+        return 1
+    if getattr(args, 'two_stage', False) and not getattr(args, 'stage1_only', False):
+        return 3
+    return 3 if params.use_gpu else 1
+
+
 def submit_ecm_result(wrapper, args, output: UserOutput, params: ResolvedParams,
                       result: FactorResult, composite: str) -> None:
     """Submit results to API if appropriate.
@@ -449,10 +472,16 @@ def submit_ecm_result(wrapper, args, output: UserOutput, params: ResolvedParams,
 
     # Add ECM parameters that aren't in FactorResult
     results_dict['b1'] = params.b1
-    # Stage1-only mode should always submit b2=0, not None
-    results_dict['b2'] = 0 if getattr(args, 'stage1_only', False) else args.b2
+    # Stage1-only mode should always submit b2=0, not None. Otherwise the B2
+    # that ran when the run knows it (GPU ECM, two-stage stage 2), else --b2.
+    if getattr(args, 'stage1_only', False):
+        results_dict['b2'] = 0
+    elif result.b2_used is not None:
+        results_dict['b2'] = result.b2_used
+    else:
+        results_dict['b2'] = args.b2
     results_dict['curves_requested'] = args.curves
-    results_dict['parametrization'] = args.param or (3 if getattr(args, 'gpu', False) else 1)
+    results_dict['parametrization'] = _parametrization_run(args, params)
 
     # Add project if specified
     if args.project:

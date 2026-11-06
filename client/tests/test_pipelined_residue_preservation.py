@@ -43,14 +43,26 @@ class LogWatcher(logging.Handler):
     main thread instead, or a failed handshake turns into a silent 10s stall.
     """
 
-    def __init__(self, needle: str):
+    def __init__(self, *needles: str):
         super().__init__()
-        self.needle = needle
+        self.needles = needles
         self.seen = threading.Event()
 
     def emit(self, record: logging.LogRecord) -> None:
-        if self.needle in record.getMessage():
+        message = record.getMessage()
+        if any(needle in message for needle in self.needles):
             self.seen.set()
+
+
+# The CPU thread stands down on an interrupt through one of two branches,
+# depending on where it is when the flag goes up: still at the top of its loop
+# ("User interrupt") or already waiting on the queue ("Shutdown detected").
+# Watching only the second made these tests fail whenever the GPU thread's
+# fake stage 1 set the flag before the CPU thread reached its wait loop.
+CPU_STOOD_DOWN = (
+    "[CPU Thread] User interrupt, draining queue",
+    "[CPU Thread] Shutdown detected while waiting",
+)
 
 
 def make_wrapper(residue_dir: Path, logger=None) -> SimpleNamespace:
@@ -108,7 +120,7 @@ class TestInterruptBeforeStage2:
         # before stage 1 returns - that is the window the bug lived in.
         logger = logging.getLogger("test_interrupt_before_stage2")
         logger.setLevel(logging.INFO)
-        watcher = LogWatcher("[CPU Thread] Shutdown detected while waiting")
+        watcher = LogWatcher(*CPU_STOOD_DOWN)
         logger.addHandler(watcher)
 
         wrapper = make_wrapper(tmp_path, logger=logger)
@@ -143,7 +155,7 @@ class TestInterruptBeforeStage2:
     def test_residue_lives_in_residue_dir_not_tmp(self, tmp_path):
         logger = logging.getLogger("test_residue_dir")
         logger.setLevel(logging.INFO)
-        watcher = LogWatcher("[CPU Thread] Shutdown detected while waiting")
+        watcher = LogWatcher(*CPU_STOOD_DOWN)
         logger.addHandler(watcher)
 
         wrapper = make_wrapper(tmp_path, logger=logger)

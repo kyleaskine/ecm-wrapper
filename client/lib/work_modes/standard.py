@@ -10,7 +10,7 @@ from ..ecm_config import (
 )
 from ..work_helpers import print_work_header, request_ecm_work
 from ..arg_parser import (
-    resolve_gpu_settings, resolve_worker_count, get_max_batch_default,
+    resolve_gpu_both, resolve_gpu_settings, resolve_worker_count, get_max_batch_default,
     resolve_pin_threads, resolve_stage2_progress_interval,
 )
 from ..ecm_arg_helpers import parse_sigma_arg, resolve_param
@@ -120,8 +120,13 @@ class StandardAutoWorkMode(WorkMode):
         # Resolve max_batch from args or config
         max_batch = self.args.max_batch or get_max_batch_default(self.wrapper.typed_config)
 
-        # Resolve GPU settings for two-stage mode
-        _, gpu_device, gpu_curves = resolve_gpu_settings(self.args, self.wrapper.typed_config)
+        # GPU settings: two-stage uses device/curves for its GPU stage 1; an
+        # explicit --gpu without --two-stage/--multiprocess runs both stages
+        # on the GPU, one sequential step at a time.
+        use_gpu, gpu_device, gpu_curves = resolve_gpu_settings(self.args, self.wrapper.typed_config)
+        gpu_both = resolve_gpu_both(self.args, use_gpu)
+        if gpu_both:
+            print("Execution: GPU (both stages, sequential)")
 
         tlevel_progress_interval = (
             resolve_stage2_progress_interval(self.args)
@@ -137,6 +142,7 @@ class StandardAutoWorkMode(WorkMode):
             progress_interval=tlevel_progress_interval,
             max_batch_curves=max_batch,
             use_two_stage=self.args.two_stage,
+            use_gpu=gpu_both,
             b2_multiplier=self.args.b2_multiplier or 500.0,
             b2_dictionary=getattr(self, '_b2_dictionary', None),
             pin_threads=resolve_pin_threads(self.args),
@@ -218,7 +224,9 @@ class StandardAutoWorkMode(WorkMode):
             result = self.wrapper.run_multiprocess_v2(mp_config)
 
         else:
-            print(f"Mode: standard (B1={b1}, B2={b2}, curves={curves})")
+            gpu_both = resolve_gpu_both(self.args, use_gpu)
+            label = "GPU (both stages)" if gpu_both else "standard"
+            print(f"Mode: {label} (B1={b1}, B2={b2}, curves={curves})")
 
             # sigma can be str or int from parse_sigma_arg, ECMConfig accepts both
             ecm_config = ECMConfig(
@@ -232,6 +240,9 @@ class StandardAutoWorkMode(WorkMode):
                 verbose=self.args.verbose,
                 progress_interval=self.args.progress_interval or 0,
                 maxmem=self.args.maxmem,
+                use_gpu=gpu_both,
+                gpu_device=gpu_device,
+                gpu_curves=gpu_curves,
             )
             result = self.wrapper.run_ecm_v2(ecm_config)
 
@@ -239,10 +250,13 @@ class StandardAutoWorkMode(WorkMode):
 
         # Add ECM parameters that aren't in FactorResult
         self._results_dict['b1'] = self.args.b1
-        self._results_dict['b2'] = b2
+        # The B2 that ran when the run knows it (GPU ECM: rounded up, or the
+        # 100*B1 baby-step giant-step default; two-stage stage 2), else the
+        # one asked for
+        self._results_dict['b2'] = result.b2_used if result.b2_used is not None else b2
         self._results_dict['curves_requested'] = self.args.curves
-        use_gpu, _, _ = resolve_gpu_settings(self.args, self.wrapper.typed_config)
-        self._results_dict['parametrization'] = self.args.param or (3 if use_gpu else 1)
+        # Every branch above runs `param if param else 3` (so --param 0 runs 3)
+        self._results_dict['parametrization'] = param if param else 3
 
         return result
 

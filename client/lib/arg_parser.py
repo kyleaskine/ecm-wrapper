@@ -121,10 +121,17 @@ def _add_core_ecm_params(parser: argparse.ArgumentParser) -> None:
 
 def _add_gpu_options(parser: argparse.ArgumentParser) -> None:
     """Add GPU-related options."""
-    parser.add_argument('--gpu', action='store_true', help='Use GPU acceleration')
+    parser.add_argument('--gpu', action='store_true',
+                        help='Use the GPU. Plain/t-level ECM: both stages on the GPU '
+                             '(GPU stage 2 builds of GMP-ECM). --stage2-only: GPU stage 2. '
+                             'Implied for stage 1 of --stage1-only and B1/B2 --two-stage '
+                             '(--no-gpu: CPU stage 1; --two-stage t-level is pipelined and '
+                             'always GPU). The config gpu_enabled never turns it on.')
     parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration')
     parser.add_argument('--gpu-device', type=int, help='GPU device number')
-    parser.add_argument('--gpu-curves', type=int, help='Number of curves per GPU batch')
+    parser.add_argument('--gpu-curves', type=int,
+                        help='Curves per GPU batch (default: whatever fills the GPU for '
+                             'the input size). With --stage2-only --gpu: max residues per batch')
 
 
 def _add_sigma_and_param(parser: argparse.ArgumentParser) -> None:
@@ -521,27 +528,56 @@ def get_method_defaults(config: 'AppConfig', method: str) -> tuple[int, Optional
     return b1_default, b2_default
 
 
+def resolve_use_gpu(args: ArgsLike) -> bool:
+    """
+    Whether to use the GPU: --no-gpu, else --gpu, else implied by the mode.
+
+    ECM stage 1 in --stage1-only and --two-stage is GPU work, so the GPU is
+    implied there. Everything else (plain/t-level ECM on both stages,
+    --stage2-only) needs an explicit --gpu. The config's gpu_enabled never
+    turns the GPU on: it only records that the machine has one (interactive
+    menu, setup.py), and a CPU worker on that machine must not take the card
+    from a GPU producer.
+    """
+    if args.no_gpu:
+        return False
+    if args.gpu:
+        return True
+    method = getattr(args, 'method', None) or 'ecm'
+    return method == 'ecm' and bool(
+        getattr(args, 'stage1_only', False) or getattr(args, 'two_stage', False))
+
+
 def resolve_gpu_settings(args: ArgsLike, config: 'AppConfig') -> tuple[bool, Optional[int], Optional[int]]:
     """
     Resolve GPU settings from arguments and typed config.
+
+    use_gpu: see resolve_use_gpu. gpu_device / gpu_curves: command line
+    overrides config defaults.
 
     Returns:
         Tuple of (use_gpu, gpu_device, gpu_curves)
     """
     gmp = config.programs.gmp_ecm
-
-    # GPU settings: command line overrides config defaults
-    if args.no_gpu:
-        use_gpu = False
-    elif args.gpu:
-        use_gpu = True
-    else:
-        use_gpu = gmp.gpu_enabled
-
     gpu_device = args.gpu_device if args.gpu_device is not None else gmp.gpu_device
     gpu_curves = args.gpu_curves if args.gpu_curves is not None else gmp.gpu_curves
+    return resolve_use_gpu(args), gpu_device, gpu_curves
 
-    return use_gpu, gpu_device, gpu_curves
+
+def resolve_gpu_both(args: ArgsLike, use_gpu: bool) -> bool:
+    """
+    Whether ECM runs both stages on the GPU, in one sequential `ecm -gpu`
+    process per step (never pipelined).
+
+    Only for plain/t-level ECM: --two-stage, --multiprocess, --stage1-only and
+    --stage2-only each have their own GPU meaning.
+    """
+    method = getattr(args, 'method', None) or 'ecm'
+    return (use_gpu and method == 'ecm'
+            and not getattr(args, 'two_stage', False)
+            and not getattr(args, 'multiprocess', False)
+            and not getattr(args, 'stage1_only', False)
+            and not getattr(args, 'stage2_only', False))
 
 
 def resolve_stage2_progress_interval(args: ArgsLike) -> int:

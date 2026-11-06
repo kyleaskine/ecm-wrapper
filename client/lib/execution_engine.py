@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List, Callable, Tuple, TYPE_CHECKING
 
 from .ecm_config import ExecutionBatch, BatchResult, FactorResult, ECMPrimitiveResult
+from .ecm_math import split_into_distinct_primes
 from .ecm_worker_process import run_worker_ecm_process
 
 if TYPE_CHECKING:
@@ -215,14 +216,8 @@ class CompositeExecutionEngine:
         # Only count each distinct prime once (multiplicities are handled by the
         # caller via division, not by counting occurrences in this list).
         batch_result = BatchResult()
-        seen_primes: set = set()
-        for factor, sigma in zip(all_factors, all_sigmas):
-            prime_factors = self.wrapper._fully_factor_composite(factor)
-            for prime in prime_factors:
-                if prime not in seen_primes:
-                    seen_primes.add(prime)
-                    batch_result.factors.append(prime)
-                    batch_result.sigmas.append(sigma)
+        batch_result.factors, batch_result.sigmas = split_into_distinct_primes(
+            all_factors, all_sigmas, self.wrapper._fully_factor_composite)
 
         batch_result.curves_run = total_curves_completed
         batch_result.execution_time = time.time() - start_time
@@ -309,6 +304,7 @@ class CompositeExecutionEngine:
         gpu_curves: Optional[int] = None,
         resume_file: Optional[Path] = None,
         save_residues: Optional[str] = None,
+        stage2_use_gpu: bool = False,
     ) -> BatchResult:
         """
         Execute two-stage ECM pipeline: GPU stage 1 + CPU stage 2.
@@ -330,6 +326,9 @@ class CompositeExecutionEngine:
             gpu_curves: Curves per GPU batch
             resume_file: Path to existing residue file (skip stage 1)
             save_residues: Path to save residue file
+            stage2_use_gpu: Run stage 2 as one GPU process instead of CPU
+                workers (falls back to CPU if the binary lacks GPU stage 2).
+                Sequential: stage 2 starts only after stage 1 has finished.
 
         Returns:
             BatchResult with discovered factors
@@ -385,15 +384,16 @@ class CompositeExecutionEngine:
                 f"Starting stage 2: B1={actual_b1:,}, B2={actual_b2:,}, workers={stage2_workers}"
             )
 
-            from .stage2_executor import Stage2Executor
+            from .stage2_executor import create_stage2_executor
 
-            executor = Stage2Executor(
+            executor = create_stage2_executor(
                 self.wrapper, residue_file, actual_b1, actual_b2, None,
-                stage2_workers, verbose
+                stage2_workers, verbose,
+                use_gpu=stage2_use_gpu, gpu_device=gpu_device, gpu_curves=gpu_curves,
             )
             self.wrapper._active_stage2_executor = executor
             try:
-                _factor, all_factors, curves_completed, _stage2_time, sigma = (
+                _factor, all_factors, curves_completed, _stage2_time, _sigma = (
                     executor.execute(
                         early_termination=True,
                         progress_interval=progress_interval,
@@ -402,12 +402,18 @@ class CompositeExecutionEngine:
             finally:
                 self.wrapper._active_stage2_executor = None
 
-            # Build result
+            # Build result (each factor with the sigma of the curve that
+            # found it; a GPU batch can find several)
             result = BatchResult()
-            if all_factors:
-                for f in all_factors:
-                    result.factors.append(f)
-                    result.sigmas.append(sigma)
+            for f, s in executor.factor_sigmas:
+                result.factors.append(f)
+                result.sigmas.append(s)
+            # The B2 that ran: what the GPU reported, else the one stage 2
+            # was given (which, with no B2, is 100*B1 - not GMP-ECM's default)
+            if executor.b2_used is not None:
+                result.b2_used = executor.b2_used
+            elif actual_b2 not in (None, -1):
+                result.b2_used = actual_b2
             result.curves_run = curves_completed
             result.execution_time = time.time() - start_time
             result.success = len(all_factors) > 0

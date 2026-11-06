@@ -589,7 +589,10 @@ def main():
         print("  python3 ecm_client.py")
         print()
         print("  # With specific parameters")
-        print("  python3 ecm_client.py --b1 11000000 --stage1-only")
+        if gpu_enabled:
+            print("  python3 ecm_client.py --b1 11000000 --stage1-only   # GPU stage 1")
+        else:
+            print("  python3 ecm_client.py --b1 11000000 --multiprocess")
         print()
         print("  # Test without submitting (ecm_wrapper.py)")
         print("  python3 ecm_wrapper.py --composite \"123456789\" --curves 10 --b1 11000")

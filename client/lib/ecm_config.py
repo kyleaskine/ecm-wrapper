@@ -34,8 +34,7 @@ class ECMConfigValidation:
             raise ValueError(f"Parametrization must be 0-3, got {param}")
 
 
-class ECMPrimitiveResult(TypedDict):
-    """Return type of _execute_ecm_primitive() and its helper wrappers."""
+class _ECMPrimitiveResultRequired(TypedDict):
     success: bool
     factors: List[str]
     sigmas: List[Optional[str]]
@@ -44,6 +43,13 @@ class ECMPrimitiveResult(TypedDict):
     parametrization: int
     exit_code: int
     interrupted: bool
+
+
+class ECMPrimitiveResult(_ECMPrimitiveResultRequired, total=False):
+    """Return type of _execute_ecm_primitive() and its helper wrappers."""
+    # B2 GMP-ECM actually ran (GPU ECM only: it can differ from the B2 asked
+    # for); None or absent = the B2 asked for (or GMP-ECM's default) ran.
+    b2_used: Optional[int]
 
 
 @dataclass
@@ -181,6 +187,10 @@ class TLevelConfig(ECMConfigValidation):
     b2_dictionary: Optional[Dict[int, int]] = None  # B1 → B2 lookup (overrides b2_multiplier)
 
     # GPU support
+    # use_gpu without use_two_stage: each B1 step is one `ecm -gpu` process
+    # running both stages on the GPU (GPU stage 2 builds; older builds do GPU
+    # stage 1 + single-threaded CPU stage 2 in-process). Never pipelined.
+    use_gpu: bool = False
     gpu_device: Optional[int] = None
     gpu_curves: Optional[int] = None
 
@@ -211,7 +221,7 @@ class TLevelConfig(ECMConfigValidation):
         # Two-stage mode runs stage 1 on GPU (twisted Edwards), so the
         # effective parametrization is 3. If the caller didn't explicitly
         # override the default (1 = Montgomery/CPU), bump it.
-        if self.use_two_stage and self.parametrization == 1:
+        if (self.use_two_stage or self.use_gpu) and self.parametrization == 1:
             self.parametrization = 3
 
     def get_b2_for_b1(self, b1: int) -> int:
@@ -237,6 +247,11 @@ class FactorResult:
     parametrization: Optional[int] = None
     exit_code: Optional[int] = None
     interrupted: bool = False
+    # B2 that actually ran, where the runner knows it and it can differ from
+    # the one asked for: GPU ECM (rounded up, or the 100*B1 baby-step
+    # giant-step fallback) and two-stage stage 2. None = the requested B2 (or
+    # GMP-ECM's default) is what ran. Submit this when it is set.
+    b2_used: Optional[int] = None
 
     # T-level tracking (for progressive ECM)
     t_level_achieved: float = 0.0  # T-level reached during execution
@@ -354,7 +369,8 @@ class FactorResult:
             raw_output=prim_result.get('raw_output'),
             parametrization=prim_result.get('parametrization'),
             exit_code=prim_result.get('exit_code'),
-            interrupted=prim_result.get('interrupted', False)
+            interrupted=prim_result.get('interrupted', False),
+            b2_used=prim_result.get('b2_used'),
         )
 
     def to_dict(self, composite: Optional[str] = None, method: str = 'ecm') -> Dict[str, Any]:
@@ -426,6 +442,7 @@ class BatchResult:
     raw_output: Optional[str] = None
     interrupted: bool = False
     submission_failed: bool = False  # A per-batch submission failed and was queued
+    b2_used: Optional[int] = None  # B2 that actually ran, if known (see FactorResult)
     # (residue path, planned B2) for stage 1 batches that finished but never
     # ran stage 2 - kept on disk so they can be finished with --stage2-only.
     preserved_residues: List[Tuple[Path, int]] = field(default_factory=list)
@@ -441,5 +458,6 @@ class BatchResult:
         result.raw_output = self.raw_output
         result.interrupted = self.interrupted
         result.submission_failed = self.submission_failed
+        result.b2_used = self.b2_used
         result.preserved_residues = list(self.preserved_residues)
         return result

@@ -15,9 +15,10 @@ Test composite (generated via openssl prime -generate):
   P100 = 6809176950498902954726360594124819403572482951246044828034216367423425089828925965113417567338162803
   C130 = P16 * P15 * P100
 
-At B1=11M, ECM will almost always find both small primes simultaneously
-(their group orders are B1-smooth), returning C30 = P16 * P15. The test
-then verifies _fully_factor_composite splits C30 into P16 and P15.
+At B1=11M, ECM on the curve with sigma COMPOSITE_SIGMA finds both small
+primes simultaneously (both group orders are B1-smooth), returning
+C30 = P16 * P15. The test then verifies _fully_factor_composite splits C30
+into P16 and P15.
 """
 import shutil
 import sys
@@ -40,6 +41,9 @@ P16 = '1005883299031357'
 P15 = '848647905930343'
 P100 = '6809176950498902954726360594124819403572482951246044828034216367423425089828925965113417567338162803'
 C30 = str(int(P16) * int(P15))  # 853640755333266133427814765451
+# A Montgomery (param 1) curve on which ECM at B1=11M finds P16 and P15 in the
+# same stage 1, so the factor it reports is the composite C30.
+COMPOSITE_SIGMA = '1:857891120'
 COMPOSITE = str(int(P16) * int(P15) * int(P100))
 
 # Path to client.yaml
@@ -72,50 +76,30 @@ class TestCompositeFactorSplitting:
         """
         End-to-end: run ECM on C130 = P16 * P15 * P100.
 
-        At B1=11M, ECM almost always finds both small primes simultaneously
-        (C30), not individually. If a run happens to find only one prime,
-        retry until we get a composite factor to test splitting.
+        Uses a fixed sigma whose curve finds both small primes at once in
+        stage 1, so ECM returns the composite C30. With random sigmas only
+        about 1 curve in 5 does (measured: 10 composite / 31 prime / 7 none
+        of 48 at B1=11M), so a 10-retry loop missed ~10% of the time.
         """
-        max_retries = 10
-        composite_factor_found = False
-
-        for _ in range(max_retries):
-            prim_result = wrapper._execute_ecm_primitive(
-                composite=COMPOSITE,
-                b1=11_000_000,
-                curves=1,
-                verbose=False,
-            )
-
-            factors = prim_result.get('factors', [])
-            if not factors:
-                continue
-
-            factor = factors[0]
-            if not is_probably_prime(int(factor)):
-                # Got a composite factor - this is the case we want to test
-                composite_factor_found = True
-
-                # Now verify _fully_factor_composite splits it
-                primes = wrapper._fully_factor_composite(factor)
-
-                # All results should be prime
-                for p in primes:
-                    assert is_probably_prime(int(p)), f"Factor {p} is not prime"
-
-                # The primes should divide the original composite factor
-                product = 1
-                for p in primes:
-                    product *= int(p)
-                assert product == int(factor), (
-                    f"Prime product {product} != composite factor {factor}"
-                )
-                break
-
-        assert composite_factor_found, (
-            f"ECM never returned a composite factor in {max_retries} attempts "
-            f"(always found individual primes). This is unlikely but not a bug."
+        prim_result = wrapper._execute_ecm_primitive(
+            composite=COMPOSITE,
+            b1=11_000_000,
+            curves=1,
+            sigma=COMPOSITE_SIGMA,
+            verbose=False,
         )
+
+        factors = prim_result.get('factors', [])
+        assert factors, f"sigma {COMPOSITE_SIGMA} found no factor:\n{prim_result.get('raw_output')}"
+        factor = factors[0]
+        assert factor == C30, f"expected composite C30, got {factor}"
+        assert not is_probably_prime(int(factor))
+
+        # Now verify _fully_factor_composite splits it
+        primes = wrapper._fully_factor_composite(factor)
+        assert set(primes) == {P16, P15}
+        for p in primes:
+            assert is_probably_prime(int(p)), f"Factor {p} is not prime"
 
     def test_fully_factor_composite_handles_prime(self, wrapper):
         """Test that _fully_factor_composite returns a prime factor as-is."""

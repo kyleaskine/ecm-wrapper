@@ -44,6 +44,21 @@ class ECMPatterns:
     # Curve completion tracking - "Step 2 took xxxms" indicates curve completion
     CURVE_COMPLETED = re.compile(r'Step 2 took (\d+)ms')
 
+    # GPU batch lines (GMP-ECM cudawrapper.c), one per batch of N curves:
+    # "Computing 17664 Step 1 took 9728ms of CPU time / 67662ms of GPU time"
+    # "Computing 17664 Step 2 took 9728ms of CPU time / 67662ms of GPU time"
+    # "Computing 17664 Step 2 on CPU took 912345ms"  (GPU batch, CPU stage 2)
+    GPU_STAGE1_BATCH = re.compile(r'^Computing (\d+) Step 1 took', re.MULTILINE)
+    GPU_STAGE2_BATCH = re.compile(r'^Computing (\d+) Step 2 (?:on CPU )?took', re.MULTILINE)
+    # Per-curve CPU stage 2 inside a GPU batch: "Curve 12 Step 2 took 664ms"
+    GPU_BATCH_CPU_STAGE2_CURVE = re.compile(r'^Curve \d+ Step 2 took \d+ms', re.MULTILINE)
+    # CPU stage 2 of a plain CPU curve: "Step 2 took 664ms"
+    CPU_STAGE2_CURVE = re.compile(r'^Step 2 took \d+ms', re.MULTILINE)
+    # Bounds actually used (GPU builds print the B2 after any rounding or
+    # fallback): "Using B1=3000000-3000000, B2=2141548510, sigma=..." or
+    # "Using B1=3000000, B2=1000000-2141548510, ..."
+    USING_B2 = re.compile(r'^Using B1=[\d-]+, B2=(?:\d+-)?(\d+)', re.MULTILINE)
+
     # Alternative curve completion patterns
     CURVE_COMPLETED_ALT = re.compile(r'ECM: Step 2 took (\d+)ms')
 
@@ -51,9 +66,6 @@ class ECMPatterns:
     # Parametrization 0-3: 0 for large numbers (Brent-Suyama), 1 for Montgomery, 2/3 for twisted Edwards
     SIGMA_COLON_FORMAT = re.compile(r'sigma=([0-3]:\d+)')
     SIGMA_DASH_FORMAT = re.compile(r'-sigma ([0-3]:\d+|\d+)')
-
-    # Curve count extraction from GPU output
-    CURVE_COUNT = re.compile(r'\((\d+) curves\)')
 
     # Resume file parsing patterns
     # N can be decimal or hex (0x prefix, used by P95/mprime parametrization 0)
@@ -253,6 +265,57 @@ def _extract_factors_with_patterns(output: str) -> List[Tuple[str, Optional[str]
             logger.debug(f"Added GPU/STANDARD factor: {candidate_factor}")
 
     return factors
+
+
+def count_completed_curves(output: str) -> int:
+    """
+    Count ECM curves that ran both stages in GMP-ECM output (GPU or CPU,
+    either stage layout), from completion lines only - never from a requested
+    count.
+
+    A GPU batch of N curves counts N when its stage 2 summary line appears
+    ("Computing N Step 2 [on CPU ]took"). A batch that ends without one counts
+    its finished "Curve i Step 2 took" lines (a CPU stage 2 stopped part way),
+    so 0 when it was killed in stage 1, failed, or found a factor in stage 1:
+    GMP-ECM then skips stage 2 for the whole batch, so none of its curves
+    reached B2. Plain CPU curves count 1 per "Step 2 took" line.
+    """
+    total = 0
+    partial = 0           # "Curve i Step 2 took" lines in this batch
+    s2_done = False       # this batch's stage 2 summary seen
+
+    for line in output.splitlines():
+        if line.startswith('Using B1='):
+            if not s2_done:
+                total += partial
+            partial, s2_done = 0, False
+        elif (m := ECMPatterns.GPU_STAGE2_BATCH.match(line)):
+            total += int(m.group(1))
+            s2_done = True
+        elif ECMPatterns.GPU_BATCH_CPU_STAGE2_CURVE.match(line):
+            partial += 1
+        elif ECMPatterns.CPU_STAGE2_CURVE.match(line):
+            total += 1
+    return total + (0 if s2_done else partial)
+
+
+def count_gpu_stage1_curves(output: str) -> int:
+    """Curves whose GPU stage 1 finished ("Computing N Step 1 took", per batch)."""
+    return sum(int(n) for n in ECMPatterns.GPU_STAGE1_BATCH.findall(output))
+
+
+def parse_b2_used(output: str) -> Optional[int]:
+    """
+    B2 GMP-ECM reports on its "Using B1=..., B2=..." lines, or None.
+
+    GPU builds print the B2 they actually run, which differs from the one asked
+    for: an explicit B2 is rounded up for the polynomial stage 2, and the
+    baby-step giant-step fallback defaults to 100*B1, far below the CPU
+    default. With several batches the smallest is returned, so t-level is
+    never over-credited.
+    """
+    values = [int(b2) for b2 in ECMPatterns.USING_B2.findall(output)]
+    return min(values) if values else None
 
 
 def parse_ecm_output_multiple(output: str) -> List[Tuple[str, Optional[str]]]:

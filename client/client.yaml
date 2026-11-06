@@ -37,7 +37,7 @@ programs:
     #default_b2: 500000000000  #Add back if you want this, otherwise gmp-ecm uses a default formula
     default_curves: 1
     early_termination: true
-    gpu_enabled: false
+    gpu_enabled: false  # Machine has a GPU (menu/setup only). Never turns the GPU on: use --gpu; --stage1-only/--two-stage imply it
     gpu_device: 0
     gpu_curves: null
     workers: 8  # Parallel workers (multiprocess ECM, stage2 threads)

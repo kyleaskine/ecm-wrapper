@@ -7,8 +7,10 @@ This entry point handles all server-coordinated ECM modes:
 - GPU producer (--stage1-only): Upload residues to server
 - Target a specific composite (--composite flag)
 - Stage 2 only (--stage2-only): Download and process residues from server
+  (add --gpu for one GPU process per residue instead of CPU workers)
 - P-1/P+1 sweep (--pm1/--pp1/--p1)
 - Standard auto-work (--standard): Legacy t-level or B1/B2 mode
+  (with --gpu: both stages on the GPU, one sequential step at a time)
 
 The client queries the server for t-level status and runs optimal curves.
 
@@ -85,7 +87,7 @@ def _prompt_work_mode(gpu_enabled: bool) -> str:
         gpu_enabled: Whether GPU is configured in setup
 
     Returns:
-        'gpu', 'cpu', or 'adaptive'
+        'gpu', 'gpu-full', or 'adaptive'
     """
     print()
     print("=" * 60)
@@ -96,6 +98,7 @@ def _prompt_work_mode(gpu_enabled: bool) -> str:
     if gpu_enabled:
         print("  [1] GPU Producer  - Run stage 1 on GPU, upload residues")
         print("  [2] CPU Worker    - Adaptive: stage 2 priority, then ECM")
+        print("  [3] GPU Full      - Both stages on GPU, t-level work (no residues)")
         print()
         try:
             choice = input("Choice [2]: ").strip()
@@ -105,6 +108,8 @@ def _prompt_work_mode(gpu_enabled: bool) -> str:
 
         if choice == '1':
             return 'gpu'
+        elif choice == '3':
+            return 'gpu-full'
         else:
             return 'adaptive'
     else:
@@ -139,6 +144,9 @@ def main():
 
         if choice == 'gpu':
             work_args.stage1_only = True
+        elif choice == 'gpu-full':
+            work_args.standard = True
+            work_args.gpu = True
         else:
             work_args.adaptive = True
 

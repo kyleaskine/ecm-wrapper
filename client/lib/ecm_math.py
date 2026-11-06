@@ -12,7 +12,7 @@ import logging
 import random
 import re
 import sys
-from typing import List, Tuple, Optional
+from typing import Callable, List, Tuple, Optional
 from .subprocess_utils import execute_subprocess_simple
 
 TLEVEL_BINARY_DEFAULT = 'bin/t-level.exe' if sys.platform == 'win32' else 'bin/t-level'
@@ -88,6 +88,29 @@ def trial_division(n: int, limit: int = 10**7) -> Tuple[List[int], int]:
         i += 2
 
     return factors, cofactor
+
+
+def split_into_distinct_primes(
+    factors: List[str], sigmas: List[Optional[str]],
+    fully_factor: Callable[[str], List[str]],
+) -> Tuple[List[str], List[Optional[str]]]:
+    """
+    Fully factor each found factor and keep each distinct prime once, with the
+    sigma of the curve that found it.
+
+    A run can report a composite factor (two curves of a batch finding
+    different primes, or one curve finding both), and the same prime can turn
+    up in several expansions: if one curve finds p and another p*q, p is kept
+    once (multiplicities are handled by the caller dividing them out).
+    """
+    primes: List[str] = []
+    prime_sigmas: List[Optional[str]] = []
+    for factor, sigma in zip(factors, sigmas):
+        for prime in fully_factor(factor):
+            if prime not in primes:
+                primes.append(prime)
+                prime_sigmas.append(sigma)
+    return primes, prime_sigmas
 
 
 def is_probably_prime(n: int, trials: int = 10) -> bool:

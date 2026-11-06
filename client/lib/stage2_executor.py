@@ -13,18 +13,269 @@ Handles:
 - Progress tracking and reporting
 - Process cleanup
 """
+import re
 import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Optional, Tuple, List, Callable, TYPE_CHECKING
+from typing import Optional, Set, Tuple, List, Callable, TYPE_CHECKING
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .ecm_command import build_ecm_command
-from .parsing_utils import parse_ecm_output
+from .ecm_command import build_ecm_command, gpu_stage2_supported
+from .parsing_utils import (
+    ECMPatterns, count_completed_curves, parse_b2_used, parse_ecm_output,
+    parse_ecm_output_multiple,
+)
 
 if TYPE_CHECKING:
     from ecm_wrapper import ECMWrapper
+
+
+def create_stage2_executor(
+    wrapper: 'ECMWrapper', residue_file: Path, b1: int, b2: Optional[int],
+    k: Optional[int], workers: int, verbose: bool = False,
+    pin_threads: bool = False, *, use_gpu: bool = False,
+    gpu_device: Optional[int] = None, gpu_curves: Optional[int] = None,
+) -> 'Stage2Executor | GPUStage2Executor':
+    """
+    Pick the stage 2 executor: one GPU process, or a pool of CPU workers.
+
+    use_gpu falls back to CPU workers (with a warning) when the configured
+    GMP-ECM binary predates GPU stage 2 - such builds reject -gpu -resume.
+    A GPU executor also falls back to these CPU workers if its run fails.
+    """
+    if use_gpu:
+        ecm_path = wrapper.typed_config.programs.gmp_ecm.path
+        if gpu_stage2_supported(ecm_path):
+            return GPUStage2Executor(wrapper, residue_file, b1, b2, verbose,
+                                     gpu_device=gpu_device, gpu_curves=gpu_curves,
+                                     fallback_k=k, fallback_workers=workers,
+                                     pin_threads=pin_threads)
+        wrapper.logger.warning(
+            f"GMP-ECM at {ecm_path} has no GPU stage 2 (no -cpustage2 in its "
+            f"usage text); running stage 2 on {workers} CPU workers instead")
+    return Stage2Executor(wrapper, residue_file, b1, b2, k, workers, verbose,
+                          pin_threads=pin_threads)
+
+
+Stage2Outcome = Tuple[Optional[str], List[str], int, float, Optional[str]]
+
+
+def residue_params(residue_file: Path) -> Set[int]:
+    """The -param values (PARAM=) of the curves in a residue file."""
+    try:
+        with open(residue_file, 'r', encoding='utf-8') as f:
+            return {int(p) for p in re.findall(r'\bPARAM=(\d+)', f.read())}
+    except OSError:
+        return set()
+
+
+def save_stage2_log(name: str, output: str, logger) -> Optional[Path]:
+    """Save stage 2 ECM output to <tmp>/ecm_stage2_logs/<name>_<time>.log."""
+    try:
+        import tempfile
+        output_dir = Path(tempfile.gettempdir()) / "ecm_stage2_logs"
+        output_dir.mkdir(exist_ok=True)
+        output_file = output_dir / f"{name}_{int(time.time())}.log"
+        with open(output_file, 'w') as f:
+            f.write(output)
+        return output_file
+    except Exception as e:
+        logger.warning(f"Failed to save {name} stage 2 output: {e}")
+        return None
+
+
+class GPUStage2Executor:
+    """
+    Stage 2 for a whole residue file in a single GPU process.
+
+    Runs `ecm -gpu -resume FILE B1-B1 B2`: GMP-ECM gathers consecutive
+    residues (same N, same B1, -param 3) into GPU batches itself, so the file
+    is never split. Same execute() contract and raw_output attribute as
+    Stage2Executor, so callers can use either.
+
+    Differences from the CPU executor:
+    - No -k: k is tuned for CPU memory; the GPU picks its own stage 2 shape.
+    - The B2 GMP-ECM actually ran is parsed into b2_used: an explicit B2 is
+      rounded up (e.g. 1.5e9 -> 2.14e9), and where the polynomial GPU stage 2
+      cannot run the default B2 is 100*B1. Callers should report b2_used.
+    - Residues GMP-ECM cannot batch (other -param, other N/B1) run one at a
+      time on the CPU inside the same process; they still count.
+    - Ctrl+C level 2 ("stop after current curve") stops after the current
+      GPU batch: a batch is all-or-nothing, so killing it mid-way discards
+      every curve in it. With no --gpu-curves cap, a file is one batch.
+    - If the GPU run fails (exit 1: out of GPU memory, device error, ...) the
+      residue file is rerun on fallback_workers CPU workers, when given;
+      otherwise `failed` is set and the caller must not report success.
+    """
+
+    def __init__(self, wrapper: 'ECMWrapper', residue_file: Path, b1: int,
+                 b2: Optional[int], verbose: bool = False, *,
+                 gpu_device: Optional[int] = None,
+                 gpu_curves: Optional[int] = None,
+                 fallback_k: Optional[int] = None,
+                 fallback_workers: int = 0,
+                 pin_threads: bool = False) -> None:
+        self.wrapper = wrapper
+        self.residue_file = residue_file
+        self.b1 = b1
+        self.b2 = b2
+        self.verbose = verbose
+        self.gpu_device = gpu_device
+        self.gpu_curves = gpu_curves
+        self.fallback_k = fallback_k
+        self.fallback_workers = fallback_workers
+        self.pin_threads = pin_threads
+        self.logger = wrapper.logger
+        self.ecm_path = wrapper.typed_config.programs.gmp_ecm.path
+        self.stop_event = wrapper.stop_event
+        self.raw_output: str = ""
+        self.b2_used: Optional[int] = None
+        self.failed = False
+        self.error_message: Optional[str] = None
+        self.factor_sigmas: List[Tuple[str, Optional[str]]] = []
+
+    def build_command(self, b1: int, early_termination: bool) -> List[str]:
+        return build_ecm_command(
+            self.ecm_path, b1, b2=self.b2,
+            use_gpu=True, gpu_device=self.gpu_device, gpu_curves=self.gpu_curves,
+            residue_load=self.residue_file,
+            verbose=self.verbose, one=early_termination,
+            b1done=b1,
+        )
+
+    def execute(self, early_termination: bool = True,
+                progress_interval: int = 0) -> Stage2Outcome:
+        """
+        Run GPU stage 2 over the residue file.
+
+        progress_interval only applies to a CPU fallback run; GPU progress is
+        reported per batch (every completed batch is logged).
+
+        Returns:
+            (factor, all_factors, curves_completed, execution_time, sigma),
+            as Stage2Executor.execute(). Every factor is in all_factors; the
+            sigma of each is in self.factor_sigmas.
+        """
+        start_time = time.time()
+        self.raw_output = ""
+        self.b2_used = None
+        self.failed = False
+        self.error_message = None
+        self.factor_sigmas = []
+
+        # Ctrl+C level 2 before stage 2 started (e.g. during the residue
+        # download): honour it rather than starting a long GPU run.
+        if self.wrapper.graceful_shutdown_requested is True:
+            self.logger.info("GPU stage 2: stop requested before start, not running")
+            return (None, [], 0, 0.0, None)
+        # A previous executor may have left stop_event set (factor found)
+        self.stop_event.clear()
+
+        params = residue_params(self.residue_file)
+        if params != {3}:
+            # GPU stage 2 only batches -param 3 residues (what GPU stage 1
+            # makes); others would run one at a time on a single core.
+            param_list = ", ".join(str(p) for p in sorted(params)) or "unknown"
+            return self._run_on_cpu(
+                f"Residues are -param {param_list}, GPU stage 2 needs -param 3",
+                early_termination, progress_interval, start_time)
+
+        residue_info = self.wrapper._parse_residue_file(self.residue_file)
+        actual_b1 = residue_info['b1']
+        if actual_b1 > 0 and actual_b1 != self.b1:
+            self.logger.info(f"Using B1={actual_b1} from residue file (overriding parameter B1={self.b1})")
+        b1_to_use = actual_b1 if actual_b1 > 0 else self.b1
+        total = residue_info.get('curve_count', 0)
+
+        cmd = self.build_command(b1_to_use, early_termination)
+        self.logger.info(f"GPU stage 2: {total or '?'} residues, B1={b1_to_use}, "
+                         f"B2={'default' if self.b2 in (None, -1) else self.b2}")
+        self.logger.debug(f"GPU stage 2 command: {' '.join(cmd)}")
+
+        lines: List[str] = []
+        done = 0
+        process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            start_new_session=True,  # Ctrl+C is handled by the wrapper, not ECM
+        )
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                lines.append(line)
+                if (m := ECMPatterns.GPU_STAGE2_BATCH.match(line)):
+                    done += int(m.group(1))  # progress only; final count below
+                    self.logger.info(f"GPU stage 2: {done}/{total or '?'} curves done "
+                                     f"({line.strip()})")
+                elif "GPU: Error" in line or line.startswith("GPU: stage 2 on the CPU") \
+                        or line.startswith("GPU: baby-step giant-step"):
+                    self.logger.warning(f"GPU stage 2: {line.strip()}")
+                if self.stop_event.is_set() and (
+                        ECMPatterns.GPU_STAGE2_BATCH.match(line)
+                        or ECMPatterns.GPU_BATCH_CPU_STAGE2_CURVE.match(line)
+                        or ECMPatterns.CPU_STAGE2_CURVE.match(line)):
+                    self.logger.info("GPU stage 2: stopping after the completed curves")
+                    process.terminate()
+                    break
+            process.wait()
+        finally:
+            # Level-3 Ctrl+C raises KeyboardInterrupt out of the read loop:
+            # the ECM process is in its own session, so it must be killed here.
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            self.raw_output = "".join(lines)
+            log_file = save_stage2_log("gpu", self.raw_output, self.logger)
+            if log_file:
+                self.logger.info(f"GPU stage 2 output saved to: {log_file}")
+
+        exit_code = process.returncode
+        stopped = self.stop_event.is_set()
+        if (exit_code == 1 or exit_code < 0) and not stopped:
+            # GMP-ECM: 1 = error; 0 = no factor; even codes = factor found
+            # (bit flags for prime factor / prime cofactor / input found).
+            # Negative = killed by a signal we did not send.
+            self.logger.error(f"GPU stage 2 exited with code {exit_code}; "
+                              f"last output:\n{''.join(lines[-10:])}")
+            return self._run_on_cpu(f"GPU stage 2 failed (exit code {exit_code})",
+                                    early_termination, progress_interval, start_time)
+
+        curves = count_completed_curves(self.raw_output)
+        self.b2_used = parse_b2_used(self.raw_output)
+        found = parse_ecm_output_multiple(self.raw_output)
+        self.factor_sigmas = list(found)
+        execution_time = time.time() - start_time
+        self.logger.info(f"GPU stage 2 finished: {curves} curves in {execution_time:.1f}s"
+                         + (f", B2={self.b2_used}" if self.b2_used else "")
+                         + (f", factor {found[0][0]}" if found else ""))
+        if found:
+            factor, sigma = found[0]
+            return (factor, [f for f, _ in found], curves, execution_time, sigma)
+        return (None, [], curves, execution_time, None)
+
+    def _run_on_cpu(self, reason: str, early_termination: bool,
+                    progress_interval: int, start_time: float) -> Stage2Outcome:
+        """Run the whole residue file on CPU workers, or flag the failure."""
+        gpu_output = self.raw_output
+        if self.fallback_workers <= 0:
+            self.logger.error(f"{reason}; no CPU workers to run stage 2 on")
+            self.failed = True
+            self.error_message = reason
+            return (None, [], 0, time.time() - start_time, None)
+
+        # The GPU's partial work (if any) is discarded: the CPU rerun covers
+        # every residue, so its curve count is the whole truth.
+        self.logger.warning(f"{reason}; running the residue file on "
+                            f"{self.fallback_workers} CPU workers")
+        cpu = Stage2Executor(self.wrapper, self.residue_file, self.b1, self.b2,
+                             self.fallback_k, self.fallback_workers, self.verbose,
+                             pin_threads=self.pin_threads)
+        factor, all_factors, curves, _, sigma = cpu.execute(
+            early_termination=early_termination, progress_interval=progress_interval)
+        self.raw_output = (gpu_output + "\n" + cpu.raw_output) if gpu_output else cpu.raw_output
+        self.b2_used = self.b2 if self.b2 not in (None, -1) else None
+        self.factor_sigmas = list(cpu.factor_sigmas)
+        return (factor, all_factors, curves, time.time() - start_time, sigma)
 
 
 class Stage2Executor:
@@ -70,6 +321,12 @@ class Stage2Executor:
         # Aggregated raw output from all workers
         self.raw_output: str = ""
         self.output_lock = threading.Lock()
+        # Same result fields as GPUStage2Executor. The CPU runs the B2 it is
+        # given (b2_used None) and does not fail as a whole (failed False).
+        self.b2_used: Optional[int] = None
+        self.failed = False
+        self.error_message: Optional[str] = None
+        self.factor_sigmas: List[Tuple[str, Optional[str]]] = []
 
     def execute(self, early_termination: bool = True,
                 progress_interval: int = 0) -> Tuple[Optional[str], List[str], int, float, Optional[str]]:
@@ -95,6 +352,7 @@ class Stage2Executor:
         self.stop_event.clear()
         self.factor_found = None  # Also reset factor state
         self.raw_output = ""  # Reset aggregated output
+        self.factor_sigmas = []
 
         # Extract B1 from residue file to ensure consistency
         residue_info = self.wrapper._parse_residue_file(self.residue_file)
@@ -175,6 +433,7 @@ class Stage2Executor:
             factor = self.factor_found[0]
             sigma = self.factor_found[1]
             all_factors = [factor] if factor else []
+            self.factor_sigmas = [(f, sigma) for f in all_factors]
             return (factor, all_factors, self.curves_completed_total, execution_time, sigma)
 
         return (None, [], self.curves_completed_total, execution_time, None)
@@ -394,16 +653,9 @@ class Stage2Executor:
 
     def _save_worker_output(self, worker_id: int, output: str):
         """Save worker output to file for debugging."""
-        try:
-            import tempfile
-            output_dir = Path(tempfile.gettempdir()) / "ecm_stage2_logs"
-            output_dir.mkdir(exist_ok=True)
-            output_file = output_dir / f"worker_{worker_id}_{int(time.time())}.log"
-            with open(output_file, 'w') as f:
-                f.write(output)
+        output_file = save_stage2_log(f"worker_{worker_id}", output, self.logger)
+        if output_file:
             self.logger.debug(f"Worker {worker_id} output saved to: {output_file}")
-        except Exception as e:
-            self.logger.warning(f"Failed to save worker {worker_id} output: {e}")
 
     def _cleanup_chunks(self, residue_chunks: List[Path]):
         """Cleanup temporary chunk files and directories."""

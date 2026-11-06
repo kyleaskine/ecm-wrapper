@@ -197,9 +197,86 @@ Stage 2 (CPU): Request residue → Download → Run stage 2 → Submit → Compl
 
 **Usage:**
 ```bash
-python3 ecm_client.py --stage1-only --b1 110000000 --curves 3000 --gpu
+python3 ecm_client.py --stage1-only --b1 110000000 --curves 3000  # GPU implied
 python3 ecm_client.py --stage2-only --b2 11000000000000 --workers 8
+python3 ecm_client.py --stage2-only --gpu   # GPU stage 2 (see GPU Stage 2 below)
 ```
+
+## GPU Stage 2 (GMP-ECM GPU stage 2 builds, 2026-11)
+
+GMP-ECM builds from the `gpu-stage1-dynamic` branch (`../gmp-ecm`) run stage 2
+on the GPU: plain `-gpu` now does **both** stages on the GPU (`-cpustage2`
+restores GPU stage 1 + CPU stage 2), and `-gpu -resume FILE` batches saved
+residues onto the GPU. The version string is unchanged (7.0.6), so
+`gpu_stage2_supported()` (`lib/ecm_command.py`) probes `ecm -h` for
+`-cpustage2`, cached per binary path once the binary answers (a probe that
+could not run is retried).
+
+- **When the GPU is used** (`resolve_use_gpu()` in `lib/arg_parser.py`):
+  `--no-gpu`, else `--gpu`, else implied for ECM stage 1 in `--stage1-only` and
+  `--two-stage` (no `--gpu` needed there). Everything else needs an explicit
+  `--gpu`. **`gpu_enabled` in config never turns the GPU on**: it only records
+  that the machine has one (interactive menu, setup.py), so a CPU worker never
+  takes the card from a `--stage1-only` producer on the same machine.
+- **Stage 2 on the GPU**: `--stage2-only --gpu` (both `ecm_client.py` and
+  `ecm_wrapper.py`) runs `GPUStage2Executor` (`lib/stage2_executor.py`): one
+  `ecm -gpu -resume FILE B1-B1 B2` process per residue file, never split.
+  `create_stage2_executor()` picks GPU vs the CPU `Stage2Executor` and falls
+  back to CPU workers (warning) on builds without GPU stage 2. If the GPU run
+  fails (exit 1, e.g. out of GPU memory) the file is rerun on the CPU workers;
+  with no fallback workers `executor.failed` is set and the consumer reports
+  failure. Non `-param 3` residues (`PARAM=` in the file) go straight to the
+  CPU pool (GMP-ECM would run them one at a time on one core). Both executors
+  expose the same result fields (`failed`, `error_message`, `factor_sigmas`
+  with each factor's own sigma, `b2_used`), so callers don't branch on the
+  type. A run that completed no curves and found nothing (e.g. stopped before
+  it started) is not a success, so no empty stage 2 attempt is submitted.
+  Output is saved to `<tmp>/ecm_stage2_logs/gpu_<time>.log` (CPU workers:
+  `worker_<n>_<time>.log`). The pipelined two-stage path stays CPU-only for
+  stage 2.
+- **Both stages on the GPU**: explicit `--gpu` *without*
+  `--two-stage`/`--multiprocess`/`--stage1-only`/`--stage2-only`
+  (`resolve_gpu_both()`) — `TLevelConfig.use_gpu` makes each t-level step one
+  `ecm -gpu` process with GMP-ECM's default B2; auto-work B1/B2 mode passes
+  `use_gpu` to `ECMConfig`. Strictly sequential, never pipelined. Interactive
+  menu option [3] "GPU Full". A failed GPU step (exit 1, or no curves
+  completed) stops the t-level run without crediting or submitting it. Factors
+  are split into primes (`split_into_distinct_primes()` in `lib/ecm_math.py`,
+  shared with the multiprocess path), each keeping its sigma.
+- **Batch sizes**: GMP-ECM now sizes GPU batches per input (fill the GPU for the
+  chosen kernel): ~35k curves at 200 bits, ~17.6k at 500 bits, ~2.9k at 3000
+  bits on a 46-SM card. `-c N` rounds up to whole batches. `--gpu-curves` caps
+  batches (and, with `--stage2-only --gpu`, residues per GPU stage 2 batch).
+- **Curve counting** (`count_completed_curves()` in `lib/parsing_utils.py`):
+  only completion lines count, never the requested count or the `(N curves)`
+  on a batch's `Using` line (printed before any work). A GPU batch counts N on
+  `Computing N Step 2 [on CPU ]took`; without one, its `Curve i Step 2 took`
+  lines (CPU stage 2 stopped part way), else 0 - including a batch whose stage
+  1 found a factor, since GMP-ECM then skips stage 2 for the whole batch (a
+  t-level step like that is still submitted, for its factor). Plain CPU curves
+  count per `Step 2 took`. Stage 1 only runs use `count_gpu_stage1_curves()`.
+  These counters only apply to ECM: `-gpu` is never passed for P-1/P+1.
+- **B2 accounting** (`b2_used` on `FactorResult`/`BatchResult`): the GPU's B2
+  can differ from the one asked for — an explicit B2 is rounded *up* (1.5e9 ->
+  2.14e9 at B1=3M), and where the polynomial GPU stage 2 cannot run (`GPU:
+  baby-step giant-step`) the default is 100*B1. GMP-ECM's `Using B1=...,
+  B2=...` line shows the B2 that ran; `_execute_ecm_primitive` and
+  `GPUStage2Executor` parse it once (`parse_b2_used()`, smallest across
+  batches) and `run_two_stage` records its stage 2 B2 (100*B1 when none was
+  given). Every submit path (t-level steps, auto-work B1/B2, the stage 2
+  consumer, `ecm_wrapper.py`'s `submit_ecm_result`) sends `b2_used` when set.
+  `ecm_wrapper.py` also reports the `-param` each mode actually ran
+  (`_parametrization_run()`: residue's own for `--stage2-only`, 3 for GPU
+  stage 1 even without `--gpu`).
+- **Ctrl+C**: level 2 stops after the current GPU *batch* (a batch is
+  all-or-nothing); with no `--gpu-curves` cap a residue file is one batch. A
+  level 2 press before GPU stage 2 starts (e.g. during the residue download)
+  skips the run. In GPU t-level mode (`--standard --gpu`) level 2 SIGINTs the
+  running `ecm` (exit -2), as for `--stage1-only`: the step is treated as
+  interrupted, credited only with completed batches, and the t-level loop
+  stops there instead of starting the remaining steps.
+- **Measured** (RTX 5070 Ti, C140, B1=3M, B2=1.5e9): 17,664 residues in 69 s
+  on the GPU vs ~8 min estimated on 24 CPU workers.
 
 ## T-Level Calculation Details
 

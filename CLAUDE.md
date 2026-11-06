@@ -54,8 +54,14 @@ python3 client/ecm_client.py --p1 --work-count 10                # Process 10 co
 python3 client/ecm_client.py --pp1 --pp1-curves 5                # Custom P+1 curve count
 
 # Decoupled two-stage mode - separate GPU and CPU workers
-python3 client/ecm_client.py --stage1-only --b1 110000000 --curves 3000 --gpu  # GPU producer
+python3 client/ecm_client.py --stage1-only --b1 110000000 --curves 3000        # GPU producer (GPU implied)
 python3 client/ecm_client.py --stage2-only --b2 11000000000000 --workers 8  # CPU consumer
+python3 client/ecm_client.py --stage2-only --gpu                            # GPU consumer (GPU stage 2 build)
+
+# GPU for both stages (GPU stage 2 build of GMP-ECM) - sequential, never pipelined
+python3 client/ecm_client.py --standard --gpu                   # server t-level work
+python3 client/ecm_wrapper.py --composite "..." --tlevel 35 --gpu
+python3 client/ecm_wrapper.py --stage2-only residue.txt --b2 1500000000 --gpu
 
 # Run batch processing scripts
 cd client/scripts/
