@@ -259,7 +259,9 @@ class WorkMode(ABC):
         Returns:
             True if submission succeeded
         """
-        if results_dict.get('curves_completed', 0) == 0:
+        # A GPU batch whose stage 1 found a factor skips stage 2 for every
+        # curve, so it completes 0 curves - but the factor must still go in
+        if results_dict.get('curves_completed', 0) == 0 and not results_dict.get('factors_found'):
             self.logger.error(f"Zero curves completed for {error_label}, execution may have failed (check ECM binary path)")
             return False
 
@@ -458,11 +460,13 @@ class WorkMode(ABC):
             b2_dict: Dict[int, int] = dict()
             k_dict: Dict[int, int] = dict()
             self._b2_dictionary: Optional[Dict[int, int]] = None
+            self._k_dictionary: Dict[int, int] = dict()
             if self.args.b2_dictionary is not None:
                 from lib.arg_parser import load_b2_dictionary
                 b2_dict, k_dict = load_b2_dictionary(self.args.b2_dictionary)
                 if b2_dict:
                     self._b2_dictionary = b2_dict
+                    self._k_dictionary = k_dict
 
             while self.should_continue():
                 # Drain submission queue before each work request

@@ -4,10 +4,11 @@ Helper functions for ECM work assignment display and management.
 
 These utilities eliminate duplicated work handling code in auto-work mode.
 """
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 import sys
 import time
 
+from .ecm_math import MIN_BATCH_B1, b1_for_current_tlevel
 from .user_output import UserOutput
 from .work_args import WorkArgs
 
@@ -131,7 +132,9 @@ def request_ecm_work(api_client, client_id: str, args: WorkArgs,
         max_target_tlevel=args.max_target_tlevel,
         # If client specifies --tlevel, filter out composites already past that level
         max_current_tlevel=args.tlevel,
-        stage1_only=args.stage1_only,
+        # --one-batch picks its B1 as the stage 1 producer does: the server
+        # sizes the claim from that B1
+        stage1_only=args.stage1_only or args.one_batch,
         requested_b1=args.b1,
         priority=args.priority,
         min_digits=args.min_digits,
@@ -190,3 +193,35 @@ def request_p1_work(api_client, client_id: str, args: WorkArgs,
         _reset_no_work_count()
 
     return work
+
+
+def one_gpu_batch_params(args: WorkArgs, curves_per_batch: int,
+                         current_t: Optional[float], logger,
+                         label: str) -> Tuple[int, int]:
+    """
+    (B1, curves) for a work unit that is one GPU batch (--stage1-only,
+    --one-batch).
+
+    B1 is --b1, else the optimal B1 for the next t-level above current_t
+    (t54.7 -> the B1 for t55); either way at least MIN_BATCH_B1, so fast GPU
+    runs don't flood the server with tiny submissions. Curves is --curves,
+    else curves_per_batch: GMP-ECM rounds a GPU request up to its natural
+    batch size, so a request no larger than that runs exactly one batch.
+    """
+    current_t = current_t or 0.0
+    if args.b1 is not None:
+        b1 = args.b1
+        if b1 < MIN_BATCH_B1:
+            logger.warning(f"B1={b1} below minimum {MIN_BATCH_B1} for {label}, using minimum")
+            b1 = MIN_BATCH_B1
+    else:
+        b1 = b1_for_current_tlevel(current_t)
+        if b1 < MIN_BATCH_B1:
+            logger.info(f"{label}: B1={b1} (t{current_t:.1f}) below minimum, "
+                        f"using B1={MIN_BATCH_B1}")
+            b1 = MIN_BATCH_B1
+    curves = args.curves if args.curves is not None else curves_per_batch
+    if curves <= 0:
+        raise ValueError(f"--curves must be positive for {label}, got {curves}")
+    logger.info(f"{label}: t{current_t:.1f} using B1={b1}, curves={curves} (one batch)")
+    return b1, curves

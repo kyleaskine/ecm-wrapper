@@ -267,6 +267,11 @@ Examples:
     # Client-specific t-level (simple float, no auto-calc sentinel)
     parser.add_argument('--tlevel', type=float,
                        help='Target t-level (overrides server t-level)')
+    parser.add_argument('--one-batch', action='store_true',
+                       help='With --gpu: one GPU batch (both stages) per assignment, at the '
+                            'B1 for the composite\'s current t-level, then the next '
+                            'composite - like --stage1-only, without residues. For short '
+                            'sessions (e.g. Colab) instead of a full t-level climb.')
 
     # Shared ECM params, execution modes
     _add_core_ecm_params(parser)

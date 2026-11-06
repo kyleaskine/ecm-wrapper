@@ -44,6 +44,7 @@ class Stage2ConsumerMode(WorkMode):
         if self._use_gpu:
             self.mode_name = "Stage 2 Consumer (GPU)"
         self._b2: Optional[int] = None
+        self._cpu_b2: Optional[int] = None
         self._k: Optional[int] = None
         self.local_residue_file: Optional[Path] = None
         self._residue_checksum: Optional[str] = None
@@ -106,9 +107,11 @@ class Stage2ConsumerMode(WorkMode):
         self._raw_output = ""
 
         b1 = work['b1']
+        suggested_b2 = work.get('suggested_b2', b1 * 500)
 
         # Determine B2 and optionally k
         k = 0
+        cpu_b2: Optional[int] = None
         if 'b2_from_dict' in work:
             b2 = work['b2_from_dict']
             if 'k_from_dict' in work:
@@ -118,10 +121,19 @@ class Stage2ConsumerMode(WorkMode):
         elif self.args.b2_multiplier is not None:
             b2 = int(b1 * self.args.b2_multiplier)
             print(f"Using dynamic B2 = B1 * {self.args.b2_multiplier} = {b2}")
+        elif self._use_gpu and work.get('parametrization', 3) == 3:
+            # GPU stage 2 is cheap next to stage 1, so take GMP-ECM's own
+            # default rather than the server's CPU-oriented suggestion. The
+            # B2 that actually ran is what gets submitted. A run that ends up
+            # on CPU workers (no GPU stage 2, GPU failure) keeps the
+            # suggestion: GMP-ECM's CPU default B2 is far larger.
+            b2 = -1
+            cpu_b2 = suggested_b2
         else:
-            b2 = work.get('suggested_b2', b1 * 500)
+            b2 = suggested_b2
 
         self._b2 = b2
+        self._cpu_b2 = cpu_b2
         self._k = k if k > 0 else None
         b2_display = "GMP-ECM default" if b2 == -1 else str(b2)
 
@@ -181,6 +193,7 @@ class Stage2ConsumerMode(WorkMode):
             self._k, workers, self.args.verbose,
             pin_threads=resolve_pin_threads(self.args),
             use_gpu=use_gpu, gpu_device=gpu_device, gpu_curves=gpu_curves,
+            cpu_b2=self._cpu_b2,
         )
         print("Running stage 2 on the GPU..." if isinstance(executor, GPUStage2Executor)
               else f"Running stage 2 with {workers} workers...")
@@ -204,12 +217,24 @@ class Stage2ConsumerMode(WorkMode):
             result.success = False
             result.error_message = "Stage 2 ran no curves"
         if executor.b2_used is not None:
-            # Report the B2 the GPU actually ran (rounded up, or the
-            # 100*B1 baby-step giant-step default), not the one asked for
+            # Report the B2 that actually ran (GPU: rounded up, or the 100*B1
+            # baby-step giant-step default; CPU fallback: the suggestion),
+            # not the one asked for
             if executor.b2_used != self._b2:
-                print(f"GPU stage 2 ran B2={executor.b2_used} (requested "
+                print(f"Stage 2 ran B2={executor.b2_used} (requested "
                       f"{'default' if self._b2 == -1 else self._b2})")
             self._b2 = executor.b2_used
+        elif self._b2 == -1 and result.success and curves > 0:
+            # GMP-ECM's default B2 ran but its value wasn't reported. Sending
+            # no B2 would let the server credit its own (larger) default.
+            if executor.factor_sigmas:
+                # The factor matters, not the t-level credit: submit it at
+                # the conservative suggestion
+                self._b2 = self._cpu_b2
+            else:
+                result.success = False
+                result.error_message = ("Stage 2 ran GMP-ECM's default B2 but "
+                                        "its value was not in the output")
 
         # Store for submit_results and complete_work
         self._work = work

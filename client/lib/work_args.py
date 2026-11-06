@@ -42,6 +42,8 @@ class WorkArgs:
 
     # T-level targeting
     tlevel: Optional[float] = None
+    # --one-batch: one GPU batch per assignment instead of a t-level climb
+    one_batch: bool = False
     # `--start-tlevel` is only on `create_ecm_parser`; kept here so
     # `StandardAutoWorkMode` can read it defensively without `hasattr`.
     start_tlevel: Optional[float] = None

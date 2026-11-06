@@ -36,6 +36,7 @@ def create_stage2_executor(
     k: Optional[int], workers: int, verbose: bool = False,
     pin_threads: bool = False, *, use_gpu: bool = False,
     gpu_device: Optional[int] = None, gpu_curves: Optional[int] = None,
+    cpu_b2: Optional[int] = None,
 ) -> 'Stage2Executor | GPUStage2Executor':
     """
     Pick the stage 2 executor: one GPU process, or a pool of CPU workers.
@@ -43,6 +44,9 @@ def create_stage2_executor(
     use_gpu falls back to CPU workers (with a warning) when the configured
     GMP-ECM binary predates GPU stage 2 - such builds reject -gpu -resume.
     A GPU executor also falls back to these CPU workers if its run fails.
+
+    cpu_b2, when given, replaces b2 for any run on CPU workers (b2 may be -1,
+    GMP-ECM's default, which is cheap on the GPU but far larger on the CPU).
     """
     if use_gpu:
         ecm_path = wrapper.typed_config.programs.gmp_ecm.path
@@ -50,11 +54,12 @@ def create_stage2_executor(
             return GPUStage2Executor(wrapper, residue_file, b1, b2, verbose,
                                      gpu_device=gpu_device, gpu_curves=gpu_curves,
                                      fallback_k=k, fallback_workers=workers,
-                                     pin_threads=pin_threads)
+                                     fallback_b2=cpu_b2, pin_threads=pin_threads)
         wrapper.logger.warning(
             f"GMP-ECM at {ecm_path} has no GPU stage 2 (no -cpustage2 in its "
             f"usage text); running stage 2 on {workers} CPU workers instead")
-    return Stage2Executor(wrapper, residue_file, b1, b2, k, workers, verbose,
+    return Stage2Executor(wrapper, residue_file, b1,
+                          cpu_b2 if cpu_b2 is not None else b2, k, workers, verbose,
                           pin_threads=pin_threads)
 
 
@@ -115,6 +120,7 @@ class GPUStage2Executor:
                  gpu_curves: Optional[int] = None,
                  fallback_k: Optional[int] = None,
                  fallback_workers: int = 0,
+                 fallback_b2: Optional[int] = None,
                  pin_threads: bool = False) -> None:
         self.wrapper = wrapper
         self.residue_file = residue_file
@@ -125,6 +131,7 @@ class GPUStage2Executor:
         self.gpu_curves = gpu_curves
         self.fallback_k = fallback_k
         self.fallback_workers = fallback_workers
+        self.fallback_b2 = fallback_b2
         self.pin_threads = pin_threads
         self.logger = wrapper.logger
         self.ecm_path = wrapper.typed_config.programs.gmp_ecm.path
@@ -267,13 +274,14 @@ class GPUStage2Executor:
         # every residue, so its curve count is the whole truth.
         self.logger.warning(f"{reason}; running the residue file on "
                             f"{self.fallback_workers} CPU workers")
-        cpu = Stage2Executor(self.wrapper, self.residue_file, self.b1, self.b2,
+        cpu_b2 = self.fallback_b2 if self.fallback_b2 is not None else self.b2
+        cpu = Stage2Executor(self.wrapper, self.residue_file, self.b1, cpu_b2,
                              self.fallback_k, self.fallback_workers, self.verbose,
                              pin_threads=self.pin_threads)
         factor, all_factors, curves, _, sigma = cpu.execute(
             early_termination=early_termination, progress_interval=progress_interval)
         self.raw_output = (gpu_output + "\n" + cpu.raw_output) if gpu_output else cpu.raw_output
-        self.b2_used = self.b2 if self.b2 not in (None, -1) else None
+        self.b2_used = cpu.b2_used
         self.factor_sigmas = list(cpu.factor_sigmas)
         return (factor, all_factors, curves, time.time() - start_time, sigma)
 
@@ -321,9 +329,10 @@ class Stage2Executor:
         # Aggregated raw output from all workers
         self.raw_output: str = ""
         self.output_lock = threading.Lock()
-        # Same result fields as GPUStage2Executor. The CPU runs the B2 it is
-        # given (b2_used None) and does not fail as a whole (failed False).
-        self.b2_used: Optional[int] = None
+        # Same result fields as GPUStage2Executor. The CPU runs exactly the
+        # B2 it is given (b2_used None only for GMP-ECM's default) and does
+        # not fail as a whole (failed False).
+        self.b2_used: Optional[int] = b2 if b2 not in (None, -1) else None
         self.failed = False
         self.error_message: Optional[str] = None
         self.factor_sigmas: List[Tuple[str, Optional[str]]] = []

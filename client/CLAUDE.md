@@ -233,14 +233,36 @@ could not run is retried).
   it started) is not a success, so no empty stage 2 attempt is submitted.
   Output is saved to `<tmp>/ecm_stage2_logs/gpu_<time>.log` (CPU workers:
   `worker_<n>_<time>.log`). The pipelined two-stage path stays CPU-only for
-  stage 2.
+  stage 2. B2 for the GPU consumer: B2 dictionary, then `--b2`, then
+  `--b2-multiplier`, else GMP-ECM's default (`-1`), not the server's
+  CPU-oriented `suggested_b2` (CPU consumers keep that). With `-1`, the
+  consumer passes `cpu_b2=suggested_b2` to `create_stage2_executor()`, so any
+  run that lands on CPU workers (binary without GPU stage 2, GPU failure
+  fallback) uses the suggestion, not GMP-ECM's far larger CPU default. If the
+  GPU's default B2 isn't found in the output, the attempt is a failure (no
+  B2 would let the server credit its own default), unless a factor was
+  found, which is then submitted at the suggestion. CPU `Stage2Executor`
+  reports an explicit B2 as `b2_used`.
 - **Both stages on the GPU**: explicit `--gpu` *without*
   `--two-stage`/`--multiprocess`/`--stage1-only`/`--stage2-only`
   (`resolve_gpu_both()`) — `TLevelConfig.use_gpu` makes each t-level step one
   `ecm -gpu` process with GMP-ECM's default B2; auto-work B1/B2 mode passes
   `use_gpu` to `ECMConfig`. Strictly sequential, never pipelined. Interactive
   menu option [3] "GPU Full". A failed GPU step (exit 1, or no curves
-  completed) stops the t-level run without crediting or submitting it. Factors
+  completed) stops the t-level run without crediting or submitting it.
+  `--one-batch` (auto-work, with `--gpu`) instead runs a single GPU batch per
+  assignment through the B1/B2 path, then completes the assignment: for
+  short sessions like Colab. B1/curves come from `one_gpu_batch_params()`
+  (`lib/work_helpers.py`), shared with `--stage1-only`: the B1 for the next
+  t-level above the composite's current one, or `--b1`, either way floored at
+  `MIN_BATCH_B1` = 250k; curves `--curves` (must be > 0) or
+  `gpu.curves_per_batch`, i.e. one full batch unless a `--gpu-curves` cap is
+  smaller than that. The B2 dictionary is looked up with this client-chosen
+  B1 (base `run()` only matches the server's). A batch whose stage 1 found
+  a factor completes 0 curves (GMP-ECM skips stage 2 for the batch) and is
+  still submitted: `_submit_ecm_results` rejects 0 curves only without
+  factors. The work request
+  sets `stage1_only` so the server sizes the claim the same way. Factors
   are split into primes (`split_into_distinct_primes()` in `lib/ecm_math.py`,
   shared with the multiprocess path), each keeping its sigma.
 - **Batch sizes**: GMP-ECM now sizes GPU batches per input (fill the GPU for the

@@ -25,11 +25,12 @@ if sys.version_info < (3, 9):
     sys.exit(1)
 
 from pathlib import Path
+from typing import Optional
 
 from lib.ecm_executor import ECMWrapper
 from lib.work_modes import WorkLoopContext, get_work_mode
 from lib.work_args import WorkArgs
-from lib.arg_parser import create_client_parser
+from lib.arg_parser import create_client_parser, resolve_gpu_both, resolve_use_gpu
 
 
 def check_setup_complete() -> bool:
@@ -69,7 +70,7 @@ def _has_explicit_mode(args: WorkArgs) -> bool:
     """Check if user specified an explicit work mode via flags."""
     if (args.composite or args.pm1 or args.pp1 or args.p1
             or args.stage1_only or args.stage2_only
-            or args.standard or args.adaptive):
+            or args.standard or args.adaptive or args.one_batch):
         return True
     # Implicit standard mode: user specified execution parameters
     if args.b1 is not None or args.tlevel is not None:
@@ -77,6 +78,19 @@ def _has_explicit_mode(args: WorkArgs) -> bool:
     if args.two_stage or args.multiprocess:
         return True
     return False
+
+
+def _one_batch_error(args: WorkArgs) -> Optional[str]:
+    """Why --one-batch can't be used with these args, or None."""
+    if not args.one_batch:
+        return None
+    other_mode = (args.tlevel is not None or args.composite or args.adaptive
+                  or args.pm1 or args.pp1 or args.p1)
+    if other_mode or not resolve_gpu_both(args, resolve_use_gpu(args)):
+        return ("--one-batch needs --gpu (both stages on the GPU, ECM) and cannot be "
+                "combined with --tlevel, --two-stage, --multiprocess, --stage1-only, "
+                "--stage2-only, --adaptive, --composite or P-1/P+1")
+    return None
 
 
 def _prompt_work_mode(gpu_enabled: bool) -> str:
@@ -125,14 +139,19 @@ def main():
     parser = create_client_parser()
     ns = parser.parse_args()
 
-    # Check for setup completion (unless --help was requested)
-    if not check_setup_complete():
-        sys.exit(1)
-
     # Convert argparse.Namespace -> typed WorkArgs once at the entry point.
     # auto_work is always True for ecm_client.py (server-coordinated mode).
     work_args = WorkArgs.from_namespace(ns)
     work_args.auto_work = True
+
+    # Reject bad flag combinations before any prompt or config loading
+    one_batch_error = _one_batch_error(work_args)
+    if one_batch_error:
+        parser.error(one_batch_error)
+
+    # Check for setup completion (unless --help was requested)
+    if not check_setup_complete():
+        sys.exit(1)
 
     # Initialize wrapper
     wrapper = ECMWrapper('client.yaml')

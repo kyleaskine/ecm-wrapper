@@ -60,6 +60,7 @@ python3 client/ecm_client.py --stage2-only --gpu                            # GP
 
 # GPU for both stages (GPU stage 2 build of GMP-ECM) - sequential, never pipelined
 python3 client/ecm_client.py --standard --gpu                   # server t-level work
+python3 client/ecm_client.py --standard --gpu --one-batch       # one GPU batch per composite (Colab)
 python3 client/ecm_wrapper.py --composite "..." --tlevel 35 --gpu
 python3 client/ecm_wrapper.py --stage2-only residue.txt --b2 1500000000 --gpu
 

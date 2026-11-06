@@ -470,6 +470,23 @@ def get_optimal_b1_for_tlevel(target_tlevel: float) -> Tuple[int, int]:
     return OPTIMAL_B1_TABLE[-1][1], OPTIMAL_B1_TABLE[-1][2]
 
 
+
+# Lowest B1 for a one-GPU-batch assignment (--stage1-only, --one-batch): a
+# batch at a lower B1 (~t30) finishes in seconds and floods the server with
+# tiny submissions.
+MIN_BATCH_B1 = 250000
+
+
+def b1_for_current_tlevel(current_tlevel: float, min_b1: int = 0) -> int:
+    """
+    B1 for one batch of work on a composite at current_tlevel: the optimal B1
+    for the next whole t-level above it (t54.7 -> the B1 for t55), at least t20
+    and at least min_b1. Used where each assignment runs a single GPU batch
+    (--stage1-only, --one-batch) instead of a whole t-level climb.
+    """
+    b1, _ = get_optimal_b1_for_tlevel(max(20, int(current_tlevel) + 1))
+    return max(b1, min_b1)
+
 def get_b1_above_tlevel(target_t_level: float) -> int:
     """
     Get B1 one step above the target t-level for PM1/PP1 sweeps.

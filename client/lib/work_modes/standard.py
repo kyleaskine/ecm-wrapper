@@ -8,7 +8,7 @@ from typing import Any, Optional, Dict
 from ..ecm_config import (
     ECMConfig, TwoStageConfig, MultiprocessConfig, TLevelConfig, FactorResult
 )
-from ..work_helpers import print_work_header, request_ecm_work
+from ..work_helpers import one_gpu_batch_params, print_work_header, request_ecm_work
 from ..arg_parser import (
     resolve_gpu_both, resolve_gpu_settings, resolve_worker_count, get_max_batch_default,
     resolve_pin_threads, resolve_stage2_progress_interval,
@@ -52,13 +52,17 @@ class StandardAutoWorkMode(WorkMode):
 
     def execute_work(self, work: Dict[str, Any]) -> FactorResult:
         composite = work['composite']
+        self._target_already_met = False
 
         has_b1 = self.args.b1 is not None
         has_client_tlevel = self.args.tlevel is not None
 
         # Determine execution mode:
+        # - --one-batch → one GPU batch at the B1 for the current t-level
         # - Explicit B1 (with or without B2) → B1/B2 mode
         # - Explicit --tlevel or no B1/tlevel → t-level mode
+        if self.args.one_batch:
+            return self._execute_one_batch_mode(work, composite)
         if has_b1 and not has_client_tlevel:
             return self._execute_b1b2_mode(work, composite)
         else:
@@ -161,11 +165,40 @@ class StandardAutoWorkMode(WorkMode):
 
         return result
 
-    def _execute_b1b2_mode(self, work: Dict[str, Any], composite: str) -> FactorResult:
-        """Execute using explicit B1/B2 parameters."""
-        # Caller invariant: execute_work() only routes here when args.b1 is set.
-        assert self.args.b1 is not None
-        b1: int = self.args.b1
+    def _execute_one_batch_mode(self, work: Dict[str, Any], composite: str) -> FactorResult:
+        """
+        One GPU batch, both stages, then the assignment is done (--one-batch).
+
+        B1 is chosen as the stage 1 producer chooses it (the B1 for the next
+        t-level above the composite's current one; --b1 overrides), B2 is
+        GMP-ECM's default unless --b2 / the B2 dictionary give one, and the
+        curves default to the configured GPU batch request, which GMP-ECM
+        rounds up to exactly one full batch.
+        """
+        b1, curves = one_gpu_batch_params(
+            self.args, self.wrapper.typed_config.programs.gmp_ecm.gpu.curves_per_batch,
+            work.get('current_t_level'), self.logger, "one-batch")
+        # base.run() matched the B2 dictionary against the server's B1; this
+        # B1 is chosen here, so look it up again
+        b2_dict = getattr(self, '_b2_dictionary', None) or {}
+        if b1 in b2_dict:
+            work['b2_from_dict'] = b2_dict[b1]
+            print(f"Using B2 = {b2_dict[b1]} from dictionary.")
+            k_dict = getattr(self, '_k_dictionary', None) or {}
+            if b1 in k_dict:
+                work['k_from_dict'] = k_dict[b1]
+        print(f"One batch: t{work.get('current_t_level') or 0.0:.2f} -> B1={b1}")
+        return self._execute_b1b2_mode(work, composite, b1=b1, curves=curves)
+
+    def _execute_b1b2_mode(self, work: Dict[str, Any], composite: str,
+                           b1: Optional[int] = None,
+                           curves: Optional[int] = None) -> FactorResult:
+        """Execute using explicit B1/B2 parameters (args, unless given)."""
+        # Caller invariant: execute_work() only routes here when args.b1 is
+        # set, or --one-batch passes b1.
+        if b1 is None:
+            assert self.args.b1 is not None
+            b1 = self.args.b1
         b2: Optional[int] = 0
         k = 0
         if 'b2_from_dict' in work:
@@ -174,8 +207,9 @@ class StandardAutoWorkMode(WorkMode):
                 k = work['k_from_dict']
         else:
             b2 = self.args.b2
-        curves = self.args.curves if self.args.curves else \
-                 (1 if self.args.two_stage else self.wrapper.typed_config.programs.gmp_ecm.default_curves)
+        if curves is None:
+            curves = self.args.curves if self.args.curves else \
+                     (1 if self.args.two_stage else self.wrapper.typed_config.programs.gmp_ecm.default_curves)
 
         use_gpu, gpu_device, gpu_curves = resolve_gpu_settings(self.args, self.wrapper.typed_config)
         sigma = parse_sigma_arg(self.args)
@@ -249,12 +283,12 @@ class StandardAutoWorkMode(WorkMode):
         self._results_dict = result.to_dict(composite, self.args.method)
 
         # Add ECM parameters that aren't in FactorResult
-        self._results_dict['b1'] = self.args.b1
+        self._results_dict['b1'] = b1
         # The B2 that ran when the run knows it (GPU ECM: rounded up, or the
         # 100*B1 baby-step giant-step default; two-stage stage 2), else the
         # one asked for
         self._results_dict['b2'] = result.b2_used if result.b2_used is not None else b2
-        self._results_dict['curves_requested'] = self.args.curves
+        self._results_dict['curves_requested'] = curves
         # Every branch above runs `param if param else 3` (so --param 0 runs 3)
         self._results_dict['parametrization'] = param if param else 3
 

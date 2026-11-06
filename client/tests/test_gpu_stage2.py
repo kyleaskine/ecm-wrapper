@@ -19,11 +19,14 @@ from lib.arg_parser import resolve_gpu_both, resolve_gpu_settings
 from lib.ecm_command import gpu_stage2_supported
 from lib.ecm_config import ECMConfig, FactorResult, TLevelConfig
 from lib.ecm_executor import ECMWrapper
+from lib.ecm_math import MIN_BATCH_B1, b1_for_current_tlevel, get_optimal_b1_for_tlevel
 from lib.ecm_modes import ResolvedParams, submit_ecm_result
+from lib.work_helpers import request_ecm_work
+import ecm_client
 from lib.parsing_utils import count_completed_curves, count_gpu_stage1_curves, parse_b2_used
 from lib.stage2_executor import GPUStage2Executor, Stage2Executor, create_stage2_executor
 from lib.work_args import WorkArgs
-from lib.work_modes import Stage2ConsumerMode, WorkLoopContext
+from lib.work_modes import Stage2ConsumerMode, StandardAutoWorkMode, WorkLoopContext
 
 GPU_RESUME_NO_FACTOR = """\
 GMP-ECM 7.0.6 [configured with GMP 6.3.0, --enable-asm-redc, --enable-gpu] [ECM]
@@ -228,6 +231,7 @@ class TestGPUStage2Execute:
         cpu.execute.return_value = ("97", ["97"], 2048, 5.0, "3:42")
         cpu.raw_output = "cpu output"
         cpu.factor_sigmas = [("97", "3:42")]
+        cpu.b2_used = 1_500_000_000
         with patch("lib.stage2_executor.Stage2Executor", return_value=cpu) as cls:
             factor, factors, curves, _, sigma = ex.execute(progress_interval=50)
         assert (factor, factors, curves, sigma) == ("97", ["97"], 2048, "3:42")
@@ -237,6 +241,19 @@ class TestGPUStage2Execute:
         assert ex.b2_used == 1_500_000_000
         assert "cpu output" in ex.raw_output
         assert ex.factor_sigmas == [("97", "3:42")]
+
+    def test_cpu_fallback_runs_fallback_b2(self, tmp_path):
+        """GPU asked for GMP-ECM's default B2: the CPU rerun uses fallback_b2."""
+        ecm = _fake_ecm(tmp_path, "GPU: Error, cannot fit stage 2 in memory\n", exit_code=1)
+        ex = GPUStage2Executor(_wrapper(ecm), tmp_path / "r.txt", 3_000_000, -1,
+                               fallback_k=4, fallback_workers=8, fallback_b2=1_500_000_000)
+        cpu = Mock()
+        cpu.execute.return_value = (None, [], 2048, 5.0, None)
+        cpu.raw_output, cpu.factor_sigmas, cpu.b2_used = "", [], 1_500_000_000
+        with patch("lib.stage2_executor.Stage2Executor", return_value=cpu) as cls:
+            ex.execute()
+        assert cls.call_args.args[3] == 1_500_000_000
+        assert ex.b2_used == 1_500_000_000
 
     def test_reports_b2_actually_run(self, tmp_path):
         ecm = _fake_ecm(tmp_path, GPU_RESUME_NO_FACTOR)
@@ -274,6 +291,7 @@ class TestGPUStage2Execute:
         cpu.execute.return_value = (None, [], 2048, 5.0, None)
         cpu.raw_output = "cpu output"
         cpu.factor_sigmas = []
+        cpu.b2_used = 1_500_000_000
         with patch("lib.stage2_executor.Stage2Executor", return_value=cpu):
             assert ex.execute()[2] == 2048
         assert not (tmp_path / "argv.txt").exists()  # GPU process never started
@@ -334,6 +352,17 @@ class TestFactory:
         assert ex.k == 4 and ex.workers == 8
         assert wrapper.logger.warning.called
 
+    def test_cpu_b2_replaces_default_on_cpu(self):
+        with patch("lib.stage2_executor.gpu_stage2_supported", return_value=False):
+            ex = create_stage2_executor(_wrapper(), Path("r.txt"), 1, -1, None, 8,
+                                        use_gpu=True, cpu_b2=500)
+        assert isinstance(ex, Stage2Executor)
+        assert ex.b2 == 500 and ex.b2_used == 500
+
+    def test_cpu_reports_explicit_b2_only(self):
+        assert create_stage2_executor(_wrapper(), Path("r.txt"), 1, 2, None, 8).b2_used == 2
+        assert create_stage2_executor(_wrapper(), Path("r.txt"), 1, -1, None, 8).b2_used is None
+
 
 class TestStage2ConsumerGpuSelection:
     def _mode(self, wrapper: Mock | None = None, **kw) -> Stage2ConsumerMode:
@@ -376,6 +405,7 @@ class TestStage2ConsumerGpuSelection:
                    return_value=executor) as factory:
             mode.on_work_started(work)
             result = mode.execute_work(work)
+        self.factory_args = factory.call_args.args
         return mode, result, factory.call_args.kwargs
 
     @staticmethod
@@ -402,6 +432,31 @@ class TestStage2ConsumerGpuSelection:
         # the rounded-up B2 the GPU ran is what gets reported
         assert mode._b2 == 2141548510
 
+    def test_gpu_defaults_to_gmp_ecm_b2(self, tmp_path):
+        """No dictionary/--b2/--b2-multiplier: GMP-ECM's default, not suggested_b2;
+        a run that lands on CPU workers keeps suggested_b2."""
+        mode, _, kwargs = self._run(tmp_path, self._gpu_executor())
+        assert self.factory_args[3] == -1
+        assert kwargs['cpu_b2'] == 1_500_000_000
+        assert mode._b2 == 2141548510  # what ran
+
+    def test_explicit_b2_has_no_cpu_override(self, tmp_path):
+        _, _, kwargs = self._run(tmp_path, self._gpu_executor(), b2_from_dict=9_000_000_000)
+        assert self.factory_args[3] == 9_000_000_000
+        assert kwargs['cpu_b2'] is None
+
+    def test_unreported_default_b2_is_not_success(self, tmp_path):
+        """Submitting no B2 would let the server credit its own default."""
+        _, result, _ = self._run(tmp_path, self._gpu_executor(b2_used=None))
+        assert result.success is False
+        assert "B2" in (result.error_message or "")
+
+    def test_unreported_default_b2_with_factor_submits_suggestion(self, tmp_path):
+        ex = self._gpu_executor(b2_used=None, factor_sigmas=[("97", "3:1003")])
+        mode, result, _ = self._run(tmp_path, ex)
+        assert result.success is True
+        assert mode._b2 == 1_500_000_000
+
     def test_non_param3_residue_goes_to_cpu(self, tmp_path):
         cpu = Mock(spec=Stage2Executor)
         cpu.execute.return_value = (None, [], 2048, 1.0, None)
@@ -409,7 +464,7 @@ class TestStage2ConsumerGpuSelection:
         cpu.failed, cpu.error_message, cpu.b2_used, cpu.factor_sigmas = False, None, None, []
         mode, result, kwargs = self._run(tmp_path, cpu, parametrization=1)
         assert kwargs['use_gpu'] is False
-        assert mode._b2 == 1_500_000_000
+        assert mode._b2 == 1_500_000_000  # CPU stage 2 keeps the server's B2
 
     def test_failed_gpu_run_is_not_success(self, tmp_path):
         _, result, _ = self._run(tmp_path, self._gpu_executor(curves=0, failed=True,
@@ -657,3 +712,99 @@ class TestGpuRunEcmSplitsFactors:
             composite="1234567891011", b1=11000, curves=100, use_gpu=True))
         assert result.factors == ["97", "101"]
         assert result.sigmas == ["3:55", "3:55"]
+
+
+class TestOneBatch:
+    """--one-batch: one GPU batch (both stages) per assignment, then the next composite."""
+
+    @staticmethod
+    def _mode(run_result: FactorResult, **kw):
+        wrapper = Mock()
+        wrapper.typed_config.programs.gmp_ecm.gpu.curves_per_batch = 1000
+        wrapper.typed_config.programs.gmp_ecm.gpu_device = 0
+        wrapper.typed_config.programs.gmp_ecm.gpu_curves = None
+        wrapper.run_ecm_v2.return_value = run_result
+        args = WorkArgs(gpu=True, one_batch=True, **kw)
+        mode = StandardAutoWorkMode(WorkLoopContext(wrapper=wrapper, client_id='c', args=args))
+        return mode, wrapper
+
+    @staticmethod
+    def _work(current_t):
+        return {'composite': '1234567891011', 'digit_length': 13,
+                'current_t_level': current_t, 'target_t_level': 60.0}
+
+    def test_b1_for_current_tlevel(self):
+        assert b1_for_current_tlevel(54.7) == get_optimal_b1_for_tlevel(55)[0]
+        assert b1_for_current_tlevel(0.0) == get_optimal_b1_for_tlevel(20)[0]
+        assert b1_for_current_tlevel(0.0, MIN_BATCH_B1) == MIN_BATCH_B1
+
+    def test_runs_one_gpu_batch_at_current_tlevel_b1(self):
+        mode, wrapper = self._mode(FactorResult(curves_run=2304, success=True,
+                                                b2_used=777_000_000_000))
+        mode._target_already_met = True  # left over from an earlier assignment
+        mode.execute_work(self._work(54.7))
+        assert mode._target_already_met is False
+        config: ECMConfig = wrapper.run_ecm_v2.call_args.args[0]
+        assert config.b1 == get_optimal_b1_for_tlevel(55)[0]
+        assert (config.curves, config.use_gpu, config.b2) == (1000, True, None)
+        assert wrapper.run_ecm_v2.call_count == 1  # no t-level climb
+        sent = mode._results_dict
+        assert (sent['b1'], sent['b2'], sent['parametrization']) == (
+            config.b1, 777_000_000_000, 3)
+        assert mode._is_tlevel_mode is False  # submitted by submit_results
+
+    def test_low_tlevel_uses_minimum_b1(self):
+        mode, wrapper = self._mode(FactorResult(curves_run=2304, success=True))
+        mode.execute_work(self._work(12.0))
+        assert wrapper.run_ecm_v2.call_args.args[0].b1 == MIN_BATCH_B1
+
+    def test_explicit_b1_is_floored(self):
+        mode, wrapper = self._mode(FactorResult(curves_run=2304, success=True), b1=11000)
+        mode.execute_work(self._work(54.7))
+        assert wrapper.run_ecm_v2.call_args.args[0].b1 == MIN_BATCH_B1
+
+    def test_zero_curves_rejected(self):
+        mode, _ = self._mode(FactorResult(), curves=0)
+        with pytest.raises(ValueError):
+            mode.execute_work(self._work(54.7))
+
+    def test_b2_dictionary_uses_chosen_b1(self):
+        mode, wrapper = self._mode(FactorResult(curves_run=2304, success=True))
+        b1 = get_optimal_b1_for_tlevel(55)[0]
+        mode._b2_dictionary, mode._k_dictionary = {b1: 123_000_000_000}, {b1: 4}
+        mode.execute_work(self._work(54.7))
+        config = wrapper.run_ecm_v2.call_args.args[0]
+        assert config.b2 == 123_000_000_000
+
+    def test_stage1_factor_with_zero_curves_is_submitted(self):
+        """A stage 1 factor makes GMP-ECM skip stage 2: 0 curves, but a factor."""
+        mode, wrapper = self._mode(FactorResult(curves_run=0, success=True,
+                                                factors=["97"], sigmas=["3:5"]))
+        work = self._work(54.7)
+        mode.execute_work(work)
+        assert mode.submit_results(work, FactorResult()) is True
+        assert wrapper.submit_result.call_args.args[0]['factors_found'] == ["97"]
+
+    def test_explicit_b1_and_curves_win(self):
+        mode, wrapper = self._mode(FactorResult(curves_run=4096, success=True),
+                                   b1=3_000_000, curves=4096)
+        mode.execute_work(self._work(54.7))
+        config = wrapper.run_ecm_v2.call_args.args[0]
+        assert (config.b1, config.curves) == (3_000_000, 4096)
+
+    @pytest.mark.parametrize("kw, ok", [
+        ({'gpu': True}, True),
+        ({}, False),                                  # needs --gpu
+        ({'gpu': True, 'tlevel': 35.0}, False),
+        ({'gpu': True, 'two_stage': True}, False),
+        ({'gpu': True, 'stage1_only': True}, False),
+        ({'gpu': True, 'pm1': True}, False),
+    ])
+    def test_validation(self, kw, ok):
+        assert (ecm_client._one_batch_error(WorkArgs(one_batch=True, **kw)) is None) is ok
+
+    def test_claim_sized_like_stage1(self):
+        api = Mock()
+        api.get_ecm_work.return_value = {'composite': '1'}
+        request_ecm_work(api, 'c', WorkArgs(gpu=True, one_batch=True), Mock())
+        assert api.get_ecm_work.call_args.kwargs['stage1_only'] is True
