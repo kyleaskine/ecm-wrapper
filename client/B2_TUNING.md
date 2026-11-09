@@ -100,6 +100,7 @@ the normal client with eight workers. Each was accepted with
 | 11 million | 80680 | 1,408 | 161 s | 422 MB | 375342 |
 | 43 million | 80591 | 2,560 | 985 s | 644 MB | 375361 |
 | 110 million | 80622 | 1,792 | 3,596 s | 3.77 GB | 375413 |
+| 260 million | 80609 | 2,304 | 7,969 s | 3.34 GB | 375458 |
 
 ## Completed service work
 
