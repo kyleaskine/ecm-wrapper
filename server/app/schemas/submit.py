@@ -9,15 +9,33 @@ MAX_RAW_OUTPUT_LEN = 1_048_576   # 1 MB; GMP-ECM/YAFU output is typically <100 K
 MAX_ID_LEN = 256                 # client_id, project, sigma
 MAX_PROGRAM_LEN = 64             # "gmp-ecm", "yafu", version strings
 MAX_CHECKSUM_LEN = 128           # SHA-256 hex is 64; cap allows prefixes
+# Stage bounds. B2 must fit the BIGINT column. The B1 cap is about four orders
+# of magnitude above anything submitted so far (ECM max 7.5e10, P-1 2.5e10) and
+# below where the t-level calculation breaks (default B2 at B1 = 1e17). An
+# unbounded B1 or B2 could otherwise store a class that fails every later
+# recalculation of that composite.
+MAX_B1 = 10**15
+MAX_B2 = 2**63 - 1
 
 
 class ParametersSchema(BaseModel):
-    b1: int = Field(..., description="Stage 1 bound")
-    b2: Optional[int] = Field(default=None, description="Stage 2 bound (optional)")
+    b1: int = Field(..., ge=0, le=MAX_B1, description="Stage 1 bound (0 for methods without one, e.g. NFS)")
+    b2: Optional[int] = Field(default=None, ge=0, le=MAX_B2, description="Stage 2 bound (optional; None or -1 = GMP-ECM default, 0 = stage 1 only)")
     curves: Optional[int] = Field(default=None, description="Number of curves requested")
     parametrization: Optional[int] = Field(default=None, ge=0, le=3, description="ECM parametrization type (0, 1, 2, or 3)")
     sigma: Optional[str] = Field(default=None, max_length=MAX_ID_LEN, description="ECM curve parameter (can include parametrization like '3:12345' or just '12345')")
     a: Optional[int] = Field(default=None, description="PP1 base parameter")
+
+    @field_validator("b2", mode="before")
+    @classmethod
+    def normalize_default_b2(cls, v: object) -> object:
+        # The client uses -1 for "GMP-ECM's default B2" (client/lib/arg_parser.py),
+        # and standard mode can forward it unchanged. The server stores the
+        # default as None. Rejecting -1 would lose the result; storing it would
+        # break every later t-level calculation for the composite.
+        if v == -1:
+            return None
+        return v
 
 class FactorWithSigma(BaseModel):
     factor: str = Field(..., max_length=MAX_NUMBER_LEN, description="The factor value")

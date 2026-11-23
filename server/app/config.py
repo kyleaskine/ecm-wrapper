@@ -1,7 +1,7 @@
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional, cast
+from typing import Literal, Optional, cast
 
 from pydantic import Field, validator
 from pydantic_settings import BaseSettings
@@ -74,6 +74,17 @@ class Settings(BaseSettings):
     t_level_binary_path: str = Field(
         default=os.getenv("T_LEVEL_BINARY_PATH", "/app/bin/t-level"),
         description="Path to t-level executable binary"
+    )
+    # "library" computes t-levels in-process with the t-level package and a
+    # cache (app/services/t_level_library.py). "binary" spawns
+    # t_level_binary_path for every calculation, which was the behaviour before
+    # 2026-11; it is kept so a rollback is one environment variable
+    # (T_LEVEL_BACKEND=binary), and with it the package is never imported. The
+    # binary is also used automatically if the package fails to import, or if
+    # its probability database raises an error.
+    t_level_backend: Literal["library", "binary"] = Field(
+        default="library",
+        description="T-level backend: 'library' (in-process, cached) or 'binary' (subprocess)"
     )
 
     # Residue storage

@@ -36,6 +36,7 @@ Implementation details for the ECM coordination server. See also the [root CLAUD
   - `composites.py` - Core composite operations
   - `factors.py` - Factor validation and management
   - `t_level_calculator.py` - ECM t-level calculations (excludes superseded attempts)
+  - `t_level_library.py` - In-process t-level calculation via the `t-level` package, cached (see T-Level Calculation)
   - `residue_manager.py` - Residue file storage, parsing, and lifecycle management
   - `group_order.py` - Elliptic curve group order calculation using PARI/GP
 - **Utilities**: `app/utils/*.py` - Shared utilities
@@ -113,7 +114,7 @@ Discovered factors with discovery methods:
 - **Timing attack protection**: Constant-time key comparison using `secrets.compare_digest()`
 - **Submission validation**: Only composites already in database can receive ECM results
 - **File upload limits**: 10 MB maximum on bulk upload endpoints
-- **Input validation**: UTF-8 encoding validation, Pydantic schema validation
+- **Input validation**: UTF-8 encoding validation, Pydantic schema validation (including B1/B2 bounds on submissions; see T-Level Calculation)
 - **Error sanitization**: Generic error messages to clients, detailed logging server-side
 - **SQL injection protection**: SQLAlchemy ORM with parameterized queries
 - **XSS protection**: Jinja2 auto-escaping with explicit `esc()` for HTML output
@@ -170,7 +171,89 @@ P-1/P+1 assignment defaults remain one day.
 - Factors divided out sequentially from a running cofactor
 - Skips factors that don't divide (handles composite factors gracefully)
 
+## T-Level Calculation
+
+`TLevelCalculator.get_current_t_level_from_attempts()` totals the curves in
+each `(B1, B2, parametrization)` class. It then computes the t-level with one
+of two backends, chosen by `T_LEVEL_BACKEND` in `app/config.py`.
+
+### `library` backend (default since 2026-11)
+`app/services/t_level_library.py` calls the `t-level` package (1.0.0, from
+PyPI, pinned in `requirements.txt`) in-process. The package is imported on
+first use, so the `binary` backend never loads it.
+- **Cache:** the package's one expensive function,
+  `get_ecm_success_probs(b1, b2, param)`, is cached for the life of the
+  process. A recalculation over known classes takes about 1 ms. Spawning the
+  binary used to cost 200–1,400 ms, inside the submit transaction. At import,
+  the module checks that the package's own calls go through the cache, and
+  treats the package as unavailable if they don't.
+- **Equivalence:** results match the deployed 0.9.6 binary on every production
+  input checked, including `-w` and the 3-decimal rounding.
+  `tests/test_t_level_library.py` pins the binary's outputs. The two versions
+  differ only on degenerate input no server path produces: for `1@2`, 0.9.6
+  crashes and 1.0.0 returns t0.000.
+- **Locking:** every call holds one lock, because the package shares a single
+  SQLite cursor.
+- **Memory:** after every calculation, every package `functools.cache` that
+  holds anything is cleared; only the probability vectors are kept. Left
+  alone, the caches grew RSS by about 200 MB over production's ~510 classes.
+  Cleared, the package adds about 25 MB.
+
+### `binary` backend
+Pipes a curve string to `bin/t-level`, a PyInstaller build of `t-level` 0.9.6.
+This was the behaviour before 2026-11.
+- It is kept for rollback: set `T_LEVEL_BACKEND=binary`.
+- It is also used automatically if the package fails to import, or if its
+  probability database raises `sqlite3.Error`. Other library exceptions
+  depend on the input, and the binary would fail the same way, so they are
+  not retried.
+
+### Failures and priors
+- **Failure:** a failed calculation returns `None`. `recalculate_composite_t_level`,
+  the maintenance recalculations and the legacy `/work` service then keep the
+  composite's existing `current_t_level`. (Before 2026-11, failures wrote the
+  prior t-level, which erased recorded progress.)
+- **Priors outside 5–100:** the CLI's `-w` only accepts 5–100. For a prior
+  outside that range, the calculator works out the attempts alone and stores
+  max(attempts, prior); a prior below 5 is negligible work. (Before 2026-11,
+  only the prior was kept and all ECM work was discarded.)
+- **Submit bounds:** `ParametersSchema` (`app/schemas/submit.py`) limits `b1`
+  to 0–1e15 and `b2` to 0–2^63−1, the BIGINT range, so a submission cannot
+  store a class that fails every later recalculation. `b2 = -1`, the client's
+  "GMP-ECM default" sentinel, is stored as `None`.
+
+### Recalculating specific composites
+`scripts/recalculate_t_levels.py IDS_FILE [--apply]` runs the submission's
+recalculation for each listed composite. Each composite gets its own
+transaction and holds the composite row lock. It changes only
+`current_t_level`. The default is a dry run. The image does not contain
+`scripts/`, so `docker cp` the script into `/app` first (see its docstring).
+Use this, never the recalculate-all endpoint.
+
 ## Recent Server Bug Fixes
+
+### Residue Stage-1 Link Validation (2026-11)
+- **Problem**: Completing a residue supersedes its `stage1_attempt_id`, and
+  upload never checked that link. Production had 10 bad links. Five came from
+  2026-03/04 uploads linked to January attempts of unrelated composites;
+  their completions took credit from those composites. The other five
+  appeared when two aliquot sequences merged: the two composites shared a
+  `current_composite`, the stage-1 submit went to the work_id's composite, and
+  the upload's lookup by value picked the other one.
+- **Fix (upload, `store_residue_file`)**: when a stage-1 attempt is given, it
+  pins the composite. The residue's N must be that composite's
+  `current_composite` or `number`. The attempt must be stage-1 only (B2 = 0),
+  at the residue's B1, and not already superseded. Otherwise the upload gets a
+  400 and the client discards it. All 91,578 good links in production satisfy
+  these rules. The superseded check runs after the duplicate check, so a
+  retried upload still gets "Duplicate residue". Uploads with no link use the
+  old lookup unchanged.
+- **Fix (completion, `complete_residue`)**: a stage-1 attempt on another
+  composite, or one already superseded by a different attempt, is left alone
+  and a warning is logged. This covers residues stored before the upload check
+  existed.
+- **Tests**: `TestStage1LinkValidation` and `TestCompletionLeavesBadLinksAlone`
+  in `tests/test_residue_autocomplete.py`.
 
 ### FastAPI/Starlette Security Upgrade (2026-07)
 - **Why**: `pip-audit` reported 24 advisories against `requirements.txt`. The

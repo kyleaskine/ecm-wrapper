@@ -186,7 +186,7 @@ pytest test_factorization.py -v               # Test parsing logic
 ### Binary Dependencies
 - **GMP-ECM**: Configure path in client.yaml `programs.gmp_ecm.path`
 - **YAFU**: Configure path in client.yaml `programs.yafu.path`
-- **t-level binary**: Deployed to `server/bin/t-level` for t-level calculations
+- **t-level**: The server calculates t-levels in-process with the `t-level` Python package (`server/requirements.txt`). `server/bin/t-level` remains as the fallback (`T_LEVEL_BACKEND=binary`).
 - **PARI/GP**: Installed in Docker container for elliptic curve group order calculations
 
 ## ECM Coordination Workflow

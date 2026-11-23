@@ -6,17 +6,23 @@ based on composite size and special form detection.
 """
 import logging
 import math
+import sqlite3
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 
 from ..utils.process_executor import ExternalProgramExecutor
+from . import t_level_library
 
 logger = logging.getLogger(__name__)
+
+# (b1, b2, param) -> total curves; see _aggregate_curve_classes
+CurveTotals = Dict[Tuple[int, Optional[int], int], int]
+
 
 class TLevelCalculator:
     """Calculate target t-levels and ECM parameters for composites."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         # Get t-level binary path from config
         from ..config import get_settings
         settings = get_settings()
@@ -27,7 +33,25 @@ class TLevelCalculator:
             self.T_LEVEL_BINARY,
             binary_name="t-level"
         )
-        self.t_level_available = self.executor.check_binary_exists()
+
+        # In-process library by default; the binary is the fallback, chosen by
+        # setting or used when the package cannot be imported (the library
+        # module logs that once). is_available() imports the package on first
+        # use, so with T_LEVEL_BACKEND=binary it is never loaded.
+        self.use_library = (settings.t_level_backend == "library"
+                            and t_level_library.is_available())
+
+        # Probe the binary only when it may be needed. check_binary_exists()
+        # logs a warning when it is missing, and this class is instantiated per
+        # request, so probing eagerly would warn on every request wherever the
+        # binary is not deployed.
+        self._binary_available: Optional[bool] = None
+        self.t_level_available = self.use_library or self._binary_is_available()
+
+    def _binary_is_available(self) -> bool:
+        if self._binary_available is None:
+            self._binary_available = self.executor.check_binary_exists()
+        return self._binary_available
 
     def calculate_target_t_level(self, digit_length: int,
                                 special_form: Optional[str] = None,
@@ -267,7 +291,7 @@ class TLevelCalculator:
         return None
 
     def get_current_t_level_from_attempts(self, attempts: list,
-                                          starting_t_level: float = 0.0) -> float:
+                                          starting_t_level: float = 0.0) -> Optional[float]:
         """
         Calculate current t-level achieved from previous ECM attempts.
 
@@ -276,7 +300,10 @@ class TLevelCalculator:
             starting_t_level: Base t-level to start from (e.g., prior work done before import)
 
         Returns:
-            Current t-level achieved (includes starting_t_level)
+            Current t-level achieved (includes starting_t_level), or None if it
+            could not be calculated. On None, callers keep the composite's
+            existing current_t_level. Writing starting_t_level instead would
+            throw away the progress recorded so far.
         """
         if not attempts:
             return starting_t_level
@@ -294,51 +321,124 @@ class TLevelCalculator:
             return self._calculate_t_level_estimate(ecm_attempts, starting_t_level)
 
     def _calculate_t_level_external(self, attempts: list,
-                                      starting_t_level: float = 0.0) -> float:
-        """Calculate t-level using external t-level software.
+                                      starting_t_level: float = 0.0) -> Optional[float]:
+        """Calculate t-level with the t-level software: in-process library or binary.
 
         Args:
             attempts: List of ECMAttempt objects
-            starting_t_level: Base t-level to start from (uses -w flag)
+            starting_t_level: Base t-level to start from (the CLI's -w flag)
 
         Returns:
-            Calculated t-level (includes starting_t_level)
+            Calculated t-level (includes starting_t_level), or None on failure.
         """
         try:
-            # Convert attempts to curve string format for t-level executable
             logger.info(
                 f"Processing {len(attempts)} attempts for t-level calculation "
                 f"(starting_t_level={starting_t_level})"
             )
+            aggregated_curves = self._aggregate_curve_classes(attempts)
+            if not aggregated_curves:
+                return starting_t_level
 
-            # Aggregate curves by (B1, B2, parametrization) before formatting.
-            # The t-level of N batches at identical bounds equals one batch of
-            # the summed curves - ECM curves are independent trials with the
-            # same per-curve success probability, so P(no factor) is
-            # (1-p)^(total curves) regardless of how the curves are grouped.
-            # Collapsing keeps the binary's input O(distinct bound-classes)
-            # instead of O(attempts): a composite hammered with hundreds of
-            # identical stage-1 batches otherwise builds a multi-KB curve
-            # string that the binary must parse - all while the caller holds
-            # the composite row lock. B2 None (GMP-ECM default) and B2 0
-            # (stage 1 only) are distinct work and never merge.
-            aggregated_curves: Dict[tuple, int] = {}
-            for attempt in attempts:
-                if attempt.curves_completed <= 0:
-                    continue
-                # Validate required fields
-                if attempt.b1 is None or attempt.b1 <= 0:
-                    logger.error(
-                        f"Skipping attempt with invalid B1: {attempt.b1} "
-                        f"(attempt_id={attempt.id if hasattr(attempt, 'id') else 'unknown'})"
-                    )
-                    continue
+            if starting_t_level > 0 and not (
+                t_level_library.MIN_STARTING_T_LEVEL
+                <= starting_t_level
+                <= t_level_library.MAX_STARTING_T_LEVEL
+            ):
+                # The CLI's -w only accepts 5-100. The server used to give up
+                # on priors outside that range and keep just the prior, throwing
+                # away every ECM attempt. Below 5, a prior is negligible work;
+                # above 100, it cannot be expressed as curves. Either way the
+                # combined t-level is at least the larger of the two parts, so
+                # calculate the attempts alone and take the maximum.
+                attempts_t_level = self._calculate_from_classes(aggregated_curves, 0.0)
+                if attempts_t_level is None:
+                    return None
+                return max(attempts_t_level, starting_t_level)
 
-                # Use actual parametrization from attempt, default to 3 if not set
-                param = attempt.parametrization if attempt.parametrization is not None else 3
-                key = (attempt.b1, attempt.b2, param)
-                aggregated_curves[key] = aggregated_curves.get(key, 0) + attempt.curves_completed
+            return self._calculate_from_classes(aggregated_curves, starting_t_level)
+        except Exception as e:
+            logger.warning(f"External t-level calculation failed: {e}")
+            return None
 
+    def _calculate_from_classes(self, aggregated_curves: CurveTotals,
+                                starting_t_level: float) -> Optional[float]:
+        if self.use_library:
+            return self._calculate_t_level_library(aggregated_curves, starting_t_level)
+        return self._calculate_t_level_binary(aggregated_curves, starting_t_level)
+
+    def _aggregate_curve_classes(self, attempts: list) -> CurveTotals:
+        """Total the curves of each (B1, B2, parametrization) class.
+
+        The t-level of N batches at identical bounds equals one batch of the
+        summed curves. ECM curves are independent trials with the same
+        per-curve success probability, so P(no factor) is (1-p)^(total curves)
+        however the curves are grouped. Collapsing keeps the calculation's input
+        O(distinct bound-classes) instead of O(attempts); a composite hammered
+        with hundreds of identical stage-1 batches would otherwise build a
+        multi-KB curve string, all while the caller holds the composite row
+        lock. B2 None (GMP-ECM default) and B2 0 (stage 1 only) are distinct
+        work and never merge. Insertion order is the order the classes are
+        combined in, as before.
+        """
+        aggregated_curves: CurveTotals = {}
+        for attempt in attempts:
+            if attempt.curves_completed <= 0:
+                continue
+            # Validate required fields
+            if attempt.b1 is None or attempt.b1 <= 0:
+                logger.error(
+                    f"Skipping attempt with invalid B1: {attempt.b1} "
+                    f"(attempt_id={attempt.id if hasattr(attempt, 'id') else 'unknown'})"
+                )
+                continue
+
+            # Use actual parametrization from attempt, default to 3 if not set
+            param = attempt.parametrization if attempt.parametrization is not None else 3
+            key = (attempt.b1, attempt.b2, param)
+            aggregated_curves[key] = aggregated_curves.get(key, 0) + attempt.curves_completed
+        return aggregated_curves
+
+    def _calculate_t_level_library(self, aggregated_curves: CurveTotals,
+                                   starting_t_level: float) -> Optional[float]:
+        """Calculate in-process with the t-level package (cached; see t_level_library)."""
+        classes: List[t_level_library.CurveClass] = [
+            (curves, b1, b2, param) for (b1, b2, param), curves in aggregated_curves.items()
+        ]
+        try:
+            t_level = t_level_library.calculate_t_level(classes, starting_t_level)
+        except sqlite3.Error:
+            # The package's bundled probability database failed: an
+            # infrastructure fault, not a property of this input. The binary
+            # carries its own copy, so it can still answer.
+            logger.exception(
+                "t-level package database error; falling back to the t-level binary"
+            )
+            if self._binary_is_available():
+                return self._calculate_t_level_binary(aggregated_curves, starting_t_level)
+            return None
+        except Exception:
+            # Anything else depends on this input. The binary runs the same
+            # calculation and would fail the same way, so retrying there would
+            # only add a 200-1,400 ms process spawn to every recalculation.
+            logger.exception(f"In-process t-level calculation failed for {classes}")
+            return None
+
+        if t_level is None:
+            # Input the CLI would also have rejected (the library module logged why).
+            return None
+
+        work = f" (starting from t{starting_t_level})" if starting_t_level > 0 else ""
+        logger.info(f"In-process t-level calculation{work}: {classes} -> t{t_level:.3f}")
+        return t_level
+
+    def _calculate_t_level_binary(self, aggregated_curves: CurveTotals,
+                                  starting_t_level: float) -> Optional[float]:
+        """Calculate by piping a curve string to the t-level binary (the fallback).
+
+        Returns None on failure. Callers pass a non-empty aggregated_curves.
+        """
+        try:
             curve_strings = []
             for (b1, b2, param), curves in aggregated_curves.items():
                 # Format: curves@B1[,B2],p=param
@@ -353,19 +453,8 @@ class TLevelCalculator:
                     # No B2 specified - let t-level binary use GMP-ECM defaults
                     curve_strings.append(f"{curves}@{b1_str},p={param}")
 
-            if not curve_strings:
-                return starting_t_level
-
             # Join with semicolons for multiple entries
             input_string = ";".join(curve_strings)
-
-            # Defensive check: ensure input_string is not empty or just semicolons
-            if not input_string or not input_string.strip() or input_string.strip(";").strip() == "":
-                logger.error(
-                    f"Generated empty curve string from {len(curve_strings)} curve_strings "
-                    f"(curve_strings={curve_strings}), returning starting t-level {starting_t_level}"
-                )
-                return starting_t_level
 
             logger.info(
                 f"Generated {len(curve_strings)} valid curve strings: {input_string}"
@@ -391,7 +480,7 @@ class TLevelCalculator:
             )
 
             if not success or not output:
-                return starting_t_level
+                return None
 
             # Parse output: expected format is "t45.185"
             if output.startswith('t'):
@@ -403,23 +492,22 @@ class TLevelCalculator:
                 return t_level
             else:
                 logger.warning(f"Unexpected t-level output format: {output}")
-                return starting_t_level
+                return None
 
         except Exception as e:
             logger.warning(f"External t-level calculation failed: {e}")
-            return starting_t_level
+            return None
 
     def _calculate_t_level_estimate(self, attempts: list,
-                                     starting_t_level: float = 0.0) -> float:
+                                     starting_t_level: float = 0.0) -> Optional[float]:
         """
-        Fallback t-level estimation when external calculator unavailable.
+        Fallback when neither the t-level package nor the binary is available.
 
-        Returns starting_t_level for now - proper calculation requires the external t-level binary.
+        Returns None, meaning not calculated. Without the probability tables,
+        any estimate would be misleading, and callers keep the existing value.
         """
-        # Without proper probability tables, any estimate would be misleading
-        # Better to return starting_t_level and rely on the external calculator
-        logger.info("Using fallback t-level estimation (returns starting_t_level)")
-        return starting_t_level
+        logger.warning("No t-level backend available (package or binary); t-level not calculated")
+        return None
 
     def recalculate_composite_t_level(self, db, composite) -> float:
         """
@@ -548,6 +636,16 @@ class TLevelCalculator:
 
         # Calculate new t-level, starting from prior work
         new_t_level = self.get_current_t_level_from_attempts(attempts, starting_t_level)
+
+        if new_t_level is None:
+            # The calculation failed (already logged). Keep the last good value;
+            # falling back to the prior would discard recorded progress and
+            # make the composite look under-worked.
+            logger.warning(
+                f"T-level recalculation failed for composite {composite.id}; "
+                f"keeping current t{composite.current_t_level}"
+            )
+            return composite.current_t_level
 
         # Update composite
         composite.current_t_level = new_t_level

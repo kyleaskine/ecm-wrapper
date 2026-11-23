@@ -49,10 +49,15 @@ class ECMParameterDecision:
         # Calculate current t-level from attempts, starting from prior_t_level if set
         # This gives us the true current position (prior work + work in this system)
         starting_t = composite.prior_t_level or 0.0
-        current_t = self.t_level_calc.get_current_t_level_from_attempts(
+        calculated_t = self.t_level_calc.get_current_t_level_from_attempts(
             previous_attempts, starting_t_level=starting_t
         )
-        composite.current_t_level = current_t
+        if calculated_t is None:
+            # Calculation failed (logged): keep the stored value
+            current_t = composite.current_t_level
+        else:
+            current_t = calculated_t
+            composite.current_t_level = current_t
 
         # Get suggestions based on current t-level (which now includes prior)
         suggestion = self.t_level_calc.suggest_next_ecm_parameters(

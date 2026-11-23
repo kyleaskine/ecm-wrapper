@@ -1550,3 +1550,176 @@ class TestDuplicateResponseTLevelReporting:
         assert second["residue_completed"] is True
         # Recalc was swallowed -> must not surface a stale t-level
         assert second["new_t_level"] is None
+
+
+def _gmp_residue_line(n: int, b1: int = 50000, sigma: int = 12345,
+                      param: int = 3, x: int = 0x1ABCD) -> bytes:
+    """One valid GMP-ECM residue line (checksum per ecm-ecm.h)."""
+    chkconst = 4294967291  # GMP-ECM's CHKSUMMOD
+    chk = (b1 * (sigma % chkconst) * (n % chkconst) * (x % chkconst)
+           * (param + 1)) % chkconst
+    return (f"METHOD=ECM; B1={b1}; N={n}; SIGMA={sigma}; PARAM={param}; "
+            f"X={hex(x)}; CHECKSUM={chk};\n").encode()
+
+
+def _add_attempt(db, composite_id: int, b1: int = B1, b2: int = 0,
+                 checksum: str = None, superseded_by: int = None) -> int:
+    attempt = ECMAttempt(
+        composite_id=composite_id,
+        client_id="gpu-producer",
+        method="ecm",
+        b1=b1,
+        b2=b2,
+        parametrization=3,
+        curves_requested=CURVES,
+        curves_completed=CURVES,
+        program="gmp-ecm",
+        residue_checksum=checksum,
+        superseded_by=superseded_by,
+    )
+    db.add(attempt)
+    db.flush()
+    return attempt.id
+
+
+class TestStage1LinkValidation:
+    """Completing a residue supersedes its stage-1 attempt, so a wrong link
+    takes credit from another composite. Production had both kinds: a
+    residue for one of two composites sharing a cofactor (merged aliquot
+    sequences) stored on the other one, and residues linked to old attempts
+    of unrelated composites."""
+
+    N = 1000073001431003663
+
+    def _manager(self, tmp_path):
+        from app.services.residue_manager import ResidueManager
+        manager = ResidueManager()
+        manager.storage_dir = tmp_path
+        return manager
+
+    def test_attempt_pins_composite_when_numbers_collide(self, db_session, tmp_path):
+        create_composite("aliquot:564:i3575", current_composite=str(self.N),
+                         digit_length=19)
+        second = create_composite("aliquot:3336:i3571",
+                                  current_composite=str(self.N), digit_length=19)
+        attempt_id = _add_attempt(db_session, second["id"])
+
+        residue = self._manager(tmp_path).store_residue_file(
+            db_session, _gmp_residue_line(self.N), "gpu-producer",
+            stage1_attempt_id=attempt_id
+        )
+
+        assert residue.composite_id == second["id"]
+
+    def test_attempt_of_other_composite_rejected(self, db_session, tmp_path):
+        create_composite(str(self.N))
+        other = create_composite(COMPOSITE)
+        attempt_id = _add_attempt(db_session, other["id"])
+
+        with pytest.raises(ValueError, match=f"belongs to composite {other['id']}"):
+            self._manager(tmp_path).store_residue_file(
+                db_session, _gmp_residue_line(self.N), "gpu-producer",
+                stage1_attempt_id=attempt_id
+            )
+        db_session.rollback()
+        assert list(tmp_path.rglob("*.txt")) == []
+
+    @pytest.mark.parametrize("b1,b2", [(11_000_000, 0), (B1, 5_000_000), (B1, None)])
+    def test_attempt_that_is_not_this_stage1_rejected(self, db_session, tmp_path, b1, b2):
+        composite = create_composite(str(self.N))
+        attempt_id = _add_attempt(db_session, composite["id"], b1=b1, b2=b2)
+
+        with pytest.raises(ValueError, match="not a stage-1-only run"):
+            self._manager(tmp_path).store_residue_file(
+                db_session, _gmp_residue_line(self.N), "gpu-producer",
+                stage1_attempt_id=attempt_id
+            )
+        db_session.rollback()
+        assert list(tmp_path.rglob("*.txt")) == []
+
+    def test_superseded_attempt_rejected_but_retry_is_duplicate(self, db_session, tmp_path):
+        composite = create_composite(str(self.N))
+        attempt_id = _add_attempt(db_session, composite["id"])
+        manager = self._manager(tmp_path)
+        content = _gmp_residue_line(self.N)
+        manager.store_residue_file(db_session, content, "gpu-producer",
+                                   stage1_attempt_id=attempt_id)
+        stage2_id = _add_attempt(db_session, composite["id"], b2=B2)
+        db_session.query(ECMAttempt).filter(ECMAttempt.id == attempt_id).update(
+            {"superseded_by": stage2_id})
+        db_session.commit()
+
+        with pytest.raises(ValueError, match="already superseded"):
+            manager.store_residue_file(
+                db_session, _gmp_residue_line(self.N, sigma=999), "gpu-producer",
+                stage1_attempt_id=attempt_id
+            )
+        db_session.rollback()
+
+        # An identical retry still gets the answer the client treats as success
+        with pytest.raises(ValueError, match="Duplicate residue"):
+            manager.store_residue_file(db_session, content, "gpu-producer",
+                                       stage1_attempt_id=attempt_id)
+        db_session.rollback()
+
+
+class TestCompletionLeavesBadLinksAlone:
+    """Residues stored before upload validated the link can still carry a
+    bad one; completing them must not supersede the attempt it points at."""
+
+    def _claimed_residue(self, db, composite_id: int, stage1_id: int,
+                         checksum: str) -> int:
+        residue = ECMResidue(
+            composite_id=composite_id,
+            client_id="gpu-producer",
+            stage1_attempt_id=stage1_id,
+            b1=B1,
+            parametrization=3,
+            curve_count=CURVES,
+            storage_path=f"/nonexistent/residue_{checksum[:8]}.txt",
+            file_size_bytes=1234,
+            checksum=checksum,
+            status="claimed",
+            claimed_by="test-client",
+            claimed_at=datetime.utcnow(),
+            expires_at=datetime.utcnow() + timedelta(hours=24),
+        )
+        db.add(residue)
+        db.flush()
+        return residue.id
+
+    def test_other_composites_attempt_not_superseded(self, db_session):
+        from app.services.residue_manager import ResidueManager
+
+        composite = create_composite(COMPOSITE)
+        other = create_composite("1000073001431003663")
+        foreign_stage1 = _add_attempt(db_session, other["id"])
+        residue_id = self._claimed_residue(db_session, composite["id"],
+                                           foreign_stage1, CHECKSUM)
+        stage2_id = _add_attempt(db_session, composite["id"], b2=B2,
+                                 checksum=CHECKSUM)
+
+        residue, _ = ResidueManager().complete_residue(db_session, residue_id, stage2_id)
+        db_session.commit()
+
+        assert residue.status == "completed"
+        assert get_attempt(foreign_stage1)["superseded_by"] is None
+
+    def test_earlier_supersession_not_moved(self, db_session):
+        from app.services.residue_manager import ResidueManager
+
+        composite = create_composite(COMPOSITE)
+        first_stage2 = _add_attempt(db_session, composite["id"], b2=B2,
+                                    checksum="b" * 64)
+        stage1 = _add_attempt(db_session, composite["id"],
+                              superseded_by=first_stage2)
+        residue_id = self._claimed_residue(db_session, composite["id"],
+                                           stage1, CHECKSUM)
+        stage2_id = _add_attempt(db_session, composite["id"], b2=B2,
+                                 checksum=CHECKSUM)
+
+        residue, _ = ResidueManager().complete_residue(db_session, residue_id, stage2_id)
+        db_session.commit()
+
+        assert residue.status == "completed"
+        assert get_attempt(stage1)["superseded_by"] == first_stage2

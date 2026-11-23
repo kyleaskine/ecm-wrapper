@@ -762,3 +762,45 @@ class TestCompositeLockDeletedRace:
             assert exc_info.value.status_code == 409
         finally:
             db.close()
+
+
+class TestSubmitStageBounds:
+    """B1/B2 bounds: an unbounded class could break every later t-level recalculation."""
+
+    @staticmethod
+    def _submit(client, composite, method="ecm", **parameters):
+        return client.post(
+            "/api/v1/submit_result",
+            json={
+                "composite": composite["current_composite"],
+                "client_id": "test-client",
+                "method": method,
+                "program": "gmp-ecm",
+                "parameters": {"curves": 10, **parameters},
+                "results": {"curves_completed": 10},
+            },
+        )
+
+    @pytest.mark.parametrize("parameters", [
+        {"b1": 10**15 + 1},                 # above MAX_B1
+        {"b1": -1},
+        {"b1": 50000, "b2": 2**63},         # does not fit the BIGINT column
+        {"b1": 50000, "b2": -2},            # only -1 has a meaning
+    ])
+    def test_out_of_range_bounds_rejected(self, client, parameters):
+        composite = create_composite("12345678901234567890", digit_length=20)
+        assert self._submit(client, composite, **parameters).status_code == 422
+
+    def test_b2_minus_one_is_stored_as_default(self, client, db_session):
+        # The client's "-1 = GMP-ECM default" sentinel can reach the API unchanged
+        from app.models.attempts import ECMAttempt
+        composite = create_composite("12345678901234567890", digit_length=20)
+        response = self._submit(client, composite, b1=50000, b2=-1)
+        assert response.status_code == 200
+        attempt = db_session.get(ECMAttempt, response.json()["attempt_id"])
+        assert attempt.b2 is None
+
+    def test_zero_b1_accepted_for_nfs(self, client):
+        # NFS results carry b1=0 (production has such rows)
+        composite = create_composite("12345678901234567890", digit_length=20)
+        assert self._submit(client, composite, method="nfs", b1=0).status_code == 200

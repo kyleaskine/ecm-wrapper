@@ -98,7 +98,8 @@ def calculate_t_levels_for_all_composites(
                 current_t = calculator.get_current_t_level_from_attempts(
                     previous_attempts, starting_t_level=starting_t
                 )
-                if current_t != composite.current_t_level:
+                # None: the calculation failed (logged); keep the stored value
+                if current_t is not None and current_t != composite.current_t_level:
                     composite.current_t_level = current_t
                     current_t_updated += 1
 
@@ -177,7 +178,8 @@ def _recalculate_all_t_levels_background():
                 current_t = calculator.get_current_t_level_from_attempts(
                     previous_attempts, starting_t_level=starting_t
                 )
-                if current_t != composite.current_t_level:
+                # None: the calculation failed (logged); keep the stored value
+                if current_t is not None and current_t != composite.current_t_level:
                     composite.current_t_level = current_t
                     current_t_updated += 1
 

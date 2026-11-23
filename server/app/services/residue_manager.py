@@ -230,6 +230,42 @@ class ResidueManager:
             ECMResidue.checksum == checksum
         ).first()
 
+    @staticmethod
+    def _check_stage1_link(
+        stage1_attempt_id: Optional[int],
+        stage1: Any,
+        composite: Optional[Composite],
+        composite_number: str,
+        residue_b1: int
+    ) -> None:
+        """
+        Reject a residue whose stage-1 attempt cannot be the one that produced it.
+
+        Completing a residue supersedes its stage-1 attempt, so a wrong link
+        removes another attempt's credit from its composite's t-level. Every
+        correct link in production has the residue's composite, its B1, and
+        a stage-1-only attempt (B2 = 0).
+
+        Raises:
+            ValueError: the link is wrong (-> 400, the client discards)
+        """
+        if composite is None:
+            raise ValueError(
+                f"Composite of stage 1 attempt {stage1_attempt_id} not found in database"
+            )
+        if composite_number not in (composite.current_composite, composite.number):
+            raise ValueError(
+                f"Stage 1 attempt {stage1_attempt_id} belongs to composite "
+                f"{composite.id}, which is not the residue's number "
+                f"{composite_number[:50]}...; residue cannot be stored"
+            )
+        if stage1.b1 != residue_b1 or stage1.b2 != 0:
+            raise ValueError(
+                f"Stage 1 attempt {stage1_attempt_id} (B1={stage1.b1}, B2={stage1.b2}) "
+                f"is not a stage-1-only run at the residue's B1={residue_b1}; "
+                "residue cannot be stored"
+            )
+
     def store_residue_file(
         self,
         db: Session,
@@ -262,16 +298,46 @@ class ResidueManager:
         metadata = self.parse_residue_file(file_content, b1)
         composite_number = metadata['composite']
 
-        # Look up composite in database
-        composite = db.query(Composite).filter(
-            Composite.current_composite == composite_number
-        ).first()
+        # If a stage-1 attempt was referenced, make sure it still exists. When a
+        # composite is factored or cleaned up its ECM attempts are removed,
+        # leaving the client holding a residue whose stage1_attempt_id now
+        # dangles. Inserting it would violate the foreign key and surface as an
+        # opaque 500; reject cleanly so the client discards instead of retrying
+        # forever.
+        stage1 = None
+        if stage1_attempt_id is not None:
+            stage1 = db.query(
+                ECMAttempt.composite_id, ECMAttempt.b1, ECMAttempt.b2,
+                ECMAttempt.superseded_by
+            ).filter(ECMAttempt.id == stage1_attempt_id).first()
+            if stage1 is None:
+                raise ValueError(
+                    f"Stage 1 attempt {stage1_attempt_id} no longer exists "
+                    "(composite likely factored or cleaned up); residue cannot be stored"
+                )
 
-        if not composite:
-            # Try matching by number field as fallback
+        if stage1 is not None:
+            # The stage-1 attempt pins the composite. current_composite is not
+            # unique (two aliquot sequences that merge share a cofactor), so a
+            # lookup by value can pick the other row; the attempt was recorded
+            # against the composite the work was assigned for.
             composite = db.query(Composite).filter(
-                Composite.number == composite_number
+                Composite.id == stage1.composite_id
             ).first()
+            self._check_stage1_link(
+                stage1_attempt_id, stage1, composite, composite_number, metadata['b1']
+            )
+        else:
+            # Look up composite in database
+            composite = db.query(Composite).filter(
+                Composite.current_composite == composite_number
+            ).first()
+
+            if not composite:
+                # Try matching by number field as fallback
+                composite = db.query(Composite).filter(
+                    Composite.number == composite_number
+                ).first()
 
         if not composite:
             raise ValueError(f"Composite {composite_number[:50]}... not found in database")
@@ -283,22 +349,6 @@ class ResidueManager:
             raise ValueError(
                 f"Composite {composite.id} is already fully factored; residue not needed"
             )
-
-        # If a stage-1 attempt was referenced, make sure it still exists. When a
-        # composite is factored or cleaned up its ECM attempts are removed,
-        # leaving the client holding a residue whose stage1_attempt_id now
-        # dangles. Inserting it would violate the foreign key and surface as an
-        # opaque 500; reject cleanly so the client discards instead of retrying
-        # forever.
-        if stage1_attempt_id is not None:
-            attempt_exists = db.query(ECMAttempt.id).filter(
-                ECMAttempt.id == stage1_attempt_id
-            ).first()
-            if not attempt_exists:
-                raise ValueError(
-                    f"Stage 1 attempt {stage1_attempt_id} no longer exists "
-                    "(composite likely factored or cleaned up); residue cannot be stored"
-                )
 
         # Generate unique filename
         import uuid
@@ -316,6 +366,16 @@ class ResidueManager:
         existing = self._find_duplicate_residue(db, checksum)
         if existing:
             raise ValueError(f"Duplicate residue file (checksum matches residue ID {existing.id})")
+
+        # A stage-1 attempt is superseded when the residue linked to it is
+        # completed, so one that already is belongs to another residue.
+        # Completing this one would move that supersession. Checked after the
+        # duplicate check so a retried upload still gets the duplicate answer.
+        if stage1 is not None and stage1.superseded_by is not None:
+            raise ValueError(
+                f"Stage 1 attempt {stage1_attempt_id} is already superseded by "
+                f"attempt {stage1.superseded_by}; it cannot be linked to another residue"
+            )
 
         # Write file to storage
         file_path.write_bytes(file_content)
@@ -838,12 +898,30 @@ class ResidueManager:
             )
             raise ValueError(f"Invalid stage 2 completion: {rejection}")
 
-        # Mark stage 1 attempt as superseded (if linked)
+        # Mark stage 1 attempt as superseded (if linked). Upload validates the
+        # link, but residues stored before that check can still point at
+        # another composite's attempt, or at one another residue's completion
+        # already superseded. Superseding those would remove credit from the
+        # wrong composite or move an earlier supersession, so leave them.
         if residue.stage1_attempt_id:
             stage1_attempt = db.query(ECMAttempt).filter(
                 ECMAttempt.id == residue.stage1_attempt_id
             ).first()
-            if stage1_attempt:
+            if stage1_attempt is None:
+                pass
+            elif stage1_attempt.composite_id != residue.composite_id:
+                logger.warning(
+                    f"Residue {residue_id} links stage 1 attempt {stage1_attempt.id} "
+                    f"of composite {stage1_attempt.composite_id}, not composite "
+                    f"{residue.composite_id}; not superseding it"
+                )
+            elif stage1_attempt.superseded_by not in (None, stage2_attempt_id):
+                logger.warning(
+                    f"Stage 1 attempt {stage1_attempt.id} of residue {residue_id} is "
+                    f"already superseded by attempt {stage1_attempt.superseded_by}; "
+                    f"not superseding it with {stage2_attempt_id}"
+                )
+            else:
                 stage1_attempt.superseded_by = stage2_attempt_id
                 db.flush()  # Ensure supersession is visible to subsequent queries
                 logger.info(
