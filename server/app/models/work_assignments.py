@@ -70,6 +70,7 @@ class WorkAssignment(Base, TimestampMixin):
         Index('ix_work_assignments_status_priority', 'status', 'priority'),
         Index('ix_work_assignments_expires_at', 'expires_at'),
         Index('ix_work_assignments_composite_method', 'composite_id', 'method'),
+        Index('ix_work_assignments_created_at', 'created_at'),  # newest-first listings
         # At most one active assignment per composite. The work-request
         # endpoints exclude busy composites with NOT EXISTS filters, but those
         # are evaluated against the statement snapshot and can be stale when

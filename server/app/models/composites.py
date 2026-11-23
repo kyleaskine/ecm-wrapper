@@ -1,13 +1,16 @@
 from typing import Optional
-from sqlalchemy import String, Boolean, Text, Float, Index, Computed
+from sqlalchemy import String, Boolean, Text, Float, Index, Computed, text
 from sqlalchemy.orm import Mapped, mapped_column
 from .base import Base, TimestampMixin
+
+# Composites /ecm-work can assign (predicate of the partial work indexes)
+_ECM_WORK = "is_active AND NOT is_fully_factored AND ecm_progress < 1.0"
 
 
 class Composite(Base, TimestampMixin):
     __tablename__ = "composites"
 
-    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(primary_key=True)
     number: Mapped[str] = mapped_column(Text, nullable=False, unique=True)  # Original mathematical form (e.g., "2^1223-1")
     current_composite: Mapped[str] = mapped_column(Text, nullable=False)  # Current composite being factored (gets smaller as we find factors) - hash index added in migration
     digit_length: Mapped[int] = mapped_column(nullable=False, index=True)
@@ -43,4 +46,14 @@ class Composite(Base, TimestampMixin):
         Index('ix_composites_t_level_progress', 'target_t_level', 'current_t_level'),
         Index('ix_composites_priority_work', 'priority', 'is_fully_factored'),
         Index('ix_composites_active_status', 'is_active', 'is_fully_factored'),  # For work assignment queries
+        # Work assignment (/ecm-work standard and progressive, /p1-work). The
+        # queries' filters imply these predicates, so the planner skips the
+        # factored composites instead of discarding them row by row.
+        Index('ix_composites_ecm_work_standard', 'target_t_level', 'created_at',
+              postgresql_where=text(_ECM_WORK)),
+        Index('ix_composites_ecm_work_progressive', 'current_t_level', 'target_t_level', 'digit_length',
+              postgresql_where=text(_ECM_WORK)),
+        Index('ix_composites_p1_work', 'target_t_level', 'created_at',
+              postgresql_where=text("is_active AND NOT is_fully_factored")),
+        Index('ix_composites_created_at', 'created_at'),  # newest-first listings
     )

@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 class Factor(Base, TimestampMixin):
     __tablename__ = "factors"
 
-    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(primary_key=True)
     composite_id: Mapped[int] = mapped_column(ForeignKey("composites.id"), nullable=False)
     factor: Mapped[str] = mapped_column(Text, nullable=False)  # Store as string for arbitrary precision
     is_prime: Mapped[Optional[bool]] = mapped_column(Boolean, default=None, nullable=True)  # NULL until primality tested
@@ -28,4 +28,5 @@ class Factor(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint('composite_id', 'factor', name='unique_composite_factor'),
         Index('ix_factors_created_at', 'created_at'),  # dashboard 24h counts / recent-first ordering
+        Index('ix_factors_found_by_attempt_id', 'found_by_attempt_id'),  # FK checks, factor-by-attempt lookups
     )

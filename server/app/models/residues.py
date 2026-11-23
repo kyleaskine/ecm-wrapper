@@ -22,7 +22,7 @@ class ECMResidue(Base, TimestampMixin):
     """
     __tablename__ = "ecm_residues"
 
-    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(primary_key=True)
     composite_id: Mapped[int] = mapped_column(ForeignKey("composites.id"), nullable=False)
 
     # Who uploaded this residue
@@ -73,4 +73,5 @@ class ECMResidue(Base, TimestampMixin):
         Index('ix_ecm_residues_composite_status', 'composite_id', 'status'),
         Index('ix_ecm_residues_expires_at', 'expires_at'),
         Index('ix_ecm_residues_created_at', 'created_at'),
+        Index('ix_ecm_residues_stage1_attempt_id', 'stage1_attempt_id'),  # FK checks when an attempt is deleted
     )

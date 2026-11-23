@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional, TYPE_CHECKING
-from sqlalchemy import String, Text, ForeignKey, Float, BigInteger, DateTime, Index
+from sqlalchemy import String, Text, ForeignKey, Float, BigInteger, DateTime, Index, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .base import Base, TimestampMixin
 import hashlib
@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 class ECMAttempt(Base, TimestampMixin):
     __tablename__ = "ecm_attempts"
 
-    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(primary_key=True)
     composite_id: Mapped[int] = mapped_column(ForeignKey("composites.id"), nullable=False)
     client_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     client_ip: Mapped[Optional[str]] = mapped_column(String(45), nullable=True, index=True)  # IPv4 or IPv6
@@ -26,7 +26,7 @@ class ECMAttempt(Base, TimestampMixin):
     curves_completed: Mapped[int] = mapped_column(nullable=False)
 
     # Duplicate detection hash
-    work_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True, unique=True)  # SHA-256 hash
+    work_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, unique=True)  # SHA-256 hash
 
     # Results
     factor_found: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # NULL if no factor found
@@ -113,10 +113,17 @@ class ECMAttempt(Base, TimestampMixin):
         )
 
     # Indexes for common queries
-    # Note: work_hash index is created automatically via unique=True on the column
+    # Note: work_hash is indexed by its unique constraint (ecm_attempts_work_hash_key)
     __table_args__ = (
         Index('ix_ecm_attempts_composite_method', 'composite_id', 'method'),
         Index('ix_ecm_attempts_client_status', 'client_id', 'status'),
         Index('ix_ecm_attempts_factor_found', 'factor_found'),
         Index('ix_ecm_attempts_created_at', 'created_at'),  # dashboard 24h counts / recent-first ordering
+        # P-1/P+1 coverage per composite (/p1-work, P-1 dashboard page)
+        Index('ix_ecm_attempts_p1_coverage', 'composite_id', 'method', 'b1',
+              postgresql_include=['curves_completed'],
+              postgresql_where=text("method IN ('pm1', 'pp1')")),
+        # Foreign-key checks when an attempt is deleted
+        Index('ix_ecm_attempts_superseded_by', 'superseded_by',
+              postgresql_where=text("superseded_by IS NOT NULL")),
     )

@@ -147,7 +147,8 @@ P-1/P+1 assignment defaults remain one day.
   - Returns: `work_id`, `composite`, `pm1_b1`, `pp1_b1`, etc.
 - Server calculates B1 one step above target t-level
 - Filters out composites that already have PM1/PP1 at the required B1 level
-  - Uses SQL `NOT EXISTS` subqueries against `ecm_attempts` (hits composite_id,method index)
+  - Uses SQL `NOT EXISTS` subqueries against `ecm_attempts` (partial index `ix_ecm_attempts_p1_coverage`)
+  - Walks `ix_composites_p1_work` from the lowest target, so the cost grows with the number of already-covered composites at the low end (13,370, ~30 ms, in the 2026-11-16 dump)
   - No `ecm_progress < 1.0` filter — PM1/PP1 valuable even after ECM target reached
 - Skips busy composites exactly like `/ecm-work` (shared `_exclude_busy_composites`):
   active work assignments **and** pending residues (`available`/`claimed`).

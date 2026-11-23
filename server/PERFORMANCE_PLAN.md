@@ -290,6 +290,24 @@ from this item. That is fine unless some client uses it.
 copy shows the new index and under 200 buffers. The ordering and the row
 returned are unchanged. `tests/test_work_assignment_race.py` passes.
 
+**Implemented 2026-11-23** with item 3 and item 8's unconditional drops, as
+migration `f6204945eb74` (CONCURRENTLY, IF [NOT] EXISTS). The SQL captured from
+the real endpoints on the copy, run under `EXPLAIN (ANALYZE, BUFFERS)`:
+
+| Query | Buffers | Time (warm) |
+|---|---|---|
+| `/ecm-work` standard | 80 | 0.4 ms |
+| `/ecm-work` progressive | 76 | 0.1 ms |
+| `/p1-work` (`method=p1`) | 155,000 → 52,000 | 62 → 30 ms |
+
+`/p1-work` misses the target. The 62 buffers in the evidence table above do
+not reproduce against the endpoint's SQL. The scan still passes 13,370
+low-target composites that the P-1 sweep has already covered, and each one
+costs a coverage probe (40,000 of the 52,000 buffers). An index cannot skip
+them: the coverage test compares `b1` with a CASE on the composite's own
+`target_t_level`. Fixing it would need a stored "P-1 done to B1" value on
+`composites`, or a sweep cursor. That would be a separate item.
+
 ### 3. Missing indexes on foreign-key and sort columns
 
 **Problem.** Three columns that reference `ecm_attempts.id` have no index, so
@@ -316,7 +334,8 @@ CREATE INDEX ix_composites_created_at ON composites (created_at);
 and `services/composites.py`.
 
 **Acceptance.** `EXPLAIN ANALYZE DELETE` of one attempt on the production copy
-shows each constraint trigger under 1 ms.
+shows each constraint trigger under 1 ms. Met on 2026-11-23 (migration
+`f6204945eb74`): the three triggers take 0.19, 0.04 and 0.04 ms.
 
 ### 4. Dashboard queries and caching
 
@@ -644,9 +663,10 @@ After deploying index migrations, run `ANALYZE` once on `composites`,
 ## 6. Suggested sequencing
 
 1. Items 2 and 3 in one migration: indexes only, no code paths change.
-2. Item 1 (implemented 2026-11-18, not yet deployed). Run item 7's log check
-   before deploying it. If the restarts are frequent, ship item 7 in the same
-   release.
+   Implemented 2026-11-23 as `f6204945eb74`, together with item 8's
+   unconditional drops.
+2. Item 1 (deployed 2026-11-23, with the stale t-levels recalculated). The
+   restarts happen about every 20 hours, so item 7 can follow on its own.
 3. Item 5, then item 6.
 4. Item 10.
 5. Item 4.
