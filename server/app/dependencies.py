@@ -9,7 +9,7 @@ Provides reusable dependencies for:
 
 import secrets
 from typing import Optional
-from fastapi import Header, HTTPException, status, Depends
+from fastapi import Header, HTTPException, status
 from .config import get_settings
 
 settings = get_settings()
@@ -102,29 +102,16 @@ def get_project_service():
     return ProjectService()
 
 
-def get_work_service(settings_dep=Depends(get_settings)):
+def get_work_service():
     """
-    Dependency for work assignment service injection.
-
-    Args:
-        settings_dep: Settings dependency (automatically injected)
+    Dependency for work assignment service injection (claim, start,
+    progress, complete and abandon of existing assignments).
 
     Returns:
-        WorkAssignmentService instance configured with settings
-
-    Example:
-        @router.get("/work")
-        async def get_work(
-            client_id: str,
-            work_service: WorkAssignmentService = Depends(get_work_service)
-        ):
-            return work_service.get_work_for_client(db, client_id)
+        WorkAssignmentService instance
     """
     from .services.work_assignment import WorkAssignmentService
-    return WorkAssignmentService(
-        default_timeout_minutes=settings_dep.default_work_timeout_minutes,
-        max_work_per_client=settings_dep.max_work_items_per_client
-    )
+    return WorkAssignmentService()
 
 
 def get_t_level_calculator():

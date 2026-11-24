@@ -13,7 +13,7 @@ import logging
 from datetime import datetime
 from typing import Optional, Tuple, Dict, Any, List, Union, cast
 
-from sqlalchemy.orm import Session, defer, joinedload
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, func, or_, case
 
 from ..models.composites import Composite
@@ -753,9 +753,7 @@ class CompositeService:
             return None
 
         # Get attempts (exclude superseded stage 1 attempts)
-        attempts = db.query(ECMAttempt).options(
-            defer(ECMAttempt.raw_output)
-        ).filter(
+        attempts = db.query(ECMAttempt).filter(
             ECMAttempt.composite_id == composite_id,
             ECMAttempt.superseded_by.is_(None)
         ).order_by(ECMAttempt.created_at.desc()).all()
@@ -967,9 +965,7 @@ class CompositeService:
             Dictionary with method-specific statistics
         """
         # Get ALL attempts for display (including superseded)
-        all_attempts = db.query(ECMAttempt).options(
-            defer(ECMAttempt.raw_output)
-        ).filter(
+        all_attempts = db.query(ECMAttempt).filter(
             ECMAttempt.composite_id == composite_id
         ).all()
 

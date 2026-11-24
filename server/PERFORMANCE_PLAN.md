@@ -133,8 +133,8 @@ are in place, and the equivalence checks above were re-run on the final code:
 - Only `sqlite3.Error` retries with the binary. Input-dependent errors fail
   the same way in the binary, so they are not retried.
 - A failed calculation now keeps the stored `current_t_level` instead of
-  writing the prior. This covers the recalculation, maintenance and legacy
-  `/work` paths.
+  writing the prior. This covers the recalculation and maintenance paths
+  (and the legacy `GET /work`, since removed).
 - Priors outside 5–100 now give max(attempts, prior). Before, every ECM
   attempt was discarded. No production composite is affected.
 - Submissions bound `b1` to 0–1e15 and `b2` to the BIGINT range, and `b2 = -1`
@@ -415,6 +415,16 @@ e. **Leaderboard** (`web.py:761`). Five queries over the same window. Three of
    them (total curves, active clients, top contributors) can be one grouped
    query. Item b makes this less pressing.
 
+**Correctness fixes to fold in** (found by the 2026-11-23 reviews; both are in
+`get_aggregated_attempts`, `app/utils/query_helpers.py`):
+- The grouped `/curves` view loads the `limit * attempts_per_composite` most
+  recent attempts overall, not up to that many per composite. One busy
+  composite can fill all 1,250 slots and leave the other rows empty. Rank per
+  composite with `row_number() OVER (PARTITION BY composite_id ...)`.
+- `?client_id=` only picks which composites appear. The aggregates and the
+  detail rows still include every client's attempts. Filter both on
+  `client_id` too.
+
 **Acceptance.** On the appendix benchmark: public dashboard under 150 ms
 uncached and under 5 ms cached, admin dashboard under 250 ms, P-1 status page
 under 200 ms with identical content. These are targets, not measurements. `tests/test_html_pages.py` passes.
@@ -444,6 +454,25 @@ options become redundant and can go.
 any dashboard page names `raw_output`. The purge endpoint in
 `admin/maintenance.py` still works.
 
+**Implemented 2026-11-23.**
+- The column is `deferred=True`, and the 12 per-query `defer()` options are
+  gone.
+- `db.refresh(attempt)` is removed from submit. SQLAlchemy 2.0's INSERT
+  already ends `RETURNING id, created_at, updated_at`, so the refresh re-read
+  nothing new. A refresh never reloads a deferred column; it expires it.
+- `Query.count()` on the `ECMAttempt` entity still named the column, because
+  it wraps every column in a subquery. Four counts now count `ECMAttempt.id`
+  instead: the public dashboard total, the `/curves` ungrouped total and the
+  two 24-hour counts. On the copy, the public one read only the in-row TOAST
+  pointers (12,352 buffers, the heap's size), not the outputs.
+- `tests/test_raw_output_deferred.py` checks the acceptance criteria. It
+  covers new, factor, duplicate and residue-completing submissions, and 19
+  public and admin pages. It also checks that the output is still stored and
+  that the cleanup endpoint clears only old rows. All 76 distinct SELECTs from
+  18 pages on the copy are clean.
+- Use `func.count(ECMAttempt.id)` (or `with_entities`) for future counts, not
+  `query(ECMAttempt).count()`.
+
 ### 6. One query instead of one per superseded attempt
 
 **Problem.** `recalculate_composite_t_level`
@@ -461,7 +490,16 @@ attempt that superseded it, where the latter completed fewer curves. Preserve
 the current behaviour exactly, including the skip of attempts with `b1 <= 0`
 and the raw parametrization for leftovers.
 `get_current_t_level_from_attempts(attempts, starting_t_level)` is also called
-from `admin/maintenance.py` and `services/work_assignment.py`; keep it working.
+from `admin/maintenance.py`; keep it working. (`services/work_assignment.py`
+no longer calls it: the legacy `GET /work` was removed on 2026-11-23.)
+
+Restrict the leftover self-join to stage-1 attempts (`b2 = 0`). Completing a
+residue also supersedes other clients' stage-2 attempts on the same residue
+(the orphan sweep in `complete_residue`). Today such an orphan with more
+curves than the winner earns B1-only leftover credit, on top of the real
+stage 1's leftover for the same curves. This was found by the 2026-11-23
+review. On the copy, none of the 5,122 leftover credits come from an orphan,
+so adding the condition changes no stored t-level.
 
 Delete the residue-based branch (the loop over `completed_residues`) rather
 than port it.
@@ -579,6 +617,18 @@ at the default of 4 on SSD storage biases the planner toward sequential scans;
 aggregates to disk at `work_mem = 4MB`; items 2–4 remove those queries, so
 leave `work_mem` alone.
 
+**Checked 2026-11-23, no change made.** Production reports `shared_buffers`
+128MB, `work_mem` 4MB, `random_page_cost` 4, `effective_cache_size` 4GB and
+`max_connections` 100. All are defaults. On the copy, every SELECT from the 13
+dashboard pages (71 distinct statements) was planned under `random_page_cost`
+4 and 1.1, with the other settings as in production. Of the 14 plans that
+change, 8 get faster, 1 stays the same and 5 get slower. The 5 include the 365-day
+leaderboard (90 → 119 ms) and the admin dashboard counts (14 → 28 ms). The
+changed plans total 244 ms at 4 and 278 ms at 1.1. That is no gain, so the
+setting stays. The server is shared with aliquot-tracker and opn-tracker; any
+later change should be `ALTER DATABASE ecm_distributed SET ...`, not
+server-wide.
+
 ### 10. Group-order calculation on factor submissions
 
 **Problem.** `FactorService.add_factor` (`app/services/factors.py`, called
@@ -667,7 +717,7 @@ After deploying index migrations, run `ANALYZE` once on `composites`,
    unconditional drops.
 2. Item 1 (deployed 2026-11-23, with the stale t-levels recalculated). The
    restarts happen about every 20 hours, so item 7 can follow on its own.
-3. Item 5, then item 6.
+3. Item 5 (implemented 2026-11-23), then item 6.
 4. Item 10.
 5. Item 4.
 6. Items 7–9 as Kyle decides. Item 8's unconditional drops can go with step 1.

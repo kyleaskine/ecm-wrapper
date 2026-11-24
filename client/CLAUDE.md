@@ -438,6 +438,17 @@ Supports: lowercase/uppercase e, decimals (2.6e8), explicit + sign (26e+7)
 
 ## Recent Client Bug Fixes
 
+### `--b2 -1` Sent as None (2026-11)
+`-1` is the client's "GMP-ECM default B2" sentinel. Only the work loop's submit
+(`work_modes/base.py`) converted it, and other paths copy `args.b2` into results
+unchanged. `APIClient.build_submission_payload()` now sends `-1` as `None`, as
+does `resend_failed.py`'s rebuild of old saved results. Queued payloads built
+before the change still carry `-1` and rely on the server's normalization. The
+server also normalizes `-1` to `None` (`schemas/submit.py`) and rejects other
+negative B2. Before that, one such attempt failed every
+recalculation, and the composite's t-level was stored as 0. Test:
+`tests/test_api_client.py::test_default_b2_sentinel_sent_as_none`.
+
 ### Work Assignment Held When Only Submission Fails (2026-07)
 - **Problem**: the work loop had one failure path. `submit_results()` returning
   `False` because the network was down (result safely queued) was treated

@@ -178,7 +178,8 @@ ecm-wrapper/
 - `GET /health` - Health check
 - `GET /docs` - Interactive API documentation
 - `POST /api/v1/submit_result` - Submit factorization results
-- `GET /api/v1/work` - Get work assignments
+- `GET /api/v1/ecm-work` - Get an ECM work assignment
+- `GET /api/v1/p1-work` - Get a P-1/P+1 work assignment
 
 ### Admin (Requires X-Admin-Key header)
 - `GET /api/v1/admin/login` - Admin login page

@@ -135,7 +135,7 @@ class TestPickAndLockRecheck:
         assert picked is not None
         assert picked.id == free["id"]
 
-        # Legacy /work service does not check residues
+        # Without check_residues the pending residue is ignored
         picked = pick_and_lock_composite(
             db_session, self._ordered_query(db_session), check_residues=False
         )

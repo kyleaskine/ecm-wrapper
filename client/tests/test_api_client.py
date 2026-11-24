@@ -184,6 +184,22 @@ def test_default_parametrization():
     pass  # Test passed
 
 
+def test_default_b2_sentinel_sent_as_none():
+    """--b2 -1 (GMP-ECM default) must reach the server as None, not -1"""
+    api_client = APIClient("http://localhost:8000")
+
+    for b2, expected in ((-1, None), (None, None), (0, 0), (5000000, 5000000)):
+        payload = api_client.build_submission_payload(
+            composite='12345',
+            client_id='test-client',
+            method='ecm',
+            program='gmp-ecm',
+            program_version='7.0.6',
+            results={'b1': 50000, 'b2': b2, 'curves_completed': 10}
+        )
+        assert payload['parameters']['b2'] == expected, b2
+
+
 def test_integration_with_base_wrapper():
     """Test that APIClient integrates with BaseWrapper (with lazy loading)"""
     try:
@@ -242,6 +258,7 @@ def main():
         test_build_payload_with_multiple_factors,
         test_save_failed_submission,
         test_default_parametrization,
+        test_default_b2_sentinel_sent_as_none,
         test_integration_with_base_wrapper
     ]
 

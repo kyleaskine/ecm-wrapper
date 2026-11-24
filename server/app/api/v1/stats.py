@@ -1,7 +1,7 @@
 from typing import List, Optional, Literal, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
-from sqlalchemy.orm import Session, defer
+from sqlalchemy.orm import Session
 from sqlalchemy import and_, case, func
 
 from ...database import get_db
@@ -56,8 +56,7 @@ def get_composite_stats(
         status = "composite"
 
     # Get ECM work summary (exclude superseded stage 1 attempts)
-    # defer raw_output: large blob, only aggregate stats are needed
-    attempts = db.query(ECMAttempt).options(defer(ECMAttempt.raw_output)).filter(
+    attempts = db.query(ECMAttempt).filter(
         ECMAttempt.composite_id == comp.id,
         ECMAttempt.superseded_by.is_(None)
     ).all()

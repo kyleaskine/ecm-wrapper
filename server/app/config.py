@@ -67,7 +67,6 @@ class Settings(BaseSettings):
     reload: bool = False
 
     # Work assignment
-    default_work_timeout_minutes: int = Field(default=60, ge=1, le=1440, description="Work timeout in minutes")
     max_work_items_per_client: int = Field(default=12, ge=1, le=100, description="Max work items per client")
 
     # T-level calculation

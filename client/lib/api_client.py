@@ -266,6 +266,13 @@ class APIClient:
                 })
                 self.logger.debug(f"  Added factor: {factor[:20]}... with sigma: {factor_sigma}")
 
+        # -1 is the client's "GMP-ECM default B2" sentinel (lib/arg_parser.py);
+        # the server stores the default as None. Several paths copy args.b2
+        # into results unchanged, so normalize here for all of them.
+        b2 = results.get('b2')
+        if b2 == -1:
+            b2 = None
+
         payload = {
             'composite': composite,
             'project': project,
@@ -275,7 +282,7 @@ class APIClient:
             'program_version': program_version,
             'parameters': {
                 'b1': results.get('b1'),
-                'b2': results.get('b2'),
+                'b2': b2,
                 'curves': results.get('curves_requested'),
                 'parametrization': results.get('parametrization', 3),  # Default to param 3
                 'sigma': results.get('sigma')
@@ -404,65 +411,6 @@ class APIClient:
 
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Failed to request work: {e}")
-            return None
-
-    def get_pm1_work(
-        self,
-        client_id: str,
-        min_digits: Optional[int] = None,
-        max_digits: Optional[int] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Request P-1 factorization work from server.
-
-        Calls the /work endpoint with methods=["pm1"] to request P-1 specific
-        work assignments. The server determines optimal B1/B2 parameters.
-
-        Args:
-            client_id: Client identifier
-            min_digits: Minimum composite digit length filter
-            max_digits: Maximum composite digit length filter
-
-        Returns:
-            Work assignment dictionary with keys:
-                - work_id: Work assignment ID
-                - composite: Number to factor
-                - method: 'pm1'
-                - parameters: {b1, b2, curves=1}
-                - expires_at: Expiration timestamp
-            Returns None if no work available or on error
-        """
-        url = f"{self.api_endpoint}/work"
-
-        params: Dict[str, Any] = {
-            'client_id': client_id,
-            'methods': 'pm1',
-        }
-        if min_digits is not None:
-            params['min_digits'] = min_digits
-        if max_digits is not None:
-            params['max_digits'] = max_digits
-
-        try:
-            response = requests.get(url, params=params, timeout=self.timeout)
-            response.raise_for_status()
-
-            data = response.json()
-
-            if data.get('work_id'):
-                composite = data.get('composite', '')
-                self.logger.info(
-                    f"Received PM1 work assignment: composite {composite[:30]}... "
-                    f"(work_id={data['work_id']}, B1={data.get('parameters', {}).get('b1')})"
-                )
-                return data
-            else:
-                message = data.get('message', 'No PM1 work available')
-                self.logger.info(f"No PM1 work available: {message}")
-                return None
-
-        except requests.exceptions.RequestException as e:
-            self.logger.error(f"Failed to request PM1 work: {e}")
             return None
 
     def get_p1_work(

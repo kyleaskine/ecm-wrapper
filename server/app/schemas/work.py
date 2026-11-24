@@ -1,23 +1,6 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any, Literal
+from typing import Optional, Dict, Any, Literal
 from datetime import datetime
-
-class WorkRequest(BaseModel):
-    client_id: str = Field(..., description="Client requesting work")
-    methods: List[Literal["ecm", "pm1", "pp1", "qs", "nfs"]] = Field(
-        default=["ecm", "pm1"], description="Preferred methods"
-    )
-    max_digits: Optional[int] = Field(default=None, description="Maximum digits to handle")
-    min_digits: Optional[int] = Field(default=None, description="Minimum digits to handle")
-
-class WorkResponse(BaseModel):
-    work_id: Optional[str] = Field(default=None, description="Unique work identifier")
-    composite: Optional[str] = Field(default=None, description="Number to factor")
-    method: Optional[Literal["ecm", "pm1", "pp1", "qs", "nfs"]] = Field(default=None, description="Assigned method")
-    parameters: Optional[Dict[str, Any]] = Field(default=None, description="Method parameters")
-    estimated_time_minutes: Optional[int] = Field(default=None, description="Estimated completion time")
-    expires_at: Optional[datetime] = Field(default=None, description="Work assignment expiration")
-    message: Optional[str] = Field(default=None, description="Status message or reason for no work")
 
 class ManualReservationRequest(BaseModel):
     """Request schema for manually reserving composites for external work (e.g., NFS)"""

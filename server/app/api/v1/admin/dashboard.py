@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
-from sqlalchemy import and_, distinct
+from sqlalchemy import and_, distinct, func
 from sqlalchemy.orm import Session
 
 from ....constants import ACTIVE_WORK_STATUSES
@@ -53,9 +53,9 @@ def get_admin_summary(
     ).count()
 
     # Recent activity
-    recent_attempts = db.query(ECMAttempt).filter(
+    recent_attempts = db.query(func.count(ECMAttempt.id)).filter(
         ECMAttempt.created_at >= last_24h
-    ).count()
+    ).scalar() or 0
     recent_factors = db.query(Factor).filter(Factor.created_at >= last_24h).count()
 
     # Active clients

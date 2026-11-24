@@ -18,6 +18,7 @@ Scenarios:
 """
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -1563,7 +1564,8 @@ def _gmp_residue_line(n: int, b1: int = 50000, sigma: int = 12345,
 
 
 def _add_attempt(db, composite_id: int, b1: int = B1, b2: int = 0,
-                 checksum: str = None, superseded_by: int = None) -> int:
+                 checksum: Optional[str] = None,
+                 superseded_by: Optional[int] = None) -> int:
     attempt = ECMAttempt(
         composite_id=composite_id,
         client_id="gpu-producer",

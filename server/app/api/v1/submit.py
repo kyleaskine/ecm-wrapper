@@ -623,7 +623,8 @@ def submit_result(
                     composite, linked_residue, result_request.method,
                     result_request.client_id
                 )
-            db.refresh(attempt)
+            # No refresh needed: the INSERT's RETURNING already loaded id and
+            # the server-default timestamps.
 
             # Handle factor discovery - support both single and multiple factors
             factor_status: Literal["new_factor", "known_factor", "no_factor", "duplicate"] = "no_factor"

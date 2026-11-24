@@ -211,8 +211,8 @@ This was the behaviour before 2026-11.
 
 ### Failures and priors
 - **Failure:** a failed calculation returns `None`. `recalculate_composite_t_level`,
-  the maintenance recalculations and the legacy `/work` service then keep the
-  composite's existing `current_t_level`. (Before 2026-11, failures wrote the
+  and the maintenance recalculations then keep the composite's existing
+  `current_t_level`. (Before 2026-11, failures wrote the
   prior t-level, which erased recorded progress.)
 - **Priors outside 5–100:** the CLI's `-w` only accepts 5–100. For a prior
   outside that range, the calculator works out the attempts alone and stores
@@ -300,8 +300,8 @@ Use this, never the recalculate-all endpoint.
   residues for `/ecm-work` and `/p1-work`) with *fresh statements*. Every assignment writer
   holds the composite row lock until commit, so once we hold the lock a fresh
   snapshot is guaranteed to see a committed competitor; on conflict move to the
-  next candidate. Used by `/ecm-work`, `/p1-work`, and the legacy `/work`
-  service (`WorkAssignmentService`, which previously had no locking at all);
+  next candidate. Used by `/ecm-work` and `/p1-work` (the legacy `GET /work`,
+  which also used it, was removed in 2026-11);
   the admin manual reservation takes a plain `FOR UPDATE` on the composite row
   so every assignment writer upholds the invariant.
 - **Fix (schema)**: partial unique index

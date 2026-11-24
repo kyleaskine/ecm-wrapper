@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 from slowapi import Limiter
-from sqlalchemy.orm import Session, defer
+from sqlalchemy.orm import Session
 from sqlalchemy import desc, func, case, distinct
 from typing import Any, List, Optional
 from datetime import datetime, timedelta
@@ -82,7 +82,11 @@ def dashboard(
     fully_factored = stats_query.filter(Composite.is_fully_factored == True).count()
 
     # Total attempts - need to join through composites if filtering by priority/project
-    attempts_query = db.query(ECMAttempt).filter(ECMAttempt.superseded_by.is_(None))
+    # Count ids, not entities: Query.count() on the entity selects every
+    # column (raw_output included) in a subquery
+    attempts_query = db.query(func.count(ECMAttempt.id)).select_from(ECMAttempt).filter(
+        ECMAttempt.superseded_by.is_(None)
+    )
     if priority is not None or project is not None:
         attempts_query = attempts_query.join(Composite)
         if priority is not None:
@@ -91,7 +95,7 @@ def dashboard(
             attempts_query = attempts_query.join(
                 ProjectComposite, ProjectComposite.composite_id == Composite.id
             ).filter(ProjectComposite.project_id == project)
-    total_attempts = attempts_query.count()
+    total_attempts = attempts_query.scalar() or 0
 
     # Total factors count (filtered by project if specified)
     factors_count_query = db.query(Factor)
@@ -523,9 +527,7 @@ def get_attempts_fragment_public(
     if not composite:
         raise HTTPException(status_code=404, detail="Composite not found")
 
-    attempts = db.query(ECMAttempt).options(
-        defer(ECMAttempt.raw_output)
-    ).filter(
+    attempts = db.query(ECMAttempt).filter(
         ECMAttempt.composite_id == composite_id
     ).order_by(desc(ECMAttempt.created_at)).limit(limit).all()
 
@@ -641,12 +643,12 @@ def recent_curves(
         factor_counts_by_attempt = prefetch_factor_counts_for_attempts(db, attempts)
     else:
         # Get individual attempts
-        query = db.query(ECMAttempt).options(defer(ECMAttempt.raw_output)).filter(ECMAttempt.superseded_by.is_(None))
+        query = db.query(ECMAttempt).filter(ECMAttempt.superseded_by.is_(None))
 
         if client_id:
             query = query.filter(ECMAttempt.client_id == client_id)
 
-        total = query.count()
+        total = query.with_entities(func.count(ECMAttempt.id)).scalar() or 0
         attempts = query.order_by(desc(ECMAttempt.created_at)).offset(offset).limit(limit).all()
         factor_counts_by_attempt = {}
 

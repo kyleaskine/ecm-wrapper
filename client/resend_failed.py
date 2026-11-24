@@ -132,7 +132,8 @@ class FailedResultsResender(BaseWrapper):
                 "program_version": data.get("program_version"),
                 "parameters": {
                     "b1": data.get("b1"),
-                    "b2": data.get("b2"),
+                    # -1 is the client's "GMP-ECM default" sentinel
+                    "b2": None if data.get("b2") == -1 else data.get("b2"),
                     "curves": data.get("curves_requested"),
                     "parametrization": data.get("parametrization", 3),
                     "sigma": data.get("sigma")

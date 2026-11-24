@@ -38,7 +38,9 @@ class ECMAttempt(Base, TimestampMixin):
 
     # Status and metadata
     status: Mapped[str] = mapped_column(String(20), default='completed', nullable=False)  # 'running', 'completed', 'failed', 'timeout'
-    raw_output: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # Store full output for debugging
+    # Full program output, for debugging only: averages ~440 KB and nothing
+    # displays it, so it is deferred and loads only when read explicitly.
+    raw_output: Mapped[Optional[str]] = mapped_column(Text, nullable=True, deferred=True)
 
     # Work assignment fields
     assigned_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

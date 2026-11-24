@@ -86,7 +86,7 @@ gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
 
 ### Core ECM Coordination
 - `POST /api/v1/composites/bulk` - Submit numbers for factorization with target t-levels
-- `GET /api/v1/work/request` - Request ECM work assignments
+- `GET /api/v1/ecm-work` - Request an ECM work assignment (`/p1-work` for P-1/P+1)
 - `POST /api/v1/results/ecm` - Submit ECM attempt results and t-level progress
 - `GET /api/v1/composites` - List composites and their progress
 
@@ -130,7 +130,7 @@ curl -X POST http://localhost:8000/api/v1/composites/bulk \
   -d '[{"number": "12345678901234567890123456789", "target_t_level": 25.0, "priority": 1}]'
 
 # Client requests work
-curl http://localhost:8000/api/v1/work/request?client_id=my_client
+curl "http://localhost:8000/api/v1/ecm-work?client_id=my_client"
 
 # Submit ECM results
 curl -X POST http://localhost:8000/api/v1/results/ecm \

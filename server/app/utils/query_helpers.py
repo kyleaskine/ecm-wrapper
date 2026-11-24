@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Any, List, Dict
 
 from sqlalchemy import and_, desc, func, distinct, ColumnElement
-from sqlalchemy.orm import Session, defer, joinedload
+from sqlalchemy.orm import Session, joinedload
 
 from ..constants import ACTIVE_WORK_STATUSES, PENDING_RESIDUE_STATUSES
 
@@ -234,7 +234,7 @@ def get_recent_attempts(db: Session, limit: int = 100, method: Optional[str] = N
     """
     from ..models.attempts import ECMAttempt
 
-    query = db.query(ECMAttempt).options(defer(ECMAttempt.raw_output))
+    query = db.query(ECMAttempt)
 
     if method:
         query = query.filter(ECMAttempt.method == method)
@@ -337,9 +337,7 @@ def get_aggregated_attempts(
     # Cap total loaded attempts to avoid memory issues on large datasets.
     # Most recent attempts across all composites - simple and fast.
     max_detail_attempts = limit * attempts_per_composite
-    attempts_query = db.query(ECMAttempt).options(
-        defer(ECMAttempt.raw_output)
-    ).filter(
+    attempts_query = db.query(ECMAttempt).filter(
         ECMAttempt.composite_id.in_(composite_ids)
     )
     if method:
@@ -465,9 +463,7 @@ def get_composite_with_details(db: Session, composite_id: int):
     if not composite:
         return None
 
-    attempts = db.query(ECMAttempt).options(
-        defer(ECMAttempt.raw_output)
-    ).filter(
+    attempts = db.query(ECMAttempt).filter(
         ECMAttempt.composite_id == composite_id
     ).order_by(desc(ECMAttempt.created_at)).limit(50).all()
 
@@ -533,9 +529,9 @@ def get_summary_statistics(db: Session) -> dict:
         "active_work": db.query(WorkAssignment).filter(
             WorkAssignment.status.in_(ACTIVE_WORK_STATUSES)
         ).count(),
-        "recent_attempts_24h": db.query(ECMAttempt).filter(
+        "recent_attempts_24h": db.query(func.count(ECMAttempt.id)).filter(
             ECMAttempt.created_at >= last_24h
-        ).count(),
+        ).scalar() or 0,
         "recent_factors_24h": db.query(Factor).filter(
             Factor.created_at >= last_24h
         ).count(),

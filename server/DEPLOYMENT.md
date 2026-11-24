@@ -201,7 +201,8 @@ docker-compose -f docker-compose.simple.yml exec -T postgres \
 - `GET /` - API information
 - `GET /docs` - Interactive API documentation
 - `POST /api/v1/submit_result` - Submit factorization results
-- `GET /api/v1/work` - Get work assignments
+- `GET /api/v1/ecm-work` - Get an ECM work assignment
+- `GET /api/v1/p1-work` - Get a P-1/P+1 work assignment
 - All work management endpoints (`/api/v1/work/*`)
 
 ### Admin Endpoints (Require X-Admin-Key header)

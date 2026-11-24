@@ -4,7 +4,7 @@ Admin routes for managing ECM attempts (curves).
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from sqlalchemy import desc, func
-from sqlalchemy.orm import Session, defer
+from sqlalchemy.orm import Session
 
 from ....database import get_db
 from ....dependencies import verify_admin_key, get_t_level_calculator
@@ -33,9 +33,7 @@ def get_attempts_fragment(
     if not composite:
         raise HTTPException(status_code=404, detail="Composite not found")
 
-    attempts = db.query(ECMAttempt).options(
-        defer(ECMAttempt.raw_output)
-    ).filter(
+    attempts = db.query(ECMAttempt).filter(
         ECMAttempt.composite_id == composite_id
     ).order_by(desc(ECMAttempt.created_at)).limit(limit).all()
 
