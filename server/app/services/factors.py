@@ -1,5 +1,6 @@
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
-from typing import Optional, List, Tuple
+from typing import NamedTuple, Optional, List, Tuple, Union
 from ..models.factors import Factor
 from ..models.composites import Composite
 from ..models.attempts import ECMAttempt
@@ -9,19 +10,31 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+class GroupOrderJob(NamedTuple):
+    """Inputs of one factor's group order calculation (see fill_group_orders)."""
+    factor_id: int
+    factor: str
+    sigma: Optional[str]          # ECM: the curve's sigma; None for P-1/P+1
+    parametrization: int          # ECM parametrization (0-3)
+    method: Optional[str]         # 'pm1'/'pp1' select p-1/p+1; else ECM
+
+
 class FactorService:
     @staticmethod
     def add_factor(db: Session, composite_id: int, factor: str, attempt_id: Optional[int] = None,
-                   sigma: Optional[str] = None, parametrization: Optional[int] = None,
-                   method: Optional[str] = None) -> Tuple[Factor, bool]:
+                   sigma: Optional[str] = None) -> Tuple[Factor, bool]:
         """
         Add a factor to a composite.
         Returns (factor, created) where created is True if new factor was added.
 
+        The group order is not calculated here: PARI/GP takes 40-330 ms and
+        this runs inside the submit transaction, under the composite's row
+        lock. Callers pass group_order_job() of a new factor to
+        fill_group_orders() once the transaction has committed.
+
         Args:
             sigma: The sigma value that found this factor (ECM only) - stored as string for large param 0 values
-            parametrization: ECM parametrization type (0-3) for group order calculation
-            method: Factorization method (ecm, pm1, pp1) - used for p-1/p+1 factorization
         """
         # Validate factor
         if not validate_integer(factor):
@@ -36,53 +49,12 @@ class FactorService:
         if existing:
             return existing, False
 
-        # Calculate group order if we have sigma (ECM factor)
-        group_order = None
-        group_order_factorization = None
-
-        if sigma is not None:
-            # ECM factor - calculate elliptic curve group order
-            # Get parametrization from attempt if not provided
-            if parametrization is None and attempt_id is not None:
-                attempt = db.query(ECMAttempt).filter(ECMAttempt.id == attempt_id).first()
-                if attempt and attempt.parametrization is not None:
-                    parametrization = attempt.parametrization
-
-            # Default to parametrization 3 if still not set
-            if parametrization is None:
-                parametrization = 3
-
-            try:
-                calculator = GroupOrderCalculator()
-                # sigma is already a string, no need to convert
-                result = calculator.calculate_group_order(factor, sigma, parametrization)
-                if result:
-                    group_order, group_order_factorization = result
-                    logger.info(f"Calculated group order for factor {factor[:20]}...: {group_order}")
-            except Exception as e:
-                logger.warning(f"Failed to calculate group order for factor {factor[:20]}...: {e}")
-
-        elif method in ("pm1", "pp1"):
-            # P-1/P+1 factor - calculate p-1 or p+1 factorization
-            try:
-                calculator = GroupOrderCalculator()
-                result = calculator.calculate_p1_order(factor, method)
-                if result:
-                    group_order, group_order_factorization = result
-                    label = "p-1" if method == "pm1" else "p+1"
-                    logger.info(f"Calculated {label} for factor {factor[:20]}...: {group_order}")
-            except Exception as e:
-                label = "p-1" if method == "pm1" else "p+1"
-                logger.warning(f"Failed to calculate {label} for factor {factor[:20]}...: {e}")
-
         # Add new factor
         new_factor = Factor(
             composite_id=composite_id,
             factor=factor,
             found_by_attempt_id=attempt_id,
             sigma=sigma,
-            group_order=group_order,
-            group_order_factorization=group_order_factorization
         )
 
         db.add(new_factor)
@@ -90,6 +62,56 @@ class FactorService:
         db.refresh(new_factor)
 
         return new_factor, True
+
+    @staticmethod
+    def group_order_job(factor: Factor, parametrization: Optional[int],
+                        method: Optional[str]) -> Optional[GroupOrderJob]:
+        """The group order calculation a factor needs, or None.
+
+        ECM factors (with a sigma) get the elliptic curve's group order, with
+        parametrization 3 when none is known; P-1 and P+1 factors get p-1 or
+        p+1 factored. parametrization and method describe the run that found
+        the factor: for a factor just added, the submission's own values.
+        """
+        if factor.sigma is not None:
+            return GroupOrderJob(factor.id, factor.factor, factor.sigma,
+                                 3 if parametrization is None else parametrization, method)
+        if method in ("pm1", "pp1"):
+            return GroupOrderJob(factor.id, factor.factor, None, 3, method)
+        return None
+
+    @staticmethod
+    def missing_group_order_job(db: Session, factor: Factor) -> Optional[GroupOrderJob]:
+        """The calculation for a stored factor that has no group order, or None.
+
+        Covers a background calculation that failed or was lost (the process
+        was killed before it ran). Uses the parametrization and method of the
+        attempt that found the factor.
+        """
+        if factor.group_order is not None:
+            return None
+        parametrization: Optional[int] = None
+        method: Optional[str] = None
+        if factor.found_by_attempt_id is not None:
+            attempt = db.query(ECMAttempt.parametrization, ECMAttempt.method).filter(
+                ECMAttempt.id == factor.found_by_attempt_id
+            ).first()
+            if attempt is not None:
+                parametrization, method = attempt.parametrization, attempt.method
+        return FactorService.group_order_job(factor, parametrization, method)
+
+    @staticmethod
+    def compute_group_order(job: GroupOrderJob) -> Optional[Tuple[str, Optional[str]]]:
+        """Run PARI/GP for one job. Returns (order, factorization) or None."""
+        try:
+            calculator = GroupOrderCalculator()
+            if job.sigma is not None:
+                return calculator.calculate_group_order(job.factor, job.sigma, job.parametrization)
+            if job.method in ("pm1", "pp1"):
+                return calculator.calculate_p1_order(job.factor, job.method)
+        except Exception as e:
+            logger.warning(f"Failed to calculate group order for factor {job.factor[:20]}...: {e}")
+        return None
 
     @staticmethod
     def get_factors_for_composite(db: Session, composite_id: int) -> List[Factor]:
@@ -114,6 +136,44 @@ class FactorService:
             factor_strings = [factor.factor for factor in factors]
             return verify_complete_factorization(composite.number, factor_strings)
 
-        except Exception as e:
-            # Log error but don't raise - verification failure should be handled gracefully
+        except Exception:
+            # Log but don't raise - verification failure should be handled gracefully
+            logger.exception(f"Factorization check failed for composite {composite_id}")
             return False
+
+
+def fill_group_orders(bind: Union[Engine, Connection], jobs: List[GroupOrderJob]) -> None:
+    """Calculate and store group orders after the submission has committed.
+
+    Runs as a background task of /submit_result, after the response is sent,
+    so PARI/GP no longer runs under the composite's row lock. It reads only
+    the job's inputs and writes only the two group order columns of a factor
+    row that already exists, each in its own short transaction. A failed
+    calculation leaves them NULL, as before.
+
+    Args:
+        bind: The request session's engine (tests bind a different one)
+        jobs: From FactorService.group_order_job()
+    """
+    for job in jobs:
+        result = FactorService.compute_group_order(job)
+        if not result:
+            continue
+        group_order, factorization = result
+        with Session(bind=bind) as db:
+            try:
+                updated = db.query(Factor).filter(
+                    Factor.id == job.factor_id,
+                    Factor.factor == job.factor,  # the row this job was made for
+                    Factor.group_order.is_(None),
+                ).update({
+                    Factor.group_order: group_order,
+                    Factor.group_order_factorization: factorization,
+                }, synchronize_session=False)
+                db.commit()
+                if updated:
+                    logger.info(f"Stored group order for factor {job.factor_id}: {group_order}")
+            except Exception:
+                db.rollback()
+                logger.exception(f"Failed to store group order for factor {job.factor_id}")
+

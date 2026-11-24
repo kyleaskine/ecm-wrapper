@@ -652,50 +652,6 @@ def get_recently_added_composites(
     return composites, total
 
 
-def batch_fetch_attempts_by_composite(
-    db: Session,
-    composite_ids: List[int],
-    exclude_superseded: bool = True
-) -> dict[int, list]:
-    """
-    Batch fetch ECM attempts for multiple composites in a single query.
-
-    This eliminates N+1 query patterns when processing multiple composites.
-
-    Args:
-        db: Database session
-        composite_ids: List of composite IDs to fetch attempts for
-        exclude_superseded: If True, exclude attempts that have been superseded
-                           (for accurate t-level calculations)
-
-    Returns:
-        Dictionary mapping composite_id to list of ECMAttempt objects
-    """
-    from ..models.attempts import ECMAttempt
-
-    if not composite_ids:
-        return {}
-
-    query = db.query(ECMAttempt).filter(
-        ECMAttempt.composite_id.in_(composite_ids)
-    )
-
-    # Exclude superseded attempts for t-level calculations
-    if exclude_superseded:
-        query = query.filter(ECMAttempt.superseded_by.is_(None))
-
-    all_attempts = query.all()
-
-    # Group by composite_id
-    attempts_by_composite: dict[int, list] = {}
-    for attempt in all_attempts:
-        if attempt.composite_id not in attempts_by_composite:
-            attempts_by_composite[attempt.composite_id] = []
-        attempts_by_composite[attempt.composite_id].append(attempt)
-
-    return attempts_by_composite
-
-
 def get_residues_filtered(
     db: Session,
     limit: int = 100,

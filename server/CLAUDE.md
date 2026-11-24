@@ -100,8 +100,17 @@ Stage 1 residue files for decoupled two-stage ECM:
 ### factors
 Discovered factors with discovery methods:
 - `sigma`: Sigma value that found this factor (for reproducibility)
-- `group_order`: Calculated elliptic curve group order (via PARI/GP)
+- `group_order`: Calculated elliptic curve group order (via PARI/GP); p-1 or p+1 for P-1/P+1 factors
 - `group_order_factorization`: Prime factorization of the group order
+- Both are filled after `/submit_result` commits, by a background task
+  (`fill_group_orders()` in `app/services/factors.py`), not under the composite's
+  row lock. They are NULL for a moment after the response, and stay NULL if
+  PARI/GP fails or the process dies before the task runs. Nothing retries
+  automatically: `scripts/backfill_group_orders.py [--days N] [--apply]`
+  recalculates them (dry run by default). Factors of a few digits always fail
+  (the curve is degenerate mod such a small prime).
+- An ECM factor's group order uses the parametrization from its own sigma
+  prefix (`"1:123"`) when it has one, else the submission's.
 
 ### Other tables
 - `work_assignments`: Active work assignments to clients
@@ -229,7 +238,15 @@ recalculation for each listed composite. Each composite gets its own
 transaction and holds the composite row lock. It changes only
 `current_t_level`. The default is a dry run. The image does not contain
 `scripts/`, so `docker cp` the script into `/app` first (see its docstring).
-Use this, never the recalculate-all endpoint.
+Use this on production, never the recalculate-all endpoint (hours there).
+
+Every path computes a composite's t-level with
+`TLevelCalculator.calculate_composite_t_level()`. That covers submissions,
+the scripts, the single-composite button, `POST
+/admin/composites/calculate-t-levels` and the background recalculate-all. It
+counts unsuperseded ECM attempts, partial-supersession leftovers and
+`prior_t_level`. Before 2026-11-24 the two bulk admin paths skipped
+leftovers and lowered composites with a partial stage 2.
 
 ## Recent Server Bug Fixes
 

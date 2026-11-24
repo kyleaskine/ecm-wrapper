@@ -15,7 +15,6 @@ from ....database import get_db
 from ....dependencies import verify_admin_key, get_composite_service
 from ....services.composites import CompositeService
 from ....utils.transactions import transaction_scope
-from ....utils.query_helpers import batch_fetch_attempts_by_composite
 from ....constants import PENDING_RESIDUE_STATUSES
 
 router = APIRouter()
@@ -72,12 +71,6 @@ def calculate_t_levels_for_all_composites(
     updated_count = 0
     current_t_updated = 0
 
-    # Batch fetch all attempts for these composites (eliminates N+1 queries)
-    composite_ids = [c.id for c in composites]
-    attempts_by_composite = batch_fetch_attempts_by_composite(
-        db, composite_ids, exclude_superseded=True
-    )
-
     with transaction_scope(db, "recalculate_t_levels"):
         for composite in composites:
             try:
@@ -90,14 +83,9 @@ def calculate_t_levels_for_all_composites(
                     )
                     composite.target_t_level = target_t
 
-                # Recalculate current t-level from existing attempts (already fetched)
-                # Use prior_t_level as starting point if set
-                previous_attempts = attempts_by_composite.get(composite.id, [])
-
-                starting_t = composite.prior_t_level or 0.0
-                current_t = calculator.get_current_t_level_from_attempts(
-                    previous_attempts, starting_t_level=starting_t
-                )
+                # Same calculation as a submission: unsuperseded attempts,
+                # partial-supersession leftovers and the prior (two queries)
+                current_t = calculator.calculate_composite_t_level(db, composite)
                 # None: the calculation failed (logged); keep the stored value
                 if current_t is not None and current_t != composite.current_t_level:
                     composite.current_t_level = current_t
@@ -153,13 +141,6 @@ def _recalculate_all_t_levels_background():
 
         logger.info(f"Starting background t-level recalculation for {len(composites)} composites")
 
-        # Batch fetch all attempts upfront (eliminates N+1 queries)
-        composite_ids = [c.id for c in composites]
-        attempts_by_composite = batch_fetch_attempts_by_composite(
-            db, composite_ids, exclude_superseded=True
-        )
-        logger.info(f"Batch fetched attempts for {len(composite_ids)} composites")
-
         for idx, composite in enumerate(composites, 1):
             try:
                 # Calculate/update target t-level
@@ -170,14 +151,9 @@ def _recalculate_all_t_levels_background():
                 )
                 composite.target_t_level = target_t
 
-                # Recalculate current t-level from existing attempts (already fetched)
-                # Use prior_t_level as starting point if set
-                previous_attempts = attempts_by_composite.get(composite.id, [])
-
-                starting_t = composite.prior_t_level or 0.0
-                current_t = calculator.get_current_t_level_from_attempts(
-                    previous_attempts, starting_t_level=starting_t
-                )
+                # Same calculation as a submission: unsuperseded attempts,
+                # partial-supersession leftovers and the prior (two queries)
+                current_t = calculator.calculate_composite_t_level(db, composite)
                 # None: the calculation failed (logged); keep the stored value
                 if current_t is not None and current_t != composite.current_t_level:
                     composite.current_t_level = current_t

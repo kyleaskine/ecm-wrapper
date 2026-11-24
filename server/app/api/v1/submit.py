@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy.orm import Session, load_only
 from sqlalchemy.exc import IntegrityError
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 import logging
 from slowapi import Limiter
 
@@ -14,7 +14,7 @@ from ...models.factors import Factor
 from ...models.residues import ECMResidue
 from ...models.work_assignments import WorkAssignment
 from ...services.composites import CompositeService
-from ...services.factors import FactorService
+from ...services.factors import FactorService, GroupOrderJob, fill_group_orders
 from ...services.residue_manager import ResidueManager
 from ...utils.number_utils import (
     is_trivial_factor,
@@ -475,6 +475,7 @@ limiter = Limiter(key_func=get_real_client_ip)
 def submit_result(
     result_request: SubmitResultRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     composite_service: CompositeService = Depends(get_composite_service),
     residue_manager: ResidueManager = Depends(get_residue_manager)
@@ -628,6 +629,8 @@ def submit_result(
 
             # Handle factor discovery - support both single and multiple factors
             factor_status: Literal["new_factor", "known_factor", "no_factor", "duplicate"] = "no_factor"
+            # Group orders of new factors, calculated after the commit
+            group_order_jobs: List[GroupOrderJob] = []
             factors_to_process = []
 
             # Collect factors from new or legacy format
@@ -768,24 +771,34 @@ def submit_result(
 
                 # Second pass: add only the validated factors (excluding final prime)
                 for factor_str, factor_sigma in factors_to_add:
-                    # Parse sigma if it's a string (format: "3:12345")
+                    # Parse sigma if it's a string (format: "3:12345"). The
+                    # prefix is this factor's own curve type, which can differ
+                    # from the submission-level parametrization.
                     parsed_sigma = None
+                    factor_parametrization = parametrization
                     if factor_sigma:
                         sigma_str = str(factor_sigma)
                         if ':' in sigma_str:
-                            parsed_sigma = int(sigma_str.split(':', 1)[1])
+                            prefix, digits = sigma_str.split(':', 1)
+                            parsed_sigma = int(digits)
+                            if prefix.strip() in ('0', '1', '2', '3'):
+                                factor_parametrization = int(prefix)
                         else:
                             parsed_sigma = int(sigma_str)
 
-                    # Add factor to database (with parametrization for group order calculation)
+                    # Add factor to database
                     # Convert sigma to string for storage (supports large param 0 values)
                     sigma_for_storage = str(parsed_sigma) if parsed_sigma is not None else None
-                    _, factor_created = FactorService.add_factor(
-                        db, composite.id, factor_str, attempt.id, sigma_for_storage, parametrization,
-                        method=result_request.method
+                    new_factor, factor_created = FactorService.add_factor(
+                        db, composite.id, factor_str, attempt.id, sigma_for_storage
                     )
 
                     if factor_created:
+                        job = FactorService.group_order_job(
+                            new_factor, factor_parametrization, result_request.method
+                        )
+                        if job is not None:
+                            group_order_jobs.append(job)
                         new_factors_count += 1
                         logger.info(f"  ✓ Added new factor {new_factors_count}: {factor_str[:20]}...")
                     else:
@@ -861,6 +874,13 @@ def submit_result(
                     # Log the error but don't fail the whole submission
                     # The ECM result is still valid even if t-level update fails
                     logger.warning(f"Failed to update t-level for composite {composite.id}: {str(e)}")
+
+            # PARI/GP runs after the response is sent, so not under the
+            # composite's row lock. FastAPI only runs background tasks for a
+            # successful response, and this transaction commits before that
+            # (when the with block exits), so a rolled-back factor gets none.
+            if group_order_jobs:
+                background_tasks.add_task(fill_group_orders, db.get_bind(), group_order_jobs)
 
             return SubmitResultResponse(
                 status="success",

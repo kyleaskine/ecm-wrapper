@@ -8,7 +8,7 @@ import logging
 import math
 import sqlite3
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, NamedTuple, Tuple
 
 from ..utils.process_executor import ExternalProgramExecutor
 from . import t_level_library
@@ -17,6 +17,17 @@ logger = logging.getLogger(__name__)
 
 # (b1, b2, param) -> total curves; see _aggregate_curve_classes
 CurveTotals = Dict[Tuple[int, Optional[int], int], int]
+
+
+class CurveClassRow(NamedTuple):
+    """Summed curves of one (B1, B2, parametrization) class. It has the
+    attributes get_current_t_level_from_attempts reads from an attempt."""
+    curves_completed: int
+    b1: int
+    b2: Optional[int]
+    parametrization: Optional[int]
+    id: int  # first attempt in the class, for logging
+    method: str = 'ecm'
 
 
 class TLevelCalculator:
@@ -509,6 +520,76 @@ class TLevelCalculator:
         logger.warning("No t-level backend available (package or binary); t-level not calculated")
         return None
 
+    def _curve_classes_for_composite(self, db, composite_id: int) -> List["CurveClassRow"]:
+        """The composite's ECM work as one row per (B1, B2, parametrization) class.
+
+        - Unsuperseded ECM attempts, summed per class.
+        - Leftover stage-1 curves: a stage-1 attempt (B2 = 0) superseded by a
+          stage 2 that completed fewer curves keeps the difference, credited at
+          B1 only. Its parametrization is the stage 1's raw value (None becomes
+          3 in _aggregate_curve_classes, as for real attempts; 0 is a real
+          value). Superseded stage-2 attempts (orphans of a residue another
+          client completed) earn no leftover: their curves are the same curves
+          as the stage 1's.
+
+        Rows come in order of each class's first attempt id. Attempts with no
+        curves are left out here, as _aggregate_curve_classes would skip them;
+        invalid B1s are kept so that it logs them.
+        """
+        from sqlalchemy import func
+        from sqlalchemy.orm import aliased
+        from ..models.attempts import ECMAttempt
+
+        first_id = func.min(ECMAttempt.id)
+        unsuperseded = db.query(
+            first_id, ECMAttempt.b1, ECMAttempt.b2, ECMAttempt.parametrization,
+            func.sum(ECMAttempt.curves_completed)
+        ).filter(
+            ECMAttempt.composite_id == composite_id,
+            ECMAttempt.superseded_by.is_(None),
+            ECMAttempt.method == 'ecm',
+            ECMAttempt.curves_completed > 0,
+        ).group_by(
+            ECMAttempt.b1, ECMAttempt.b2, ECMAttempt.parametrization
+        ).order_by(first_id).all()
+
+        stage2 = aliased(ECMAttempt)
+        leftover_curves = func.sum(ECMAttempt.curves_completed - stage2.curves_completed)
+        leftovers = db.query(
+            first_id, ECMAttempt.b1, ECMAttempt.parametrization, leftover_curves
+        ).join(
+            stage2, stage2.id == ECMAttempt.superseded_by
+        ).filter(
+            ECMAttempt.composite_id == composite_id,
+            ECMAttempt.method == 'ecm',
+            ECMAttempt.b2 == 0,
+            stage2.curves_completed < ECMAttempt.curves_completed,
+        ).group_by(
+            ECMAttempt.b1, ECMAttempt.parametrization
+        ).order_by(first_id).all()
+
+        rows = [CurveClassRow(int(curves), b1, b2, param, attempt_id)
+                for attempt_id, b1, b2, param, curves in unsuperseded]
+        for attempt_id, b1, param, curves in leftovers:
+            rows.append(CurveClassRow(int(curves), b1, 0, param, attempt_id))
+            logger.info(
+                f"Partial supersession on composite {composite_id}: {curves} leftover "
+                f"stage-1 curves at B1={b1} (first stage 1 attempt {attempt_id}), "
+                f"credited at B1-only"
+            )
+        return rows
+
+    def calculate_composite_t_level(self, db, composite) -> Optional[float]:
+        """The composite's t-level from its ECM work and prior_t_level, not stored.
+
+        The one definition of a composite's t-level: unsuperseded attempts
+        plus partial-supersession leftovers (_curve_classes_for_composite),
+        starting from prior_t_level. Returns None if the calculation failed
+        (already logged); callers then keep the stored value.
+        """
+        attempts = self._curve_classes_for_composite(db, composite.id)
+        return self.get_current_t_level_from_attempts(attempts, composite.prior_t_level or 0.0)
+
     def recalculate_composite_t_level(self, db, composite) -> float:
         """
         Recalculate the t-level for a composite based on all its ECM attempts.
@@ -522,6 +603,9 @@ class TLevelCalculator:
         For partial supersession (stage 2 completed fewer curves than stage 1),
         credits leftover curves at B1-only.
 
+        Two queries, whatever the number of attempts: the curve totals per
+        (B1, B2, parametrization) class are summed in SQL.
+
         Args:
             db: Database session
             composite: Composite model instance
@@ -529,110 +613,8 @@ class TLevelCalculator:
         Returns:
             Updated t-level value (includes prior_t_level)
         """
-        from ..models.attempts import ECMAttempt
-        from ..models.residues import ECMResidue
-
-        # Get all ECM attempts for this composite, excluding superseded ones
-        attempts = db.query(ECMAttempt).filter(
-            ECMAttempt.composite_id == composite.id,
-            ECMAttempt.superseded_by.is_(None)  # Exclude superseded attempts
-        ).all()
-
-        # Create synthetic "attempts" for leftover curves (B1-only credit)
-        class LeftoverCurves:
-            """Synthetic attempt object for leftover curves from partial stage 2."""
-            def __init__(self, curves, b1, parametrization, source_desc):
-                self.curves_completed = curves
-                self.b1 = b1
-                self.b2 = 0  # B1-only (no stage 2)
-                self.parametrization = parametrization
-                self.method = 'ecm'
-                self._source = source_desc  # For logging
-
-        # Find partial supersession cases from ATTEMPTS directly
-        # This handles cases where stage 2 completed fewer curves than stage 1,
-        # regardless of whether residue records exist
-        superseded_attempts = db.query(ECMAttempt).filter(
-            ECMAttempt.composite_id == composite.id,
-            ECMAttempt.superseded_by.isnot(None),  # Has been superseded
-            ECMAttempt.method == 'ecm'
-        ).all()
-
-        for stage1 in superseded_attempts:
-            # Find the stage 2 attempt that superseded this one
-            stage2 = db.query(ECMAttempt).filter(
-                ECMAttempt.id == stage1.superseded_by
-            ).first()
-
-            if stage2 and stage2.curves_completed < stage1.curves_completed:
-                # Partial completion - stage 2 did fewer curves than stage 1
-                leftover = stage1.curves_completed - stage2.curves_completed
-                leftover_attempt = LeftoverCurves(
-                    leftover,
-                    stage1.b1,
-                    # Preserve the real parametrization: 0 is a valid value, so
-                    # `or 3` collapsed genuine param-0 leftovers into 3 - costing
-                    # them with the wrong probability model and (post-aggregation)
-                    # merging them into the p=3 bucket. None normalizes to 3
-                    # downstream, same as real attempts; the residue-leftover path
-                    # below already passes the raw value.
-                    stage1.parametrization,
-                    f"attempt {stage1.id}"
-                )
-                attempts.append(leftover_attempt)
-                logger.info(
-                    f"Partial supersession: stage1 attempt {stage1.id} had {stage1.curves_completed} curves, "
-                    f"stage2 attempt {stage2.id} completed {stage2.curves_completed}, "
-                    f"adding {leftover} leftover at B1-only"
-                )
-
-        # Also check completed residues for additional context (may have different curve counts)
-        completed_residues = db.query(ECMResidue).filter(
-            ECMResidue.composite_id == composite.id,
-            ECMResidue.status == 'completed',
-            ECMResidue.stage1_attempt_id.isnot(None)
-        ).all()
-
-        # Track which stage1 attempts we've already handled via direct supersession check
-        handled_stage1_ids = {a.id for a in superseded_attempts}
-
-        for residue in completed_residues:
-            # Skip if we already handled this stage1 attempt above
-            if residue.stage1_attempt_id in handled_stage1_ids:
-                continue
-
-            # Find the stage 1 attempt
-            stage1 = db.query(ECMAttempt).filter(
-                ECMAttempt.id == residue.stage1_attempt_id
-            ).first()
-
-            if stage1 and stage1.superseded_by:
-                # Find the stage 2 attempt that superseded it
-                stage2 = db.query(ECMAttempt).filter(
-                    ECMAttempt.id == stage1.superseded_by
-                ).first()
-
-                # Use residue.curve_count which may differ from stage1.curves_completed
-                if stage2 and stage2.curves_completed < residue.curve_count:
-                    # Partial completion - calculate leftover curves
-                    leftover = residue.curve_count - stage2.curves_completed
-                    leftover_attempt = LeftoverCurves(
-                        leftover,
-                        residue.b1,
-                        residue.parametrization,
-                        f"residue {residue.id}"
-                    )
-                    attempts.append(leftover_attempt)
-                    logger.info(
-                        f"Partial supersession: residue {residue.id} had {residue.curve_count} curves, "
-                        f"stage2 completed {stage2.curves_completed}, adding {leftover} leftover at B1-only"
-                    )
-
-        # Use prior_t_level as starting point (work done before import)
         starting_t_level = composite.prior_t_level or 0.0
-
-        # Calculate new t-level, starting from prior work
-        new_t_level = self.get_current_t_level_from_attempts(attempts, starting_t_level)
+        new_t_level = self.calculate_composite_t_level(db, composite)
 
         if new_t_level is None:
             # The calculation failed (already logged). Keep the last good value;

@@ -534,6 +534,34 @@ of attempt count. On the production copy it gives the same result as the
 pre-change code for every composite that has a superseded attempt.
 `tests/test_residue_autocomplete.py` passes.
 
+**Implemented 2026-11-23.**
+- `_curve_classes_for_composite()` sends two grouped queries: unsuperseded ECM
+  curves per (B1, B2, param) class, and leftover stage-1 curves (`b2 = 0`,
+  self-join to the superseder). Rows feed `get_current_t_level_from_attempts`
+  unchanged. Invalid B1s are still logged and skipped there. The residue
+  branch is deleted.
+- The pre-deletion query returned 10 rows on the copy, all
+  `adds_leftover = f`. The copy still has the five links that the production
+  repair removed.
+- Compared against the `HEAD` code on the copy: 44,297 composites (all 41,291
+  with a superseded attempt, 3,000 random others and the 20 busiest), with
+  0 mismatches. SELECTs per recalculation went from a median of 4 (p99 17,
+  max 93) to always 2. Over all 44,297, the time fell from 145 s to 97 s
+  (library backend).
+- `tests/test_t_level_recalculation.py` covers class sums, leftovers
+  (including param 0 and merging with a pending stage 1), the orphan rule and
+  the fixed statement count. The orphan and statement-count tests fail on the
+  old code.
+- Follow-up (2026-11-24 review). `get_current_t_level_from_attempts` had two
+  more callers: `POST /admin/composites/calculate-t-levels` and the
+  background recalculate-all in `admin/maintenance.py`. Both batch-fetched
+  unsuperseded attempts and never counted leftovers, so they lowered the 5,013
+  composites with a partial stage 2. All paths now call
+  `TLevelCalculator.calculate_composite_t_level()`, and the batch fetch helper
+  is gone. That costs 2 queries per composite instead of one bulk fetch, which
+  matters only for recalculate-all. `tests/test_admin_t_level_recalculation.py`
+  fails on the old code.
+
 ### 7. Worker recycling
 
 **Problem.** `docker/Dockerfile` starts uvicorn 0.24 with
@@ -678,6 +706,47 @@ before it returns, so time the response separately from the background step.
 `group_order` is filled in shortly afterwards for ECM, P-1 and P+1 factors.
 The existing tests pass.
 
+**Implemented 2026-11-23.**
+- `add_factor` no longer runs PARI/GP. Submit collects a `GroupOrderJob` per
+  new factor (`FactorService.group_order_job()`, which resolves the
+  parametrization as before). Just before returning, it adds
+  `fill_group_orders(db.get_bind(), jobs)` as a FastAPI background task.
+- That runs after the response is sent, and only for a successful response.
+  The submit transaction has committed by then: it commits when its `with`
+  block exits. Each factor's update is its own short transaction, matched on
+  id, factor value and `group_order IS NULL`.
+- Measured end to end with real `gp` (dev box, local PostgreSQL). The
+  submission's own commit, which releases the row lock, moved:
+
+  | Factor | Before | After |
+  |---|---|---|
+  | 20 digits | 44 ms | 15 ms |
+  | 45 digits | 129 ms | 15 ms |
+  | 56 digits | 304 ms | 15 ms |
+
+  The background step takes the same time as before. On one vCPU it still
+  competes for the CPU, but it no longer holds the lock or delays the
+  response.
+- Step 3 (one `gp` process for the order and its factorization) was not done.
+  The two calls have separate timeouts, 30 s and 10 s. A single process that
+  timed out while factoring would lose the order as well, which is kept
+  today.
+- `tests/test_group_order_after_commit.py` covers ECM and P-1, a failed
+  calculation, a known factor and a rolled-back submission, plus two tests
+  with real `gp` (skipped where it is not installed, as in CI). The
+  "after the commit" and "rolled back" tests fail on the old code.
+- The review's follow-ups (2026-11-24):
+  - A lost background task now leaves a NULL group order that nothing
+    retries. Before, the factor and its group order committed together. A
+    resubmission cannot heal it: an identical retry takes the duplicate path,
+    and a re-found factor is already divided out.
+    `scripts/backfill_group_orders.py` recalculates NULLs (dry run first). On
+    the copy, 287 factors had none, mostly from failures: 86 single-digit and
+    22 two-digit factors, which always fail.
+  - A factor's own sigma prefix now sets its curve type. Before, it was
+    dropped and the submission's parametrization was used.
+  - The pointless re-read of the attempt's parametrization is gone.
+
 ## 4. Decisions for Kyle
 
 1. **Licence** of the t-level library (item 1). Decided 2026-11-17: not a
@@ -717,8 +786,8 @@ After deploying index migrations, run `ANALYZE` once on `composites`,
    unconditional drops.
 2. Item 1 (deployed 2026-11-23, with the stale t-levels recalculated). The
    restarts happen about every 20 hours, so item 7 can follow on its own.
-3. Item 5 (implemented 2026-11-23), then item 6.
-4. Item 10.
+3. Item 5, then item 6 (both implemented 2026-11-23).
+4. Item 10 (implemented 2026-11-23).
 5. Item 4.
 6. Items 7–9 as Kyle decides. Item 8's unconditional drops can go with step 1.
    Its conditional drops wait for usage numbers collected after step 5.
